@@ -64,6 +64,10 @@ build tools) and **CMake 3.21+**.
 
 ## Getting it running
 
+### Prebuilt
+
+The easiest way. Download the archive from the [Releases](https://github.com/SanTertrust/mgmp/releases).
+
 ### 1. Build
 
 ```powershell
