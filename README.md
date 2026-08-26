@@ -40,7 +40,7 @@ What that means in practice:
   players in mind, but that has never actually been tested. Assume two.
 - **The house is not shared.** Breeding, furniture and everything you do at
   home is yours alone. Only the adventure is co-op. This was a deliberate
-  decision, not an oversight.
+  decision, not an oversight. So, make sure to join the host **while they are in the Adventure mode**.
 - **It is pinned to one version of the game.** The mod tries hard to survive a
   game update on its own, but a big patch may still break it until someone
   updates it. See [When the game updates](#when-the-game-updates).
