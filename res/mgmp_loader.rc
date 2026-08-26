@@ -1,0 +1,2 @@
+// The loader half. See mgmp_dll.rc for why this is a separate file.
+#include "mgmp_version.rc"

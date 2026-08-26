@@ -1,0 +1,52 @@
+#include <winver.h>
+
+#ifndef MGMP_RC_FILEVER
+#define MGMP_RC_FILEVER     0,26,0,0
+#define MGMP_RC_FILEVER_STR "0.26.0.0"
+#endif
+
+#ifdef MGMP_RC_DLL
+#  define MGMP_RC_INTERNAL   "mgmp"
+#  define MGMP_RC_ORIGINAL   "mgmp.dll"
+#  define MGMP_RC_DESC       "Mewgenics co-op multiplayer mod"
+#  define MGMP_RC_FILETYPE   VFT_DLL
+#else
+#  define MGMP_RC_INTERNAL   "mgmp_loader"
+#  define MGMP_RC_ORIGINAL   "mgmp_loader.exe"
+#  define MGMP_RC_DESC       "Mewgenics co-op multiplayer mod loader"
+#  define MGMP_RC_FILETYPE   VFT_APP
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    MGMP_RC_FILEVER
+ PRODUCTVERSION MGMP_RC_FILEVER
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS      VS_FF_DEBUG
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       MGMP_RC_FILETYPE
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"          // US English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "mgmp"
+            VALUE "FileDescription",  MGMP_RC_DESC
+            VALUE "FileVersion",      MGMP_RC_FILEVER_STR
+            VALUE "InternalName",     MGMP_RC_INTERNAL
+            VALUE "LegalCopyright",   "Fan-made mod. Mewgenics is by Tyler Glaiel and Edmund McMillen."
+            VALUE "OriginalFilename", MGMP_RC_ORIGINAL
+            VALUE "ProductName",      "mgmp -- Mewgenics multiplayer"
+            VALUE "ProductVersion",   MGMP_RC_FILEVER_STR
+            VALUE "Comments",         "Adds two-player co-op to a locally installed copy of Mewgenics. Hooks the game's own functions in-process; not affiliated with the developers or publisher."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

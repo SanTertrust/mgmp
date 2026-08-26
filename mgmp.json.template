@@ -1,0 +1,27 @@
+{
+  "game": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Mewgenics\\Mewgenics.exe",
+  "log": "mgmp_trace.log",
+
+  "net": {
+    "role": "off",
+    "addr": "127.0.0.1",
+    "port": 27600,
+    "control": "auto"
+  },
+
+  "ui": {
+    "enabled": true,
+    "visible": true,
+    "key": "F1"
+  },
+
+  "debug": {
+    "follow": true,
+    "follow_delay_ms": 0,
+    "join_barrier": true,
+    "desync_halt": true,
+    "record": false,
+    "record_note": "",
+    "replay": ""
+  }
+}

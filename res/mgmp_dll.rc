@@ -1,0 +1,6 @@
+// The DLL half of the shared version block. Two one-line files rather than a
+// per-source COMPILE_DEFINITIONS, because source properties are directory-
+// scoped in CMake and both targets sit in the same directory -- the define
+// would leak into the loader and misname it.
+#define MGMP_RC_DLL
+#include "mgmp_version.rc"
