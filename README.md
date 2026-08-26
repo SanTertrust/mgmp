@@ -18,6 +18,8 @@ Thanks [Claude](https://claude.ai/). The human didn't write even a single line o
 
 **It works, and it has been played over the internet for a full run.**
 
+Here's [gameplay footage](https://youtu.be/IHc-92L6mGg) from a slightly older build.
+
 There is still a probability of encountering desynchronization, so report host logs AND clients logs.
 
 What that means in practice:
