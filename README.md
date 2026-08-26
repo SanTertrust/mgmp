@@ -11,7 +11,8 @@ It is not an official feature and has nothing to do with the developers of
 Mewgenics. It is a hobby project built by reading the game's compiled code.
 
 Thanks [Claude](https://claude.ai/). The human didn't write even a single line of code.
---
+
+---
 
 ## Status
 
