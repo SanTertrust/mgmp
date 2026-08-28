@@ -2,6 +2,7 @@
 
 #include "mgmp_addresses.h"
 #include "mgmp_resolve.h"
+#include "mgmp_hooks.h"     // hooks_is_live, for the two blob hooks this needs
 #include "mgmp_config.h"
 #include "mgmp_tuning.h"
 #include "mgmp_log.h"
@@ -239,26 +240,35 @@ bool apply_bucket(void* sf, void* bucket, const char* keytext,
     return ran && g.sup_hit;
 }
 
+// NOT LATCHED -- see the note on mgmp_savefile's ensure_state. The panel's
+// connect buttons can set the role after this has already run once, and both
+// things this reads change at that moment: the role, and whether the two blob
+// hooks exist (hooks_install_late puts them in).
+//
+// The hook test asks hooks_is_live rather than config().hook, and that is the
+// stronger claim on purpose: config_set_role flips the flags, but a flag says
+// what was ASKED for and a late install can still fail to resolve or to enable.
+// Arming on the flag would push an inventory into the host's own save file and
+// report it as sent.
 void ensure_state() {
-    static bool once = false;
-    if (once) return;
-    once = true;
     const Config& c = config();
     bool host   = _stricmp(c.net_role, "host")   == 0;
     bool client = _stricmp(c.net_role, "client") == 0;
     g.is_client = client;
 
-    bool hooks_on = c.hook[T_SFStoreBlob] && c.hook[T_SFLoadBlob];
+    bool hooks_on = hooks_is_live(T_SFStoreBlob) && hooks_is_live(T_SFLoadBlob);
     g.on = tune::kInvSync && (host || client) && g.resolved && hooks_on;
 
-    if (!g.on && tune::kInvSync && (host || client)) {
+    static bool said = false;
+    if (!g.on && tune::kInvSync && (host || client) && !said) {
+        said = true;
         if (!g.resolved)
             log_line("INVSYNC", "!! disabled: the game functions it calls did "
                                 "not verify against this build");
         else if (!hooks_on)
             log_line("INVSYNC", "!! disabled: hook_sfstoreblob / hook_sfloadblob "
-                                "are off, and without them a push would go to "
-                                "the save file instead of to the peer");
+                                "are not live, and without them a push would go "
+                                "to the save file instead of to the peer");
     }
 }
 
@@ -300,7 +310,7 @@ void invsync_init() {
     ensure_state();
     if (!g.on || g.announced) return;
     g.announced = true;
-    log_line("INVSYNC", "armed -- %s",
+    log_line_lvl(LogLevel::Trace, "INVSYNC", "armed -- %s",
              g.is_client ? "this peer's run inventory will be overwritten with "
                            "the host's"
                          : "this peer's run inventory will be published to the "
@@ -311,8 +321,9 @@ void invsync_shutdown() {
     for (uint32_t i = 0; i < kInvBuckets; ++i) { free(g.pend_data[i]); g.pend_data[i] = nullptr; }
     g.pend_have = false;
     if (!g.announced) return;
-    log_line("INVSYNC", "done: %u pushed, %u applied, %u unchanged, "
-                        "%u deferred to the map tick (%u superseded before it ran)",
+    log_line_lvl(LogLevel::Trace, "INVSYNC",
+             "done: %u pushed, %u applied, %u unchanged, "
+             "%u deferred to the map tick (%u superseded before it ran)",
              g.pushed, g.applied, g.skipped, g.deferred, g.coalesced);
 }
 

@@ -13,7 +13,9 @@
 #include "mgmp_follow.h"
 #include "mgmp_choice.h"
 #include "mgmp_savefile.h"
+#include "mgmp_leave.h"
 #include "mgmp_config.h"
+#include "mgmp_hooks.h"     // hooks_install_late, for a session started from the panel
 #include "mgmp_tuning.h"
 #include "mgmp_rng.h"
 #include "mgmp_log.h"
@@ -169,6 +171,7 @@ void go_ready(const char* how) {
     lockstep_init();
     follow_init();
     savefile_init();
+    leave_init();
     catsync_init();
     invsync_init();
     runhist_init();
@@ -331,6 +334,32 @@ bool begin(bool host, const char* addr, uint16_t port) {
     g.started       = true;
     g.dropped_types = 0;   // a fresh session gets a fresh set of warnings
 
+    // BEFORE the socket, because five modules and six hooks read the role and
+    // not the socket. A session started from the panel in a process launched
+    // with role = off used to leave config().net_role saying "off" forever:
+    // net_role() was right, so cursors, follow, choice and lockstep worked, and
+    // savefile, catsync, invsync, runhist and aim quietly never armed. The
+    // client connected, saw the host's mouse, and never received the run.
+    //
+    // Doing it here rather than in apply_request covers session_start() too,
+    // where it is a no-op because the file already said host or client.
+    if (config_set_role(host)) {
+        log_line("SESSION", "role set to %s by the connect button -- mgmp.json said "
+                            "'off', so the co-op hooks were skipped at startup and "
+                            "are being installed now",
+                 host ? "host" : "client");
+        const int late = hooks_install_late();
+        if (late)
+            log_line("SESSION", "installed %d hook(s) that role = off had skipped",
+                     late);
+        else
+            log_line_lvl(LogLevel::Error, "SESSION",
+                         "!! no hooks could be installed late -- this session will "
+                         "run without the inventory serializer, the facing freeze "
+                         "and the combat lock. Set net.role in mgmp.json and "
+                         "restart.");
+    }
+
     // Computed once per process, not per session: hashing the gpak index is
     // ~1 MiB of file read and neither hash can change while the process lives.
     if (!g.gpak_hash && !g.build_hash) {
@@ -428,6 +457,7 @@ void session_shutdown() {
     cursor_shutdown();
     overlay_shutdown();
     savefile_shutdown();
+    leave_shutdown();
     catsync_shutdown();
     invsync_shutdown();
     runhist_shutdown();
@@ -460,6 +490,9 @@ void session_update() {
         // because the click routinely happens before a peer has connected --
         // and, on a new game, before the file it names exists on disk.
         savefile_pump();
+        // Watches the loaded-scene list on both roles: the host for its own
+        // departure, the client for its arrival back on the menu.
+        leave_pump();
         return;
     }
 

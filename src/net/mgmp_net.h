@@ -66,6 +66,7 @@ struct NetMsg {
     RunHistMsg   runhist;     // owns its buffer, same contract as catdata
     StateDumpMsg statedump;   // owns its buffer, same contract as catdata
     NodeHashMsg  nodehash;
+    HostLeftMsg  hostleft;
     HaltMsg   halt;
     char      refuse[192] = {};
 };
@@ -146,6 +147,11 @@ bool net_send_inventory(const InventoryMsg& m);
 // Same contract as net_send_catdata: `data` is borrowed for the duration.
 bool net_send_runhist(const RunHistMsg& m);
 bool net_send_nodehash(const NodeHashMsg& m);
+
+// Host-authored and sent once per departure, so it needs no throttle and no
+// dedupe of its own -- mgmp_leave will not send a second one until the host has
+// been back inside a run.
+bool net_send_hostleft(const HostLeftMsg& m);
 
 // The desync dump. Sent at most once per divergence, so it has no throughput
 // budget to respect and no dedupe to do -- by the time it goes out the run is

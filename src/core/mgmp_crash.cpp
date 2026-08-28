@@ -2,6 +2,7 @@
 #include "mgmp_crash.h"
 
 #include "mgmp_log.h"
+#include "mgmp_mem.h"
 
 #include <windows.h>
 
@@ -34,6 +35,7 @@ struct State {
     LONG      ring_next = 0;              // monotonic; index is % kRingSize
     LONG      fatal_reported = 0;
     LONG      throws_logged  = 0;
+    LONG      guarded_faults = 0;         // caught by mem_read/mem_write
 } g;
 
 // How many C++ throws to write to the log AS THEY HAPPEN, rather than only
@@ -176,6 +178,20 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* ep) {
         code == 0x406D1388 /* SetThreadName */)
         return EXCEPTION_CONTINUE_SEARCH;
 
+    // A GUARDED READ THAT FAULTED IS NOT A CRASH, AND IT MUST NOT COST THE
+    // BUDGET FOR ONE. mem_read exists to survive a pointer whose meaning is a
+    // guess, so its access violations are expected traffic -- but they arrive
+    // here first, and the four-record cap below was being spent on them. That
+    // is the diagnostic failing in exactly the window it was built for: a run
+    // that walked a scene list through a teardown wrote four dumps of its own
+    // caught reads and then had nothing left to say. Counted, not dumped; the
+    // total goes out at shutdown, so "this peer read a lot of dead memory"
+    // stays visible without burying anything.
+    if (code == EXCEPTION_ACCESS_VIOLATION && mem_guard_active()) {
+        InterlockedIncrement(&g.guarded_faults);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
     Record r;
     r.code = code;
     r.addr = er->ExceptionAddress;
@@ -256,6 +272,12 @@ void crash_install(uintptr_t base) {
 
 void crash_shutdown() {
     if (!g.handle) return;
+    if (g.guarded_faults)
+        log_line_lvl(LogLevel::Trace, "CRASH",
+                     "%ld guarded read(s) faulted and were caught -- pointers whose "
+                     "meaning is a guess, which is what mem_read is for. Not dumped, "
+                     "so a real fault still gets the report budget.",
+                     g.guarded_faults);
     RemoveVectoredExceptionHandler(g.handle);
     g.handle = nullptr;
 }

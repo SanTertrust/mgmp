@@ -17,6 +17,7 @@
 #include "mgmp_follow.h"
 #include "mgmp_choice.h"
 #include "mgmp_savefile.h"
+#include "mgmp_leave.h"
 #include "mgmp_session.h"
 #include "mgmp_ability.h"
 #include "mgmp_turnaction.h"
@@ -260,6 +261,16 @@ struct State {
     uint32_t mismatches      = 0;   // this battle
     uint32_t first_mismatch  = 0;   // ...and the turn of the first one
     bool     diverged        = false;
+
+    // Turn hashes that were actually COMPARED against a peer's and agreed,
+    // counted for the whole session rather than per battle.
+    //
+    // Without it the shutdown summary said `0 desync(s)` whether the peers had
+    // agreed on sixty turns or had never compared a single one -- CLAUDE.md's
+    // rule 3, and the exact hole a reconnect left. It is also what decides
+    // whether that line is quiet or a warning: a session that compared nothing
+    // has to say so, because it is the reading a player takes for a pass.
+    uint32_t agreements      = 0;
 
     uint32_t humans          = 0;   // cats a human brain drives, either peer's
     bool     state_hash_on   = false;
@@ -1605,7 +1616,15 @@ void report_pair(const HashMsg& mine, const HashMsg& theirs, uint8_t peer) {
     if (mine.rng_hash == theirs.rng_hash &&
         mine.queue_depth == theirs.queue_depth &&
         mine.state_hash == theirs.state_hash) {
-        log_line("LOCKSTEP", "turn %u AGREES with peer %u%s", mine.turn,
+        ++g.agreements;
+        // Trace, not Info: this is one line per turn per peer, and in a healthy
+        // session it is the single loudest thing in the panel -- 59 of them in
+        // one measured run, which is what buries the lines a player needs to
+        // see. It stays in the FILE, where it is the evidence the comment above
+        // describes; the panel shows the count instead, in the summary and on
+        // the session window's `turn` row.
+        log_line_lvl(LogLevel::Trace, "LOCKSTEP",
+                 "turn %u AGREES with peer %u%s", mine.turn,
                  (unsigned)peer,
                  g.state_hash_on ? " (rng+queue+state)" : " (rng+queue)");
 
@@ -1740,7 +1759,16 @@ void lockstep_init() {
     g.mismatches        = 0;
     g.first_mismatch    = 0;
     g.diverged          = false;
-    log_line("LOCKSTEP", "armed (%s)%s", net_role() == NetRole::Host ? "host" : "client",
+    // Per SESSION, not per battle: lockstep_init has exactly one caller,
+    // go_ready. Reset here so a reconnect that compares nothing before the run
+    // ends reports that honestly instead of inheriting the previous session's
+    // agreements -- which is CLAUDE.md's open item 2, the case where `0
+    // desync(s)` was never backed by a single comparison.
+    g.agreements        = 0;
+    // Trace unless the barrier is off, in which case the warning is the point.
+    log_line_lvl(config().net_join_barrier ? LogLevel::Trace : LogLevel::Warn,
+             "LOCKSTEP", "armed (%s)%s",
+             net_role() == NetRole::Host ? "host" : "client",
              config().net_join_barrier ? "" : " -- join barrier DISABLED by mgmp.json:"
              " a peer that is not yet in a battle will silently miss the turns"
              " taken without it");
@@ -1754,8 +1782,23 @@ void lockstep_init() {
 void lockstep_shutdown() {
     if (!g.active) return;
     LockstepStats s = lockstep_stats();
-    log_line("LOCKSTEP", "done: %u sent, %u applied, %u still pending, %u desync(s)",
-             s.sent, s.applied, s.pending, s.desyncs);
+
+    // `0 desync(s)` is a pass ONLY if something was compared. A session that
+    // never reached a shared turn boundary produces the identical number and
+    // means nothing by it -- so the agreement count is printed beside it and
+    // decides the severity. See CLAUDE.md rule 3.
+    const LogLevel lvl = s.desyncs      ? LogLevel::Error
+                       : !g.agreements  ? LogLevel::Warn
+                                        : LogLevel::Trace;
+    log_line_lvl(lvl, "LOCKSTEP",
+             "done: %u sent, %u applied, %u still pending, %u desync(s)%s",
+             s.sent, s.applied, s.pending, s.desyncs,
+             g.agreements ? "" : " and NO TURN HASH WAS EVER COMPARED -- this run "
+                                 "says nothing about whether the battles stayed "
+                                 "in sync");
+    if (g.agreements)
+        log_line_lvl(s.desyncs ? LogLevel::Error : LogLevel::Trace, "LOCKSTEP",
+                 "   %u turn hash(es) compared and agreed", g.agreements);
     g.active = false;
     if (g.cs_ready) { DeleteCriticalSection(&g.cs); g.cs_ready = false; }
 }
@@ -1993,6 +2036,13 @@ void lockstep_pump() {
 
             case MSG_SAVEFILE:
                 savefile_on_message(m.savefile);
+                break;
+
+            // Not battle-gated either: leaving the run is the one thing the
+            // host does that no other message reports, and it is true
+            // whatever this peer happens to be in the middle of.
+            case MSG_HOSTLEFT:
+                leave_on_message(m.hostleft);
                 break;
 
             // Not epoch-gated, and deliberately so: a cat is RUN state, not

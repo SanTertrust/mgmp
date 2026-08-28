@@ -193,7 +193,7 @@ void follow_init() {
     g.map       = nullptr;
     pending_clear();
     if (!g.on) { log_line("FOLLOW", "map following disabled by net_follow = 0"); return; }
-    log_line("FOLLOW", "armed -- %s",
+    log_line_lvl(LogLevel::Trace, "FOLLOW", "armed -- %s",
              g.is_client ? "following the host's map choices; local map input is suppressed"
                          : "publishing this peer's map choices");
     if (config().net_follow_delay_ms && g.is_client)
@@ -209,7 +209,8 @@ void follow_init() {
 
 void follow_shutdown() {
     if (!g.on) return;
-    log_line("FOLLOW", "done: %u published, %u followed, %u local click(s) suppressed",
+    log_line_lvl(LogLevel::Trace, "FOLLOW",
+             "done: %u published, %u followed, %u local click(s) suppressed",
              g.published, g.entered, g.suppressed);
     g.on = false;
     if (g.cs_ready) { DeleteCriticalSection(&g.cs); g.cs_ready = false; }

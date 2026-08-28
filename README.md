@@ -128,6 +128,16 @@ I'd recommend launch it from a command line/powershell, because it logs stuff, s
 
 The host picks a save slot and starts playing. Clients connected to the host cannot select save or start battle in Adventure mode, nor can they perform other actions that alter cat data.
 
+The joining player does not have to do anything. Sit on the main menu — when
+the host's save arrives, the mod presses **Play** for you, picks the slot, and
+loads the host's run. Your own save files are never touched; the host's run goes
+into a separate `mgmp_coop.sav`.
+
+> **Set `net.role` in `mgmp.json`.** The panel's `host` / `join` buttons now
+> configure the session properly on their own, but launching with the role
+> already set is still the tested path, and it is the only one that installs
+> every hook at startup rather than partway through.
+
 From there you just play. When it is your cat's turn, you move it. When it is
 your partner's cat, you watch. Cats controlled by the computer are handled by
 both machines identically and need no input from anyone.

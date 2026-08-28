@@ -51,7 +51,19 @@ LogLevel classify(const char* tag, const char* body) {
         return LogLevel::Warn;
     }
 
-    static const char* kGood[] = { "AGREES", "agreed", "accepted", "done", "on --" };
+    // "on --" IS GONE, and it is worth saying why so it does not come back. It
+    // was here to grade the modules' "<feature> on -- <what it does>" banners,
+    // and every one of those now states its own level instead. What it still
+    // matched was collateral: it is a SUBSTRING, so it fired on any sentence
+    // ending a word in "on" before a dash -- "peer reticles on --", but also
+    // "role set to host by the connect butt(on --) mgmp.json said off". The
+    // first defeated the CURSOR tag rule eight lines below, which exists to keep
+    // exactly that line quiet; the second graded a configuration warning as
+    // good news.
+    //
+    // A heuristic that has to be true of the BODY is only safe when it cannot
+    // be true by accident, and this one could.
+    static const char* kGood[] = { "AGREES", "agreed", "accepted", "done" };
     for (const char* k : kGood)
         if (strstr(body, k)) return LogLevel::Good;
 

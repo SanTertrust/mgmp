@@ -28,6 +28,28 @@
 namespace mgmp {
 namespace {
 
+// EVERYTHING THIS MODULE SAYS WHEN IT IS WORKING IS TRACE.
+//
+// The peer pointer either draws or it does not, and the working case had
+// fifteen lines describing window sizes, letterbox bars, NDC quad corners,
+// texture ink boxes and unpack state -- every one of them written while this
+// was being built, none of them readable by a player, and together they were
+// most of what the panel showed during a healthy session.
+//
+// They stay in the FILE, because they are exactly what a "why is nothing
+// visible" report needs and they cost nothing to keep: log_line_lvl only sets
+// the ring entry's severity, and every line still reaches disk. What changes is
+// that the panel's default view no longer shows them.
+//
+// The failures are deliberately NOT routed through here. They keep log_line and
+// their `!!` prefix, so the classifier goes on grading them Warn or Error --
+// a shader that will not compile or a texture that uploads to nothing is the
+// one thing in this module worth interrupting someone for.
+template <class... A>
+void trace(const char* fmt, A... a) {
+    log_line_lvl(LogLevel::Trace, "OVERLAY", fmt, a...);
+}
+
 // --- the slice of OpenGL this needs -----------------------------------------
 //
 // Declared by hand rather than pulled from a GL header: everything past 1.1 has
@@ -314,6 +336,9 @@ struct State {
     bool said_swap  = false;
     bool said_msg   = false;
     bool said_draw  = false;
+    // The derived content rectangle disagreed with the game's own viewport --
+    // said once, because it is either always true for this window or never.
+    bool said_aspect = false;
     bool said_quiet = false;
 
     uintptr_t base = 0;
@@ -556,8 +581,8 @@ bool build() {
     gl.BindVertexArray((GLuint)prev_vao);
     gl.BindBuffer(GL_ARRAY_BUFFER, (GLuint)prev_vbo);
 
-    log_line("OVERLAY", "peer pointer ready -- GL program %u, textured quad",
-             (unsigned)g.prog);
+    trace("peer pointer ready -- GL program %u, textured quad",
+          (unsigned)g.prog);
     return true;
 }
 
@@ -701,9 +726,9 @@ bool load_art(uint8_t mode) {
         return false;
     }
     if (prev_pbo || store_dirty) {
-        log_line("OVERLAY", "the game had left unpack state set (pbo %d, store %s)"
-                            " -- neutralised for the upload",
-                 (int)prev_pbo, store_dirty ? "dirty" : "clean");
+        trace("the game had left unpack state set (pbo %d, store %s)"
+              " -- neutralised for the upload",
+              (int)prev_pbo, store_dirty ? "dirty" : "clean");
     }
     // A readback that disagrees with the decode is THE diagnosis, not a hint:
     // the pixels existed and the texture does not have them.
@@ -717,10 +742,10 @@ bool load_art(uint8_t mode) {
     a.x1 = (float)(x1 + 1); a.y1 = (float)(y1 + 1);
     a.tw = (float)w;        a.th = (float)h;
 
-    log_line("OVERLAY", "loaded %s -- %dx%d tex %u, ink (%d,%d)-(%d,%d),"
-                        " hotspot (%.0f,%.0f) alpha there %d, read back %d",
-             name, w, h, (unsigned)a.tex, x0, y0, x1, y1,
-             kArt[mode].hot_x, kArt[mode].hot_y, probe, readback);
+    trace("loaded %s -- %dx%d tex %u, ink (%d,%d)-(%d,%d),"
+          " hotspot (%.0f,%.0f) alpha there %d, read back %d",
+          name, w, h, (unsigned)a.tex, x0, y0, x1, y1,
+          kArt[mode].hot_x, kArt[mode].hot_y, probe, readback);
     return true;
 }
 
@@ -795,11 +820,11 @@ bool mouse_space(void* window, int vw, int vh, int& mw, int& mh) {
     if (g.said_w != lw || g.said_h != lh || g.said_vw != vw || g.said_vh != vh) {
         int pw = 0, ph = 0;
         if (get_px) get_px(window, &pw, &ph);
-        log_line("OVERLAY", "window %dx%d logical, %dx%d in pixels; content"
-                            " rectangle (the game's viewport) %dx%d -- letterbox"
-                            " bars %d wide, %d tall",
-                 lw, lh, pw, ph, vw, vh,
-                 pw > vw ? (pw - vw) / 2 : 0, ph > vh ? (ph - vh) / 2 : 0);
+        trace("window %dx%d logical, %dx%d in pixels; content"
+              " rectangle (the game's viewport) %dx%d -- letterbox"
+              " bars %d wide, %d tall",
+              lw, lh, pw, ph, vw, vh,
+              pw > vw ? (pw - vw) / 2 : 0, ph > vh ? (ph - vh) / 2 : 0);
         g.said_w = lw; g.said_h = lh; g.said_vw = vw; g.said_vh = vh;
         // A resize is the event worth tracing, so give it a fresh budget --
         // otherwise the cap is spent on the shape the window started in.
@@ -868,6 +893,10 @@ uint8_t mode_for_state(const char* state) {
 
 void draw_cursor(uint8_t mode, float nx, float ny, const float rgb[3], float alpha,
                  int win_w, int win_h) {
+    // The state-specific art is off while the aiming drift is isolated: see
+    // tune::kPeerCursorArt. `mode` still crosses the wire and is still stored,
+    // so this is a switch rather than a removal.
+    if (!tune::kPeerCursorArt) mode = 0;
     if (mode >= kArtCount) mode = 0;
     if (!load_art(mode)) {
         if (mode == 0) return;                 // no fallback left
@@ -890,7 +919,17 @@ void draw_cursor(uint8_t mode, float nx, float ny, const float rgb[3], float alp
     // whole scale factor, and net_cursor_px is the size at net_cursor_ref_h.
     // A fixed pixel size would have the arrow shrink to a speck as the window
     // grew, which is the one thing it must not do on a shared screen.
-    const float ink_h = a.y1 - a.y0;
+    // A FIXED REFERENCE, NOT THIS STATE'S OWN INK HEIGHT.
+    //
+    // It used to be `a.y1 - a.y0`, and that made the pointer's geometry depend
+    // on which cursor the peer was showing: every aiming state is 11-19% taller
+    // than `default` because the badge hangs below the arrow (the table in
+    // mgmp_tuning.h has the measurements), so k dropped and the whole glyph
+    // contracted toward the hotspot the instant the peer started aiming.
+    //
+    // Dividing by a constant instead means the arrow is the same size in every
+    // state and the badge hangs off it, which is what it does in the game.
+    const float ink_h = tune::kCursorInkRefH;
     const float ref   = (float)tune::kCursorRefH;
     const float grow  = (ref > 1.0f && win_h > 0) ? (float)win_h / ref : 1.0f;
     const float k     = (float)tune::kCursorPx * grow
@@ -915,12 +954,12 @@ void draw_cursor(uint8_t mode, float nx, float ny, const float rgb[3], float alp
     gl.BufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quad), quad);
 
     if (g.said_quad < 3) {
-        log_line("OVERLAY", "quad in NDC: x %.4f..%.4f  y %.4f..%.4f  (uv %.3f..%.3f,"
-                            " %.3f..%.3f) from %dx%d, ink %.0fx%.0f, k %.4f,"
-                            " tex %u, %s",
-                 lx, rx, by, ty, u0, u1, v0, v1, win_w, win_h,
-                 a.x1 - a.x0, ink_h, k, (unsigned)a.tex,
-                 g.debug_flat ? "FLAT" : "textured");
+        trace("quad in NDC: x %.4f..%.4f  y %.4f..%.4f  (uv %.3f..%.3f,"
+              " %.3f..%.3f) from %dx%d, ink %.0fx%.0f, k %.4f,"
+              " tex %u, %s",
+              lx, rx, by, ty, u0, u1, v0, v1, win_w, win_h,
+              a.x1 - a.x0, ink_h, k, (unsigned)a.tex,
+              g.debug_flat ? "FLAT" : "textured");
         ++g.said_quad;
     }
 
@@ -976,7 +1015,7 @@ void overlay_set_base(uintptr_t base) {
     *slot = (void*)&overlay_swap_detour;
     VirtualProtect(slot, sizeof(void*), old_prot, &old_prot);
 
-    log_line("OVERLAY", "swap taken over: slot %08X was %p, now ours", kRva_SdlSwapSlot, prev);
+    trace("swap taken over: slot %08X was %p, now ours", kRva_SdlSwapSlot, prev);
 }
 
 void overlay_init() {
@@ -989,10 +1028,15 @@ void overlay_init() {
 
     g.on = tune::kCursors && tune::kCursorGl && g.swap_slot != nullptr;
     if (tune::kCursors && tune::kCursorGl && !g.swap_slot)
-        log_line("OVERLAY", "peer pointer unavailable -- the swap was not taken over");
+        // NOT routed through trace(): this is the feature turning itself off,
+        // and it is the one thing here a player would want to be told. The `!!`
+        // is what the classifier grades on.
+        log_line("OVERLAY", "!! peer pointer unavailable -- the swap was not "
+                            "taken over, so you will not see the other player's "
+                            "cursor");
     else if (g.on)
-        log_line("OVERLAY", "peer pointer on -- %u px arrows drawn in screen space "
-                            "before the swap", tune::kCursorPx);
+        trace("peer pointer on -- %u px arrows drawn in screen space "
+              "before the swap", tune::kCursorPx);
 }
 
 void overlay_shutdown() {
@@ -1027,7 +1071,7 @@ void overlay_on_swap(void* window) {
     if (!g.on || !window) return;
 
     if (!g.said_swap) {
-        log_line("OVERLAY", "first swap seen (window %p) -- the hook is live", window);
+        trace("first swap seen (window %p) -- the hook is live", window);
         g.said_swap = true;
     }
 
@@ -1061,27 +1105,72 @@ void overlay_on_swap(void* window) {
     // the region two peers actually have in common, so it is what the pointer
     // fraction must be measured against at BOTH ends.
     //
-    // The viewport gives its SIZE and lies about its ORIGIN. Measured on a
-    // 958x1120 window the game reports viewport `0,0 958x539`: the right size,
-    // but an origin of (0,0), which in GL's bottom-left convention is the
-    // BOTTOM of the window rather than the centre. Taking that origin at face
-    // value put the content's top edge 581 px down instead of 290 and pushed
-    // every pointer off toward one corner. The game is almost certainly
-    // rendering the scene to an offscreen target of that size and compositing
-    // it centred afterwards, so the viewport we happen to observe at swap time
-    // belongs to the offscreen pass.
+    // THE VIEWPORT IS NOT THE SOURCE OF THIS RECTANGLE ANY MORE. It was, and it
+    // was wrong in a way that hid itself perfectly in testing.
     //
-    // So take the SIZE from the viewport and derive the ORIGIN by centring it
-    // in the drawable, which is what letterboxing means. The bar widths that
-    // falls out of -- 290 tall here -- match what is on screen.
+    // It already lied about its ORIGIN: measured on a 958x1120 window the game
+    // reports `0,0 958x539` -- the right size, but an origin of (0,0), which in
+    // GL's bottom-left convention is the bottom of the window rather than the
+    // centre. That much was known, and the fix was to keep the size and centre
+    // it.
+    //
+    // What was NOT known is that the SIZE is not reliable either. Which pass is
+    // bound at swap time is not ours to decide: when it is the game's
+    // fixed-aspect offscreen pass the size is the content rectangle, and when it
+    // is the full-window composite the size is the whole drawable. In the second
+    // case `w,h` became `pw,ph`, `cx,cy` became 0,0, and the letterbox
+    // correction vanished without a word.
+    //
+    // THAT IS INVISIBLE WHILE BOTH PEERS RUN THE SAME WINDOW SIZE, because both
+    // then measure the pointer against the same wrong rectangle and the error
+    // cancels exactly. It appears only when the two aspects differ, as a pointer
+    // that gains speed on the short axis and strays into the black bars -- and
+    // the bars are the proof, because the viewport is what clip space maps onto,
+    // so a pointer drawn in a bar means the viewport WAS the whole window.
+    //
+    // Derived arithmetic instead: the largest rectangle of the game's fixed
+    // aspect, centred in the drawable. Identical on both peers, independent of
+    // GL state, and the same answer every frame.
     int pw = 0, ph = 0;
     if (!drawable_size(window, pw, ph)) { pw = vp[2]; ph = vp[3]; }
 
-    int w = vp[2], h = vp[3];
+    int w = pw, h = ph;
+    if (pw > 0 && ph > 0) {
+        // Wider than the content aspect -> bars left and right; taller -> bars
+        // top and bottom. The comparison is in integers to avoid a rounding
+        // difference deciding which branch two peers take.
+        if ((int64_t)pw * tune::kContentAspectH > (int64_t)ph * tune::kContentAspectW) {
+            h = ph;
+            w = (int)(((int64_t)ph * tune::kContentAspectW) / tune::kContentAspectH);
+        } else {
+            w = pw;
+            h = (int)(((int64_t)pw * tune::kContentAspectH) / tune::kContentAspectW);
+        }
+    }
     if (w <= 0 || w > pw) w = pw;
     if (h <= 0 || h > ph) h = ph;
     const int cx = (pw - w) / 2;          // content origin from the LEFT
     const int cy = (ph - h) / 2;          // content origin from the TOP
+
+    // CROSS-CHECKED, NOT TRUSTED. Said once, and only when the game's own
+    // viewport size disagrees with the derived rectangle by more than rounding.
+    // If tune::kContentAspect* is wrong for a future build this is the line that
+    // says so, instead of it surfacing as a pointer that drifts for one player
+    // and not the other.
+    if (!g.said_aspect && vp[2] > 0 && vp[3] > 0) {
+        const int dw = vp[2] > w ? vp[2] - w : w - vp[2];
+        const int dh = vp[3] > h ? vp[3] - h : h - vp[3];
+        if (dw > 2 || dh > 2) {
+            g.said_aspect = true;
+            log_line("OVERLAY", "!! content rectangle derived as %dx%d at %d,%d "
+                                "(%d:%d in a %dx%d drawable) but the game's own "
+                                "viewport is %dx%d -- if the peer pointer drifts "
+                                "between differently-shaped windows, this aspect "
+                                "is the thing to re-derive",
+                     w, h, cx, cy, tune::kContentAspectW, tune::kContentAspectH,
+                     pw, ph, vp[2], vp[3]);
+        }
+    }
 
     // And because the origin we derived is not the one the game left bound, the
     // overlay has to set its own viewport after all -- drawing through the
@@ -1134,12 +1223,12 @@ void overlay_on_swap(void* window) {
 
             if (tune::kCursorTrace && g.traced_local < 60 &&
                 (g.last_traced_y < -1 || fabsf(g.ny - g.last_traced_y) > 0.05f)) {
-                log_line("OVERLAY", "TRACE local mouse %.1f,%.1f logical %dx%d"
-                                    " -> px %.1f,%.1f in drawable %dx%d;"
-                                    " content %d,%d %dx%d (game said vp %d,%d %dx%d)"
-                                    " -> %.3f,%.3f",
-                         mx, my, g.mouse_w, g.mouse_h, px, py, pw, ph,
-                         cx, cy, w, h, vp[0], vp[1], vp[2], vp[3], g.nx, g.ny);
+                trace("TRACE local mouse %.1f,%.1f logical %dx%d"
+                      " -> px %.1f,%.1f in drawable %dx%d;"
+                      " content %d,%d %dx%d (game said vp %d,%d %dx%d)"
+                      " -> %.3f,%.3f",
+                      mx, my, g.mouse_w, g.mouse_h, px, py, pw, ph,
+                      cx, cy, w, h, vp[0], vp[1], vp[2], vp[3], g.nx, g.ny);
                 g.last_traced_y = g.ny;
                 ++g.traced_local;
             }
@@ -1156,8 +1245,8 @@ void overlay_on_swap(void* window) {
         // said the same two states thousands of times.
         if (m < 32 && !(g.seen_states & (1u << m))) {
             g.seen_states |= (1u << m);
-            log_line("OVERLAY", "local cursor '%s' -> %s (first time this session)",
-                     state, kArt[m].state);
+            trace("local cursor '%s' -> %s (first time this session)",
+                  state, kArt[m].state);
         }
         g.mode = m;
     }
@@ -1203,8 +1292,8 @@ void overlay_on_swap(void* window) {
         any = (i != self) && g.peers[i].have && (now - g.peers[i].at <= kStaleMs);
     if (!any && !test) {
         if (!g.said_quiet) {
-            log_line("OVERLAY", "no peer position has arrived yet -- nothing to draw."
-                                " Set net_cursor_gl_test = 1 to draw a marker anyway");
+            trace("no peer position has arrived yet -- nothing to draw."
+                  " Set net_cursor_gl_test = 1 to draw a marker anyway");
             g.said_quiet = true;
         }
         return;
@@ -1310,10 +1399,10 @@ void overlay_on_swap(void* window) {
     }
 
     if (!g.said_draw) {
-        log_line("OVERLAY", "drew into the game's viewport %d,%d %dx%d, fbo was %d,"
-                            " local mouse %.0f,%.0f -> %.3f,%.3f%s",
-                 vp[0], vp[1], w, h, (int)prev_fbo, mx, my, g.nx, g.ny,
-                 test ? "  (TEST MARKER at screen centre)" : "");
+        trace("drew into the game's viewport %d,%d %dx%d, fbo was %d,"
+              " local mouse %.0f,%.0f -> %.3f,%.3f%s",
+              vp[0], vp[1], w, h, (int)prev_fbo, mx, my, g.nx, g.ny,
+              test ? "  (TEST MARKER at screen centre)" : "");
         g.said_draw = true;
     }
 
@@ -1350,12 +1439,12 @@ void overlay_on_message(uint8_t from, const CursorMsg& c) {
     p.owns_turn = c.owns_turn;
     p.at = GetTickCount64();
     if (tune::kCursorTrace && g.traced_peer < 60) {
-        log_line("OVERLAY", "TRACE peer %u sent %.3f,%.3f", (unsigned)from, p.nx, p.ny);
+        trace("TRACE peer %u sent %.3f,%.3f", (unsigned)from, p.nx, p.ny);
         ++g.traced_peer;
     }
     if (!p.have && !g.said_msg) {
-        log_line("OVERLAY", "peer %u pointer at %.3f,%.3f -- positions are arriving",
-                 (unsigned)from, p.nx, p.ny);
+        trace("peer %u pointer at %.3f,%.3f -- positions are arriving",
+              (unsigned)from, p.nx, p.ny);
         g.said_msg = true;
     }
     p.have = true;

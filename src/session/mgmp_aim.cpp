@@ -505,16 +505,23 @@ void aim_init() {
     g.on = tune::kAimPreview && netted && g.resolved;
     if (!g.on || g.announced) return;
     g.announced = true;
-    log_line("AIM", "armed -- the range and AOE tiles the peer is aiming at will be "
-                    "drawn here, by the game's own DrawAbilityAOE");
+    log_line_lvl(LogLevel::Trace, "AIM",
+                 "armed -- the range and AOE tiles the peer is aiming at will be "
+                 "drawn here, by the game's own DrawAbilityAOE");
 }
 
 void aim_shutdown() {
     if (!g.announced) return;
-    log_line("AIM", "done: %u aim(s) sent, %u frame(s) drawn, %u highlight(s) with "
-                    "the status refresh swallowed, %u move preview(s) round-tripped "
-                    "(%u LOST) (the state fence caught %u cat change(s)), "
-                    "%u refused on a name mismatch",
+    // A LOST move preview is a cat left somewhere it never walked to, and a
+    // state-fence hit is a mutation on a cat this peer does not own. Those two
+    // are the only things in this line worth waking a player for; the rest is
+    // volume and belongs in the file.
+    const bool bad = g.reach_lost || lockstep_state_fence_hits() || g.refused_name;
+    log_line_lvl(bad ? LogLevel::Warn : LogLevel::Trace, "AIM",
+             "done: %u aim(s) sent, %u frame(s) drawn, %u highlight(s) with "
+             "the status refresh swallowed, %u move preview(s) round-tripped "
+             "(%u LOST) (the state fence caught %u cat change(s)), "
+             "%u refused on a name mismatch",
              g.sent, g.drawn, g.hilite, g.reach, g.reach_lost,
              lockstep_state_fence_hits(), g.refused_name);
 }

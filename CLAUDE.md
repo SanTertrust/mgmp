@@ -120,7 +120,7 @@ directions — framing-level counting, not lost data.
 - Imagebase `0x140000000`, image size `0x156B000`, 63358 functions.
 - SHA256 `c3a41e436a93fa58cd386ec46dad5c2a6f21a583d33c3a57a15a2604c726439e` —
   **every address in this file is pinned to this build.** Re-derive after any
-  game update. **The MOD is not pinned**: it resolves all 49 of its addresses by
+  game update. **The MOD is not pinned**: it resolves all 54 of its addresses by
   unique byte signature and treats the pinned RVA as a hint, so a patch can move
   addresses without breaking it. The addresses *in this file* are still pinned,
   because a document cannot re-derive itself.
@@ -1184,6 +1184,115 @@ dangle in the shipped game.
 acquires the run, and with it the per-node seeds that make both peers roll the
 same battle; "off" only ever meant "this session cannot reach a shared battle".
 
+### The main menu — a client can be stranded on it, and `Button::Click` is the way off
+
+`savefile_autoselect` runs only from `SaveSelection::update`, so a client that
+connects while sitting on **Play / Settings / Meow / Quit** has no screen for it
+to act on. It receives the host's save, holds it, and waits for a human to press
+Play — with nothing in either log saying so. Reported from the wild
+2026-08-28 with a screenshot of exactly that menu.
+
+**`MainMenu` cannot be hooked for this.** Its vftable is `0x140EDF9B0` and slots
+6–15 are all `0x140035B80`, the ICF-folded empty virtual — it has **no `update`
+override**. Slots 0–5 are `0x1401BD390`, `0x1401BD380`, `0x1401BD2D0`,
+`0x1401BD2C0`, `0x140050F50`, `0x1401BE3A0`.
+
+**The button is the way in, and the mod already detours every one of them.**
+`glaiel::Button::update` @ `0x140975F00` (already hooked as `T_ButtonUpdate` for
+the combat lock) fires for every button in the game with a live `Button*`.
+
+| offset | field | readings |
+|---|---|---|
+| `Button+240` | the `std::function` callback | `Click` invokes it through vtable slot 2 (`_Do_call`) |
+| `Button+504` | `std::string`, the button's own name | `MainMenu::init__inner_0` @ `0x1401B85BB` assigns it; `Click` reads its length at `+520` to build `<name>_Click` |
+| `Button+752` | state | already documented above |
+
+`glaiel::Button::Click` @ `0x1409764B0` is the whole click: it plays the sound,
+calls the callback, and does the radio-group bookkeeping. **Its only call site is
+`Button::update` @ `0x14097644D`, as `sub_1409764B0(this, 0)`** — so calling it
+with `force = 0` is byte-for-byte what a real click does. `force` only bypasses
+the `Button+89` guard; `Button+764 != 1`, the `Button+96 <= Button+104` timer and
+`sub_1409766C0` still apply, which is why a refusal is logged rather than forced.
+
+**Call `Button::Click`, NOT the scene transition it leads to.** The chain is
+`Play → std::function → sub_1401BEBE0 → MainMenu::init__inner_1` (a fade
+transition component) `→ later → sub_1401BFE80` (get-or-create the
+`SaveSelectionScreen` scene, then `sub_1401BD570` adds the `SaveSelection`
+component). `sub_1401BFE80` reads only `*(capture+8)` = the `MainMenu*`, so a
+synthesised capture would work — and it would skip the fade, the
+already-transitioning guard at `qword_1413BC8E8+56`, and it would need a
+`MainMenu*` held across a scene teardown nobody controls. Clicking the button
+from the same point in the frame the game clicks it has none of those problems.
+
+The four main-menu buttons are `MainMenu_Button_{Play,Settings,Quit,Meow}`, with
+anims `btn_{play,settings,quit,feedback}` and loc keys `MAIN_MENU_{PLAY,SETTINGS,
+QUIT,MEOW}`, registered by `MenuPanel::register_button` @ `0x140973C40` onto the
+`MenuPanel*` at `MainMenu+56` (the panel named `TitleScreen`).
+
+### The loaded-scene list — READ, never called
+
+The game answers "which screen is this" by scanning a `std::vector<Scene*>` and
+comparing names. `sub_1409CA630(Director*, std::string*)` is that scan;
+`sub_1409CA700` is the identical scan with one extra test.
+
+| what | where |
+|---|---|
+| `Director*` | `Component+40` |
+| scene vector | `Director+0` begin, `Director+8` end (`Scene**`) |
+| scene name | `Scene+1208` `std::string` (size `+1224`, cap `+1232`) |
+| marked for destruction | `Scene+1243` `u8` — the extra test in `sub_1409CA700` |
+| has components yet | `Scene+1200` `u8`, read by `sub_1401BFE80` |
+
+`Component+40` has **three readings that agree**: `MewDirector::IsTutorialRunActive`
+@ `0x1403AECB0` (`*(this+40)` → the `Cutscene` lookup), `PauseMenu::SetupMainSidebar`
+(`*(this+40)` → the `House` lookup), and the two main-menu transition bodies
+(`*(MainMenu+40)` → get-or-create `MainMenu`). `Scene+1243` is confirmed from the
+write side: `sub_1401BFE80` and `sub_1401BFDC0` both set it on the current scene
+immediately before building the one they are transitioning to.
+
+**Walking it ourselves is strictly better than calling the lookup**: three
+guarded reads per scene, no call target, no signature, and no `std::string` of
+ours in the game's allocator. It is also self-proving — the names go in the log,
+so a moved offset reads as garbage rather than as a confident wrong answer.
+
+Confirmed **scene** names (each used as a scene key by the game itself):
+`House`, `MainMenu`, `SaveSelectionScreen`, `Cutscene`, `ClassChooser`,
+`ActSelection`, `StorageItems`. **`MapScreen` and `TitleScreen` are NOT scene
+names** — `MapScreen` is the component's RTTI name (`sub_14039D8A0`, the `is_a`
+test) and `TitleScreen` is the `MenuPanel` name above. Both look like scene keys
+and neither is one.
+
+**`House` loaded ⟺ not inside an adventure**, and that is decisive rather than
+suggestive: `MewDirector::ContinueAdventure`'s first statement is
+`Director::DestroyScene("House")`.
+
+### The pause menu, and why a client cannot be dragged out of a run
+
+`Button_PauseMenu_QuitToMenu` is registered by `PauseMenu::SetupMainSidebar` @
+`0x14028AB50` the same way the main menu registers Play —
+`MenuPanel::register_button` then `sub_140052080(button + 504, ...)`. Its
+callback is the lambda whose body is `SetupMainSidebar__inner_3` @ `0x14029E7F0`,
+which builds a `QuitToMenuTransition` component. So **clicking it is quitting to
+the menu**, fade and all, and `Button::Click` reaches it from the `Button::update`
+hook that already presses Play.
+
+The sidebar is `Button_PauseMenu_{Resume, Settings, QuitToMenu, QuitToDesktop,
+GiveUp}`, and which one of `pause_mainmenu` / `pause_house` / `pause_adventure`
+gets built is decided in `sub_14028A3B0`, `PauseMenu::SwitchPanel`'s deferred
+body.
+
+**The button only exists while the pause menu is open, and there is no way in.**
+`PauseMenu::init` @ `0x1402890B0` runs when a person pauses — it ends by playing
+`PauseMenu_Open` — so there is no persistent `PauseMenu` to reach into and no
+`update` override to hook. Opening it ourselves would mean synthesising the
+transition across a scene teardown nobody controls, with the battle layer
+holding `Character*` pointers into it. **So `mgmp_leave` is "press Escape and the
+mod does the rest", stated at a severity the player will see.** The two
+transition bodies that end at the title screen, for the record, are
+`sub_1401BFDC0` (destroys the current scene first) and `sub_140756DE0` (does
+not); both are `std::function` `_Do_call`s with only data xrefs, i.e. transition
+completions rather than callable entry points.
+
 ### Where the run is standing — `MapScreen+0xA0` is the map MARKER
 
 `glaiel::MapNode::Click` @ `0x140227C90` **selects** a node, it does not enter
@@ -1400,14 +1509,40 @@ centred sub-rectangle with black bars outside. That rectangle — not the OS win
 — is what two peers have in common, so the pointer fraction must be measured
 against it at **both** ends.
 
-**The viewport tells the truth about its SIZE and lies about its ORIGIN.**
-Measured on a 958x1120 window, the game reports viewport `0,0 958x539`: the right
-size, but an origin of `(0,0)`, which in GL's bottom-left convention is the
-*bottom* of the window rather than the centre. The game is almost certainly
-rendering the scene to an offscreen target of that size and compositing it centred
-afterwards, so the viewport observed at swap time belongs to the offscreen pass.
-**Take the size from the viewport and derive the origin by centring it in the
-drawable.**
+**DO NOT DERIVE THE CONTENT RECTANGLE FROM `glGetIntegerv(GL_VIEWPORT)` AT ALL.**
+It was the original source and it is wrong in a way that hides itself perfectly
+in single-machine testing.
+
+The origin was known to be a lie: on a 958x1120 window the game reports
+`0,0 958x539` — the right size, but an origin of `(0,0)`, which in GL's
+bottom-left convention is the *bottom* rather than the centre.
+
+**The size is not reliable either, and the binary says why.** The viewport is
+always `(0, 0, target_w, target_h)` of whatever render target is bound —
+`sub_140A20180` is the bind, and it is the only shape the game ever sets. Which
+target is bound at swap time is not ours to choose: the game's **own cursor
+pass**, `sub_140A16B00` @ `0x140A16E05` and `0x140A17069`, calls
+`SDL_GetWindowSizeInPixels` and then `glViewport(0, 0, whole drawable)` before
+drawing its quad. On any frame that runs last, the observed viewport is the full
+window, `w,h` becomes the drawable, the derived origin becomes `(0,0)`, and the
+letterbox correction silently disappears.
+
+**That is invisible while both peers run the same window size**, because both
+then measure the pointer against the same wrong rectangle and the error cancels
+exactly. It shows only when the two aspects differ — as a pointer that gains
+speed on the short axis and strays into the black bars. The bars are the proof:
+clip space maps onto the viewport, so a pointer drawn in a bar means the
+viewport *was* the whole window.
+
+**Derive it instead: the largest rectangle of the game's fixed aspect, centred in
+the drawable.** The aspect is **16:9**, from two independent readings — the
+shipped `swfs/ui.swf` declares a stage of 25600x14400 twips = **1280x720** exactly
+(read straight out of the SWF header's frame RECT, no game running), and the
+958x539-in-958x1120 measurement agrees to a pixel with 290-tall bars. Same
+arithmetic on both peers, no dependence on GL state, and the same answer every
+frame. `tune::kContentAspectW/H`, cross-checked against the game's own viewport
+in one log line so a wrong constant on a future build is visible rather than a
+slow drift one player sees and the other does not.
 
 **Never normalise against the largest mouse coordinate ever seen.** It can only
 ever GROW the divisor, and **a stale maximum survives a resize** — after shrinking
@@ -1433,8 +1568,31 @@ The states are the file names in **`textures/cursor/`**: `default`, `attack`,
 `btn_over`, `pet_frame1..4`, plus `_hastargets` variants.
 
 - 19 files, **128x128 with heavy transparent padding**; `default`'s ink is
-  (29,2)-(107,107). **Scale by the INK box, not the image**, or the cursor comes
+  (29,2)-(108,108). **Scale by the INK box, not the image**, or the cursor comes
   out a third of the requested size.
+- **But scale by ONE state's ink box, not by each state's own** — measured from
+  the shipped PNGs, every aiming cursor shares `default`'s ink *origin* and is
+  **11–19% taller**, because the badge hangs below the arrow:
+
+  | state | ink box | ink h | vs `default` |
+  |---|---|---|---|
+  | `default` | (29,2)-(108,108) | 106 | — |
+  | `move` / `move_hastargets` | (29,2)-(107,120) | 118 | x1.113 |
+  | `spell` / `invalid` | (29,2)-(111,123) | 121 | x1.142 |
+  | `heal` | (29,2)-(115,124) | 122 | x1.151 |
+  | `question` | (29,2)-(105,125) | 123 | x1.160 |
+  | `examine` | (29,2)-(106,126) | 124 | x1.170 |
+  | `attack` / `attack_hastargets` | (29,2)-(106,128) | 126 | x1.189 |
+  | `btn_over` | (23,1)-(98,104) | 103 | x0.972, origin -6,-1 |
+  | `grab` / `grabr` | (3,19)/(32,19), 93x85 | 85 | x0.802, origin moves |
+  | `pet_frame1` | (5,0)-(126,84) | 84 | x0.792, origin -24,-2 |
+
+  Normalising each state to a constant ink height made the peer pointer change
+  size the instant the peer started aiming — reported from the wild as the
+  pointer "moving" when you aim. `tune::kCursorInkRefH` is `default`'s 106 and
+  every state now uses it, so the badge hangs off the arrow instead of shrinking
+  it. **`mode` is the only thing in the draw path that changes when a player
+  starts aiming**, which is what made this findable at all.
 - `hotspots.gon` lists only the **exceptions**: `default [34 7]`, `grab [17 58]`,
   `grabr [110 58]`, `pet_frame1..4 [32 52]`. Everything else shares default's, and
   the pixels agree — `attack`, `spell`, `move`, `invalid`, `examine`, `question`,
@@ -1559,6 +1717,55 @@ unable to survive a reconnect.
 `src/core/mgmp_tuning.h`, which also records why each one is not in the file.
 `tests/test_config.cpp` covers the reader.
 
+**THE PANEL'S CONNECT BUTTONS ARE A ROLE, AND THE ROLE IS READ FROM TWO PLACES.**
+This shipped broken and is the failure reported from the wild on 2026-08-28
+("even his mouse showed up on a screen. But… i was not loaded into his world").
+
+`mgmp.json.template` ships `"role": "off"`, and the panel's `host`/`join`
+buttons are the obvious way in. They used to set only the **live** role in
+`mgmp_net`, so `net_role()` said host while `config().net_role` still said off —
+and the codebase reads both:
+
+| reads `net_role()` — worked | reads `config().net_role` — silently stayed off |
+|---|---|
+| session, follow, choice, lockstep, cursor, overlay | **savefile, catsync, invsync, runhist, aim** |
+
+Worse, `hooks_implied_by(net_configured)` had already run at load time with
+`false`, so `T_SFStoreBlob`, `T_SFLoadBlob`, `T_UpdateDecision`,
+`T_HighlightRefresh`, `T_CombatMenuUpdate` and `T_ButtonUpdate` were **never
+created**. The result is a session that looks connected and is half dead:
+cursors and map-follow work, the save/cats/inventory/run-history never transfer.
+
+Fixed by `config_set_role()` + `hooks_install_late()` from `begin()`, and by
+**de-latching every `ensure_state()`** — they used to compute the answer once,
+on the first save-selection frame, and keep it for the life of the process.
+`invsync` now asks `hooks_is_live()` rather than `config().hook[]`, because a
+flag says what was *asked for* and arming on it would push an inventory into the
+host's own save file and report it as sent.
+
+**`mgmp_overlay` says nothing at Info any more.** Everything it printed while
+*working* — window sizes, letterbox bars, NDC quad corners, texture ink boxes,
+unpack state — went through a module-local `trace()` helper and is Trace; the
+fourteen `!!` lines keep their own grading, because a shader that will not
+compile or a texture that uploads to nothing is the one thing here worth
+interrupting someone for. The lines are still in the file, which is where a "why
+is nothing visible" report needs them.
+
+**The classifier's `"on --"` rule is gone, and it must not come back.** It was a
+substring test meant to catch those banners, and it fired on any word ending in
+`on` before a dash: it graded `CURSOR peer reticles on --` as Good, defeating the
+`CURSOR`-tag Trace rule immediately below it, and graded `...by the connect
+butt(on --) mgmp.json said off` — a configuration warning — as good news.
+
+**Log severity is a contract, not decoration.** The panel filters by level and
+the file keeps everything (`log_line_lvl` only sets the ring entry's severity;
+`emit_locked` is unconditional). So: arming banners, per-turn `AGREES` and clean
+`done:` summaries are **Trace**; a summary escalates itself when its own counters
+say something was lost. Two non-failures that look identical in the counters and
+are deliberately excluded from `SAVEFILE`'s verdict — a **reconnecting** client
+declines the save on purpose (`applied == false`, `refused > 0`), and a host
+nobody joined never publishes (`announced == false`).
+
 **Two settings change the game rather than observe it**, and both shout in the
 startup banner while on:
 
@@ -1668,8 +1875,8 @@ which lays the sections out at their VAs without executing anything, so every
 
 | | |
 |---|---|
-| pinned build | 49 resolved, **0 scans**, 2.26 ms |
-| every hint poisoned (`--force-scan`) | 46 full `.text` sweeps, **28.57 ms** |
+| pinned build | 54 resolved (51 code + 3 data), **0 scans**, 7.51 ms |
+| every hint poisoned (`--force-scan`) | 46 full `.text` sweeps, **28.57 ms** — measured at the 49-target revision and **not re-measured since**; the flag is not on the current test binary |
 
 ~650 MB of scanning in 28.5 ms, so the fallback is a viable startup path and not
 a last resort. Under `--force-scan` all 46 still resolved **uniquely**, which
@@ -1718,6 +1925,7 @@ what a human reads; what the mod hooks is whatever the signature resolves to.
 | `0x1401BCE90` | `SaveSelection::ContinueSlot(int slot, bool play_sound)` | **the save-screen boundary.** Calling it *is* clicking that slot |
 | `0x1401BAD60` | `SaveSelection::update` | the auto-continue tick |
 | `0x1403A5FC0` | `MewDirector::init(std::string)` | takes the filename **by value**, so substituting our own redirects the load |
+| `0x1409764B0` | `Button::Click(Button*, bool force)` | **calling it is pressing that button.** A call target, not a hook — see the main-menu section |
 | `0x1409A9D80` / `0x1409AA290` | `FrameBegin` / `FrameEnd` | socket pump; `FrameBegin` is also the loader's park point |
 
 **A DETOUR MUST REPRODUCE THE WHOLE ABI, AND AN MSVC SRET IS AN ARGUMENT.**
@@ -2025,6 +2233,7 @@ the same lesson again.
 | 24 | the highlight is back, with `sub_140151CE0` swallowed for the duration and the roster's cat state fenced across the call |
 | **25** | a Move aim also shows the ATTACK RANGE from the hovered square, so the receiver makes two `TacticsObject::Move` calls per frame — again no byte moved |
 | 26 | `STATEDUMP` |
+| **27** | `SAVEFILE` carries `fresh` — a slot click vs a catch-up copy. **The two sends were byte-identical, hash included**, so no comparison on the receiving side could have separated them. Also `HOSTLEFT`, the same story from the other end: `fresh` covers the host STARTING a run, `HOSTLEFT` covers it ENDING one. They share a number only because neither has shipped |
 
 TCP is deliberate: head-of-line blocking is irrelevant when turn-based (you are
 blocking on that message anyway), and a turn is a few hundred bytes you want
@@ -2160,6 +2369,108 @@ On HELLO the host sends, in this order — the same order the live path uses:
 
 A client that only lost the socket **declines** the save and keeps its run: there
 is no way to apply a save off the selection screen anyway.
+
+**But "already in the run" is not a reason to decline when the HOST has left
+it.** A host that goes back to the main menu and picks a slot again starts a new
+run and re-publishes; the client declined that too, because `g.applied` is set
+once per **process** and nothing ever cleared it. Measured 2026-08-28 — host log
+seq 43/44 (`host chose slot 1` then `-> sent`), client seq 42
+(`DECLINED -- this peer is already in the run`).
+
+**The receiving side could not have worked this out.** A re-pick of the same slot
+produces a byte-identical message, same hash, so the host has to say which it is
+— hence `fresh` and proto 27. On `fresh` the client clears `applied`, re-arms the
+auto-Play and follows the host back through the save screen.
+
+**A slot click also invalidates the three per-run dedupe caches**, so
+`savefile_on_slot_click` now calls `catsync_forget` / `invsync_forget` /
+`runhist_forget` — the same forget the reconnect path does, for the same reason:
+those caches are keyed on the RUN, and picking a different slot would carry the
+old run's hashes into the new one and silently skip every cat that matched.
+
+**Residual limit, stated rather than hidden:** a client standing *inside* an
+adventure when the host re-picks has no screen either `savefile_autoselect`
+(`SaveSelection::update`) or the auto-Play (`Button::update` on the main menu)
+can act on. The blob is kept and applies the moment they reach the menu, and the
+log says so at Error — nothing can drag a player out of a run.
+
+### `HOSTLEFT` — the one thing the host does that nothing else reports
+
+Everything the host does *inside* a run announces itself: `ENTERNODE` per node,
+`CHOICE` per decision, `CATDATA`/`INVENTORY`/`RUNHIST` per boundary, `ACTION`
+and `HASH` per turn. **Leaving the run announces nothing** — the host simply
+stops sending, which is indistinguishable from a host who is thinking, reading a
+tooltip, or three turns into a long battle. So a host who went back to the house
+or out to the title screen left the client in a run nobody else was playing,
+with neither log saying a word. Same class as the stranded-on-the-menu report,
+arrived at from the other side.
+
+**"In a run" takes BOTH readings, and the positive one is load-bearing.** OUT is
+the loaded-scene list (above): `House`, `MainMenu` or `SaveSelectionScreen` live
+and not marked for destruction. **IN requires the absence of those *and*
+`savefile_adventure_is_loaded()`** — the cat-id list, which `ContinueAdventure`
+populates and every menu leaves empty.
+
+Absence alone was the first version and it is a reading nothing has to be true
+for. **At startup nothing is:** the game boots through
+`Shared, Base, Tutorial, Cutscene, PauseMenu, ToolTip, Transition, PostProcess,
+DebugOverlay` with **no `MainMenu` scene yet**, so the absence test said "in a
+run", the host recorded that it had been in one, and the instant `MainMenu`
+finished loading it read OUT and announced a departure that never happened. The
+client believed it and quit to the menu — **before a save had even been picked**
+(measured 2026-08-28: host seq 35 then 37, client seq 34 then 35). The
+transition-gap asymmetry does not help, because this gap is not transient; it
+lasts the whole boot.
+
+The two readings also fail differently, which is the other reason for both. The
+scene walk says which *screen* is up and nothing about the run; the cat-id test
+says whether a *run* is loaded and nothing about the screen. A peer with both
+still has an answer when one offset has drifted, and the third state —
+**Unknown** — **neither arms nor announces** on the host (a reading you could
+not take must never become half of "was in a run, now is not"), while on the
+client it is grounds to **arm** (a peer that cannot read its own position still
+gets told, rather than being dropped with a warning).
+
+**The scene walk tolerates entries it cannot read.** The first version required
+every scene to yield a printable name and disabled the whole module otherwise,
+so a single unnamed scene would have taken the announcement with it. "At least
+one entry read as a scene name" already rules out an unrelated pair of
+pointers, and the question being asked of the list is only whether a particular
+name is present. **The asymmetry is deliberate** — a *missing* scene reads as "in a
+run", so a transition gap can only ever suppress an announcement, never
+manufacture one. Two consecutive polls confirm on top of that, and the host only
+ever announces if it has actually been in a run this session (otherwise sitting
+on the menu at startup would take a client out of a run it was legitimately
+caught up into).
+
+**The client presses Quit To Menu for the player, and cannot open the menu for
+them** — see the pause-menu section. This composes with `fresh`: host leaves →
+client is taken to the title screen → host picks a slot → `SAVEFILE(fresh=1)` →
+the auto-Play carries the client back in. The Error the residual limit above
+prints is now the *fallback*, for a peer that never opened the pause menu.
+
+**A COUNTER THAT GATES A MODULE'S ONLY ACTION MUST BE COUNTED UNCONDITIONALLY.**
+The retry cooldown was serviced in `leave_pump` — correctly, see below — but
+*below* its `if (!g.on || !net_active()) return;` guard. On any frame that guard
+fired, the cooldown was never decremented, so the first press parked it at 120
+forever and every later frame returned at `if (g.cooldown)`. **The feature worked
+exactly once per process and then went silent**, which is precisely how it was
+reported: "works in the battle… but after the button did not work on adventure
+and battle either". The decrement now happens before every early return, and
+only the *announcing* half still requires a live session — the arming and the
+click never did.
+
+Adjacent, same fix: the press budget is per departure, not per process, so
+re-entering a run clears `presses` and `said_gave_up`.
+
+**A RETRY COOLDOWN COUNTED IN A PER-BUTTON CALLBACK IS NOT A FRAME COUNTER**,
+and both auto-clickers had this. `Button::update` fires once per *button* per
+frame, so decrementing there drained a 120-frame cooldown in twelve on a menu
+with ten live buttons: all five allowed presses landed inside a fifth of a
+second, which is the same press five times before anything could respond to the
+first. Both now count down in their once-per-frame pump (`leave_pump`,
+`savefile_pump` — the latter above its host-only early return) and only *test*
+in the callback.
 
 **The load-bearing detail of the replay: a joining client's own human cats would
 hang.** AI re-derives identically, but a *human* decision cannot be re-derived,
@@ -2354,3 +2665,14 @@ done yet.
 11. **A default that no caller uses is not a default.** A setting documented ON in
     the header and forced OFF by the test script is a setting nothing ever ran
     with.
+12. **An expected exception must not spend a crash reporter's budget.** `mem_read`
+    exists so a pointer whose meaning is a guess produces a bad log line instead
+    of a fault — but the access violation is real on the way there, and the VEH
+    saw every one. A host that walked the scene list through a teardown wrote
+    **four sixteen-frame dumps of its own caught reads**, hit the
+    `fatal_reported <= 4` cap, and then had nothing left to say about the fault
+    that actually killed it. The guard now advertises itself
+    (`mem_guard_active()`, a thread-local depth) and the handler counts those
+    faults instead of dumping them. **Read the frame list before believing a
+    crash dump names the culprit**: `ntdll → memcpy → mem_read` under a `<-- mgmp`
+    banner is the mechanism working, not the mod crashing.

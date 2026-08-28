@@ -289,8 +289,9 @@ void nodehash_init() {
     g.theirs.clear();
     g.sampled_screen = nullptr;
     if (!g.on) { log_line("NODEHASH", "meta-layer hashing disabled by net_nodehash = 0"); return; }
-    log_line("NODEHASH", "armed -- hashing rng, run history, cat roster and "
-                         "inventory at every map node%s",
+    log_line_lvl(LogLevel::Trace, "NODEHASH",
+                 "armed -- hashing rng, run history, cat roster and "
+                 "inventory at every map node%s",
              g.halt ? "; a mismatch will be treated as fatal" : "");
 }
 
@@ -300,13 +301,19 @@ void nodehash_shutdown() {
     // pass and would not be one -- the same trap the battle layer's
     // `0 desync(s)` fell into after a reconnect, where the number was empty
     // rather than clean.
+    //
+    // Severity, and it is the whole point of this block: "nothing was compared"
+    // is a WARNING, because it is the state a user reads as a pass and is not
+    // one. A real mismatch is an error. Only the genuinely clean case is quiet.
     if (!g.agreed && !g.mismatched)
-        log_line("NODEHASH", "done: %u sent and NOTHING WAS EVER COMPARED -- no peer "
-                             "reached the same node, so this run says nothing about "
-                             "whether the meta layer stayed in sync", g.sent);
+        log_line_lvl(LogLevel::Warn, "NODEHASH",
+                     "done: %u sent and NOTHING WAS EVER COMPARED -- no peer "
+                     "reached the same node, so this run says nothing about "
+                     "whether the meta layer stayed in sync", g.sent);
     else
-        log_line("NODEHASH", "done: %u sent, %u agreed, %u mismatched",
-                 g.sent, g.agreed, g.mismatched);
+        log_line_lvl(g.mismatched ? LogLevel::Error : LogLevel::Trace, "NODEHASH",
+                     "done: %u sent, %u agreed, %u mismatched",
+                     g.sent, g.agreed, g.mismatched);
 }
 
 void nodehash_on_node(uint64_t node_seed, uint32_t node_index) {

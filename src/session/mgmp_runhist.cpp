@@ -127,21 +127,24 @@ uint32_t serialize_hist(uint8_t** out) {
     return n;
 }
 
+// From the CONFIG rather than the live session, for the reason mgmp_catsync
+// gives: the host publishes at its first map node, which can be before a peer
+// has finished connecting.
+//
+// NOT LATCHED -- see the note on mgmp_savefile's ensure_state.
 void ensure_state() {
-    static bool once = false;
-    if (once) return;
-    once = true;
-    // From the CONFIG rather than the live session, for the reason mgmp_catsync
-    // gives: the host publishes at its first map node, which can be before a
-    // peer has finished connecting.
     const Config& c = config();
     bool host   = _stricmp(c.net_role, "host")   == 0;
     bool client = _stricmp(c.net_role, "client") == 0;
     g.is_client = client;
     g.on = tune::kRunHist && (host || client) && g.resolved;
-    if (!g.on && tune::kRunHist && (host || client))
+
+    static bool said = false;
+    if (!g.on && tune::kRunHist && (host || client) && !said) {
+        said = true;
         log_line("RUNHIST", "!! disabled: the game function it calls did not verify "
                             "against this build");
+    }
 }
 
 } // namespace
@@ -179,7 +182,7 @@ void runhist_init() {
     ensure_state();
     if (!g.on || g.announced) return;
     g.announced = true;
-    log_line("RUNHIST", "armed -- %s",
+    log_line_lvl(LogLevel::Trace, "RUNHIST", "armed -- %s",
              g.is_client ? "this peer's run history will be overwritten with the host's"
                          : "this peer's run history will be published to the client");
 }
@@ -188,8 +191,9 @@ void runhist_shutdown() {
     const bool stranded = g.pend_data != nullptr;
     free_pending();
     if (!g.announced) return;
-    log_line("RUNHIST", "done: %u pushed, %u applied, %u unchanged, "
-                        "%u held (%u superseded)%s",
+    log_line_lvl(stranded ? LogLevel::Warn : LogLevel::Trace, "RUNHIST",
+             "done: %u pushed, %u applied, %u unchanged, "
+             "%u held (%u superseded)%s",
              g.pushed, g.applied, g.skipped, g.deferred, g.coalesced,
              stranded ? ", ONE STILL HELD at exit" : "");
 }

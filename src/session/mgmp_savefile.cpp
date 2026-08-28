@@ -9,6 +9,11 @@
 #include "mgmp_addresses.h"
 #include "mgmp_resolve.h"
 #include "mgmp_follow.h"   // follow_on_map
+// A slot click starts a run, which makes the three per-run dedupe caches stale.
+// See the block in savefile_on_slot_click.
+#include "mgmp_catsync.h"
+#include "mgmp_invsync.h"
+#include "mgmp_runhist.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -40,24 +45,6 @@ struct Names {
     char     v[kMaxSlots][64] = {};
 };
 
-// MSVC std::string: union { char buf[16]; char* ptr; } at +0, size at +16,
-// capacity at +24. Capacity > 15 means the heap form. Same reading as
-// ability_gon_name in mgmp_ability.cpp.
-bool read_std_string(const void* str, char* out, size_t out_size) {
-    if (!str || !out || out_size == 0) return false;
-    out[0] = 0;
-    uint64_t size = 0, cap = 0;
-    if (!mem_read((const uint8_t*)str + 16, &size, sizeof(size))) return false;
-    if (!mem_read((const uint8_t*)str + 24, &cap,  sizeof(cap)))  return false;
-    if (size >= out_size || size > 4096) return false;
-    const void* chars = str;
-    if (cap > 15) {
-        if (!mem_read(str, &chars, sizeof(chars)) || !chars) return false;
-    }
-    if (!mem_read(chars, out, (size_t)size)) { out[0] = 0; return false; }
-    out[size] = 0;
-    return true;
-}
 
 bool read_slot_names(const void* ss, Names& out) {
     out.count = 0;
@@ -74,7 +61,7 @@ bool read_slot_names(const void* ss, Names& out) {
     if (n == 0 || n > kMaxSlots) return false;
 
     for (size_t i = 0; i < n; ++i) {
-        if (!read_std_string(begin + i * kStdStringSize, out.v[i], sizeof(out.v[i])))
+        if (!mem_read_std_string(begin + i * kStdStringSize, out.v[i], sizeof(out.v[i])))
             return false;
         // Every shipped slot name ends in .sav. Checking it is what stops a
         // wrong offset from being mistaken for a valid roster of file names --
@@ -302,7 +289,26 @@ struct State {
     // client starts any other way must not be redirected.
     bool           redirect_armed = false;
     StdStringImage redirect_name{};
+
+    // --- pressing Play (see savefile_on_button_update) ---
+    void   (*button_click)(void*, bool) = nullptr;
+    uint32_t play_presses  = 0;
+    uint32_t play_cooldown = 0;
+    bool     said_gave_up  = false;
+    bool     said_no_click = false;
 };
+
+// How hard to try. The first press is immediate; if the Play button is still
+// ticking kPlayRetryFrames later then the transition did not start, so press
+// again -- up to kPlayMaxPresses, and then stop and say so.
+//
+// A cap rather than an endless retry because the two reasons a press can fail
+// need opposite responses from the player, and neither is helped by a loop:
+// either the button refused (Button::Click's own guards), or the click landed
+// and something further down did not. Both are worth one loud line and a
+// human, not a machine pressing a button forever.
+constexpr uint32_t kPlayRetryFrames = 120;   // ~2 s at 60 Hz
+constexpr uint32_t kPlayMaxPresses  = 5;
 
 State g;
 
@@ -323,8 +329,13 @@ void ensure_dir() {
 // alive. Waiting for the handshake to arm this module would therefore miss the
 // single event it exists to observe. config().net_role is already parsed by the
 // time any menu exists, so it is the right source here.
+// RECOMPUTED ON EVERY CALL, NOT LATCHED. It used to run once and keep the
+// answer, which was correct while the role could only come from the file --
+// and wrong the moment the panel's connect buttons could set it. A process
+// launched with role = off called this from the first save-selection frame,
+// latched g.on = false, and stayed off for the rest of its life however many
+// sessions it went on to join. Two _stricmp per call is not worth a latch.
 void ensure_state() {
-    if (g.inited) return;
     g.inited = true;
     const Config& cfg = config();
     bool host   = _stricmp(cfg.net_role, "host")   == 0;
@@ -385,7 +396,7 @@ void wide(const char* s, wchar_t* out, size_t n) {
 // So the test is not "is there a director" but "is there a RUN" -- the same
 // question catsync asks with run_cats(), using the same pinned offsets. A slot
 // click has no cat id list; a live adventure has a few dozen.
-bool adventure_is_loaded() {
+bool adventure_is_loaded_impl() {
     if (!g.director_slot) return false;
     const void* director = nullptr;
     if (!mem_read(g.director_slot, &director, sizeof(director)) || !director)
@@ -408,7 +419,7 @@ bool adventure_is_loaded() {
 
 bool flush_live_run() {
     if (!g.save_adventure || !g.director_slot) return false;
-    if (!adventure_is_loaded())
+    if (!adventure_is_loaded_impl())
         return false;   // on the menu: the file on disk is already the right one
 
     // AND ONLY BETWEEN NODES. This is the one that actually cost a run.
@@ -448,7 +459,7 @@ bool flush_live_run() {
     return true;
 }
 
-bool publish(uint8_t to = kNoPeer) {
+bool publish(uint8_t to, bool fresh) {
     ensure_dir();
     if (!g.have_dir) return false;
 
@@ -476,9 +487,10 @@ bool publish(uint8_t to = kNoPeer) {
     if (!data) return false;
 
     SaveFileMsg m{};
-    m.slot = g.slot;
-    m.size = size;
-    m.hash = savefile_hash(data, size);
+    m.slot  = g.slot;
+    m.size  = size;
+    m.hash  = savefile_hash(data, size);
+    m.fresh = fresh ? 1 : 0;
     strncpy_s(m.name, g.name, _TRUNCATE);
     m.data = data;
 
@@ -490,8 +502,11 @@ bool publish(uint8_t to = kNoPeer) {
     }
 
     if (to == kNoPeer)
-        log_line("SAVEFILE", "-> sent slot %u '%s', %u bytes, hash %016llx",
-                 g.slot, g.name, size, (unsigned long long)m.hash);
+        log_line("SAVEFILE", "-> sent slot %u '%s', %u bytes, hash %016llx (%s)",
+                 g.slot, g.name, size, (unsigned long long)m.hash,
+                 fresh ? "a fresh pick -- the client drops any run it has and "
+                         "follows this one"
+                       : "a catch-up copy");
     else
         log_line("SAVEFILE", "-> re-sent slot %u '%s', %u bytes, hash %016llx to peer %u "
                              "(joined after the first publish)",
@@ -522,28 +537,65 @@ bool publish(uint8_t to = kNoPeer) {
 
 // ---------------------------------------------------------------------------
 
+// A SECOND, INDEPENDENT ANSWER TO "IS THIS PEER IN A RUN", exported because
+// mgmp_leave needs one that does not go through the loaded-scene list.
+//
+// The two disagree in useful ways rather than redundantly: this one reads the
+// run's cat-id list off the MewDirector, so it is true from the moment
+// ContinueAdventure has populated it and says nothing about which SCREEN is up;
+// the scene walk says exactly which screen is up and nothing about the run. A
+// module that has both can answer when either offset has drifted.
+bool savefile_adventure_is_loaded() { return adventure_is_loaded_impl(); }
+
+
 void savefile_init() {
     ensure_state();
     if (g.announced) return;            // the host may have picked before this
     g.announced = true;
     if (g.is_client)
-        log_line("SAVEFILE", "armed -- waiting for the host's save; local save-file "
+        log_line_lvl(LogLevel::Trace, "SAVEFILE",
+                             "armed -- waiting for the host's save; local save-file "
                              "input is suppressed and the run will load from '%s', "
                              "leaving this machine's own saves alone", kCoopSaveName);
     else
-        log_line("SAVEFILE", "armed -- will publish this peer's save file to the client");
+        log_line_lvl(LogLevel::Trace, "SAVEFILE",
+                             "armed -- will publish this peer's save file to the client");
     if (!g.is_client && g.have_slot)
-        log_line("SAVEFILE", "the host had already chosen slot %u '%s' before the "
+        log_line_lvl(LogLevel::Trace, "SAVEFILE",
+                             "the host had already chosen slot %u '%s' before the "
                              "peer connected -- publishing it now", g.slot, g.name);
 }
 
 void savefile_shutdown() {
-    if (g.on)
-        log_line("SAVEFILE", "done: %s, %u local pick(s) suppressed, %u save(s) "
-                             "declined as already-in-run",
+    if (g.on) {
+        // THE ONE LINE IN THIS MODULE A PLAYER MUST NOT MISS. A client that
+        // never received a save never joined the run -- it is the whole failure
+        // reported from the wild on 2026-08-28, and it used to be Info, sitting
+        // in a wall of identical-looking summaries. Same for a host that never
+        // published: there is a peer waiting on a file that is not coming.
+        //
+        // TWO CASES THAT LOOK IDENTICAL IN THE COUNTERS AND ARE NOT FAILURES,
+        // both excluded here rather than left to be re-diagnosed later:
+        //
+        //   * g.announced is set by savefile_init, which runs at go_ready --
+        //     i.e. only once a peer has actually connected. Without this test a
+        //     host who opened a socket and was never joined reports "published
+        //     nothing" as an error, which is just an accurate description of
+        //     having played alone.
+        //   * a RECONNECTING client declines the save on purpose (it is already
+        //     in the run and a save cannot be applied off the selection screen)
+        //     and resynchronises from the per-node pushes instead. That is
+        //     g.applied == false with g.refused > 0, and it is a success.
+        const bool failed = g.announced &&
+                            (g.is_client ? (!g.applied && !g.refused)
+                                         : !g.published);
+        log_line_lvl(failed ? LogLevel::Error : LogLevel::Trace, "SAVEFILE",
+                 "done: %s, %u local pick(s) suppressed, %u save(s) "
+                 "declined as already-in-run",
                  g.is_client ? (g.applied ? "loaded the host's save" : "never received a save")
                              : (g.published ? "published our save" : "published nothing"),
                  g.suppressed, g.refused);
+    }
     g.on = false;
     if (g.blob) { free(g.blob); g.blob = nullptr; }
     g.blob_size = 0;
@@ -581,6 +633,21 @@ void savefile_set_base(uintptr_t base) {
     }
     g.save_adventure = (void(*)(void*))addr;
     g.director_slot  = (const void**)addr_of_data(D_MewDirectorPtr);
+
+    // glaiel::Button::Click, for pressing Play on a client stuck on the menu.
+    // Its own feature turns itself off by name if it does not resolve, which is
+    // the graded-refusal rule: a client that cannot press Play is back to where
+    // it was before this existed -- waiting for a human -- and the log has to
+    // say that rather than let the player wonder.
+    g.button_click = nullptr;
+    const uintptr_t click = addr_of_call(C_ButtonClick);
+    if (!click)
+        log_line_lvl(LogLevel::Error, "SAVEFILE",
+                     "!! %s did not resolve by signature -- this peer cannot press "
+                     "Play for itself and a client will have to do it by hand",
+                     kCalls[C_ButtonClick].name);
+    else
+        g.button_click = (void(*)(void*, bool))click;
 }
 
 void savefile_catchup(uint8_t peer) {
@@ -588,21 +655,58 @@ void savefile_catchup(uint8_t peer) {
     if (!g.on || g.is_client) return;
     if (!g.published || !g.have_slot) return;
     if (!net_active()) return;
-    publish(peer);
+    // fresh = false: this peer is being caught up, not told to restart. A
+    // client already in the run must keep it and resync from the per-node
+    // pushes; only a slot click means "drop what you have".
+    publish(peer, /*fresh=*/false);
 }
 
 void savefile_pump() {
     ensure_state();
+
+    // COUNTED HERE, ABOVE THE HOST-ONLY RETURN, because it is a FRAME counter
+    // and savefile_on_button_update runs once per BUTTON per frame. Decremented
+    // there, a menu with ten live buttons drained a 120-frame cooldown in
+    // twelve, so all five allowed presses landed inside a fifth of a second --
+    // the same press five times, before the first could have done anything.
+    // This function runs exactly once a frame on both roles, which is the unit
+    // kPlayRetryFrames is written in.
+    if (g.play_cooldown) --g.play_cooldown;
+
     if (!g.on || g.is_client) return;
-    if (g.published || !g.have_slot) return;
+    if (g.published) return;
     if (!net_active()) return;
+
+    // THE SILENT STALL. g.have_slot is set by savefile_on_slot_click and by
+    // nothing else, so a host that never passed through the save-selection
+    // screen IN THIS PROCESS publishes nothing, forever, and used to do it
+    // without a single line in either log -- the client sat on "waiting for the
+    // host to choose a save file" and the host said nothing at all.
+    //
+    // It is reachable: `mgmp_loader.exe --attach <pid>` is documented in the
+    // README, and a host who attached to a game that was already in a run has
+    // no click for the hook to see. Every drop site must say what it dropped.
+    if (!g.have_slot) {
+        if (++g.publish_tries == 300) {          // ~5 s of a live session
+            log_line_lvl(LogLevel::Error, "SAVEFILE",
+                     "!! a peer is connected and this host has not chosen a save "
+                     "slot in this process, so there is nothing to publish and the "
+                     "client is waiting on a file that is not coming. This is what "
+                     "attaching to an already-running game looks like: go out to "
+                     "the main menu and pick your save again, or relaunch through "
+                     "the loader.");
+        }
+        return;
+    }
 
     // Retried rather than attempted once, because the file may not exist yet:
     // starting a NEW game means the click names a slot the game has not written
     // to disk. Once a second is often enough for a transfer that happens once.
     if (++g.publish_tries % 60 != 1) return;
 
-    if (publish()) {
+    // fresh = true: the only way g.have_slot is set is savefile_on_slot_click,
+    // so everything this path publishes is a slot the host just chose.
+    if (publish(kNoPeer, /*fresh=*/true)) {
         g.published = true;
         return;
     }
@@ -661,7 +765,25 @@ bool savefile_on_slot_click(void* ss, int slot) {
                             fad.ftLastWriteTime.dwLowDateTime;
     }
 
-    log_line("SAVEFILE", "host chose slot %u '%s'", g.slot, g.name);
+    // A SLOT CLICK STARTS A RUN, SO THE PER-RUN DEDUPE CACHES ARE NOW LIES.
+    //
+    // catsync, invsync and runhist all skip a push whose bytes match the last
+    // one they sent, and that cache is keyed on the RUN, not on the peer or the
+    // session -- the same reason session.cpp forgets them before catching a
+    // reconnecting peer up. A host that goes back to the menu and picks a
+    // different slot would otherwise carry the previous run's hashes into the
+    // new one and silently skip pushing every cat and item that happens to
+    // match, leaving the client holding state from a run nobody is playing.
+    //
+    // Cheap and unconditional: the worst case is one redundant full push at the
+    // first node, which is the same cost a joiner already pays.
+    catsync_forget();
+    invsync_forget();
+    runhist_forget();
+
+    log_line("SAVEFILE", "host chose slot %u '%s' -- publishing it and forgetting "
+                         "the per-run cat/inventory/history caches, because this "
+                         "starts a run", g.slot, g.name);
     return true;
 }
 
@@ -696,7 +818,7 @@ void savefile_on_message(const SaveFileMsg& m) {
     //
     // The run is kept and the host's per-node CATDATA/INVENTORY/ENTERNODE
     // pushes resynchronise it, which is what a reconnect actually needs.
-    if (g.applied) {
+    if (g.applied && !m.fresh) {
         ++g.refused;
         if (g.refused == 1)
             log_line("SAVEFILE", "<- host's save (slot %u '%s', hash %016llx) "
@@ -706,6 +828,34 @@ void savefile_on_message(const SaveFileMsg& m) {
                                  "per-node pushes instead",
                      m.slot, m.name, (unsigned long long)h);
         return;
+    }
+
+    // A FRESH PICK OVERRIDES THE LATCH. The host went back to the menu and
+    // chose a slot, so it is no longer in the run this peer is holding -- and
+    // g.applied, which is set once per process, was the whole reason the second
+    // save was declined. Clear it and re-arm the auto-Play so the client can
+    // follow the host back through the save screen.
+    if (g.applied && m.fresh) {
+        g.applied      = false;
+        g.play_presses = 0;
+        g.play_cooldown = 0;
+        g.said_gave_up = false;
+        log_line_lvl(LogLevel::Warn, "SAVEFILE",
+                 "the host picked a save again -- it has left the run this peer "
+                 "was in, so that run is being dropped and reloaded from the "
+                 "host's new pick");
+
+        // The residual limit, stated rather than hidden. autoselect only runs
+        // from SaveSelection::update and the auto-Play only from the main menu's
+        // Button::update, so a client standing inside an adventure has no screen
+        // either of them can act on. The blob is kept and applies the moment the
+        // player gets back to the menu -- but nothing can drag them there, so
+        // this has to be said out loud.
+        if (adventure_is_loaded_impl())
+            log_line_lvl(LogLevel::Error, "SAVEFILE",
+                     "!! this peer is INSIDE a run and a save can only be applied "
+                     "from the save-selection screen -- quit to the main menu and "
+                     "the host's new run will load on its own");
     }
 
     if (g.blob) free(g.blob);
@@ -837,6 +987,64 @@ const void* savefile_redirect_load() {
     g.redirect_armed = false;
     log_line("SAVEFILE", "redirecting MewDirector::init to '%s'", kCoopSaveName);
     return &g.redirect_name;
+}
+
+void savefile_on_button_update(void* button) {
+    // THE CHEAP TESTS FIRST, AND THE ORDER IS THE POINT. This runs for every
+    // button in the game on every frame, so everything above the name read is
+    // a load and a branch, and g.pending is false for all of a normal session.
+    if (!g.on || !g.is_client) return;
+    if (!g.pending || g.applied) return;      // nothing waiting, or already in
+    if (!button) return;
+
+    if (!g.button_click) {
+        // Said once. savefile_set_base already reported the resolve failure;
+        // this is the moment it actually costs something, and the player is
+        // looking at the menu right now.
+        if (!g.said_no_click) {
+            g.said_no_click = true;
+            log_line_lvl(LogLevel::Error, "SAVEFILE",
+                         "the host's save is here but Button::Click did not "
+                         "resolve -- press Play yourself to load into the run");
+        }
+        return;
+    }
+
+    if (g.play_presses >= kPlayMaxPresses) {
+        if (!g.said_gave_up) {
+            g.said_gave_up = true;
+            log_line_lvl(LogLevel::Error, "SAVEFILE",
+                         "pressed Play %u times and this peer is still on the main "
+                         "menu -- press it yourself; the host's save is loaded and "
+                         "waiting, and the save screen will advance on its own once "
+                         "it is up", g.play_presses);
+        }
+        return;
+    }
+
+    if (g.play_cooldown) return;             // counted down in savefile_pump
+
+    // Identify by NAME, never by pointer or by position in the panel -- the
+    // fourth time this project has settled on that. MainMenu::init assigns
+    // "MainMenu_Button_Play" to Button+504 and Button::Click reads its length
+    // from Button+520 to build the click sound, so the offset has two readings.
+    char name[64];
+    if (!mem_read_std_string((const uint8_t*)button + kBtn_Name, name, sizeof(name)))
+        return;                                // not a named button, or not one
+    if (strcmp(name, kBtnName_MainMenuPlay) != 0) return;
+
+    // From here we know: we are a client, on the main menu, with the host's run
+    // already written to disk and nothing to do but open it.
+    ++g.play_presses;
+    g.play_cooldown = kPlayRetryFrames;
+    log_line("SAVEFILE", "the host's save is in -- pressing '%s' for you%s",
+             name,
+             g.play_presses > 1 ? " (again; the first press did not take)" : "");
+
+    // force = 0, exactly as Button::update calls it. See the C_ButtonClick note
+    // in mgmp_addresses.h: forcing would bypass a guard the game set for a
+    // reason and would hide a refusal we want to hear about.
+    g.button_click(button, false);
 }
 
 } // namespace mgmp

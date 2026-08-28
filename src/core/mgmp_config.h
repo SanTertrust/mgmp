@@ -106,4 +106,23 @@ struct Config {
 void        config_load(const wchar_t* dll_dir);
 const Config& config();
 
+// THE PANEL'S CONNECT BUTTONS ARE A ROLE, AND THE ROLE IS READ FROM HERE.
+//
+// net.role decides two separate things at load time: which hooks get installed
+// (hooks_implied_by), and -- in savefile, catsync, invsync, runhist and aim --
+// whether the module arms at all. The panel's host/join buttons used to change
+// neither: they opened a socket and set the LIVE role in mgmp_net, so
+// net_role() said "host" while config().net_role still said "off".
+//
+// The result was a session that looked connected and was half dead. Cursors,
+// map-follow, choice and lockstep read net_role() and worked; the save, the
+// cats, the inventory and the run history read config().net_role and silently
+// stayed off, so the client connected, saw the host's mouse, and never received
+// the run. Reported from the wild on 2026-08-28, and it is the shipped default
+// path -- mgmp.json.template says "off" and the panel is the obvious way in.
+//
+// Called by session begin(). Returns true if the role actually changed, which
+// is the caller's cue to install the hooks that were skipped at load time.
+bool        config_set_role(bool host);
+
 } // namespace mgmp

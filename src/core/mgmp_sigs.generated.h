@@ -112,6 +112,8 @@ static const SigTargetDesc kCallSigs[] = {
       "48 8B C4 48 89 58 10 44 88 40 18 48 89 48 08 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 88" },
     { 0x00101C60, "Character::recompute_stats",
       "48 8B C4 44 88 40 18 48 89 50 10 55 53 56 57 41 54 41 55 41 56 41 57 48 8D A8 88 FE FF FF" },
+    { 0x009764B0, "glaiel::Button::Click",
+      "48 89 74 24 18 57 48 83 EC 60 33 F6" },
 };
 
 // Globals, recovered from a referencing instruction's own

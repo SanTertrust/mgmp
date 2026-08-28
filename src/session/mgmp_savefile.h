@@ -105,4 +105,35 @@ void savefile_on_message(const SaveFileMsg& m);
 // never redirected.
 const void* savefile_redirect_load();
 
+// Is an adventure loaded on THIS peer? Read off the MewDirector's run cat-id
+// list ({cap,count,data} at +1464/+1468/+1472), the same fields catsync uses,
+// with the same implausibility bound -- so a drifted offset answers "no" rather
+// than answering confidently.
+//
+// A NON-NULL MewDirector IS NOT A LOADED ADVENTURE: it is a singleton that
+// exists from startup, so `director != nullptr` is true on the save-selection
+// screen. Assuming otherwise once overwrote a player's save file. Exported for
+// mgmp_leave, which wants an answer that does not depend on the scene walk.
+bool savefile_adventure_is_loaded();
+
+// From h_ButtonUpdate, at the tail: PRESS PLAY FOR A CLIENT THAT IS SITTING ON
+// THE MAIN MENU with the host's save already in hand.
+//
+// The gap this closes was reported from the wild and is visible in the
+// screenshot that came with it: the client connects, sees the host's cursor,
+// and stays on Play / Settings / Meow / Quit forever. savefile_autoselect can
+// only run from SaveSelection::update, so until a human presses Play there is
+// no screen for it to act on -- and nothing in the log said so, because from
+// the module's point of view nothing had gone wrong yet.
+//
+// It hangs off the BUTTON hook because that detour already fires for every
+// button in the game with a guaranteed-live Button*, so no new hook, no
+// scene-lifetime reasoning and no cached pointer are needed. MainMenu itself
+// could not have provided one: its vftable slots 6..15 are all the ICF-folded
+// empty virtual, so it has no update to hook.
+//
+// Cost outside the one moment it matters is a bool load. The name at Button+504
+// is only read once a save is actually pending.
+void savefile_on_button_update(void* button);
+
 } // namespace mgmp

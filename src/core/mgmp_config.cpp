@@ -362,4 +362,18 @@ void config_load(const wchar_t* dll_dir) {
 
 const Config& config() { return g_cfg; }
 
+// See the note in mgmp_config.h. Deliberately re-runs hooks_implied_by rather
+// than only writing the string: a process launched with role = off installed
+// none of the co-op hooks, and the five modules that gate on this string are
+// not the whole damage -- T_SFStoreBlob, T_SFLoadBlob, T_UpdateDecision,
+// T_HighlightRefresh, T_CombatMenuUpdate and T_ButtonUpdate were never created.
+// Flipping the flags here is what lets hooks_install_late() put them in.
+bool config_set_role(bool host) {
+    const char* want = host ? "host" : "client";
+    if (_stricmp(g_cfg.net_role, want) == 0) return false;
+    strncpy_s(g_cfg.net_role, want, _TRUNCATE);
+    hooks_implied_by(true);
+    return true;
+}
+
 } // namespace mgmp

@@ -136,6 +136,71 @@ constexpr uint32_t kCursorAlphaDim = 30;    // everybody else
 // bigger window draws a bigger cursor the way the game's own does.
 constexpr uint32_t kCursorPx       = 34;
 constexpr uint32_t kCursorRefH     = 720;
+
+// DRAW THE PEER'S POINTER AS THE CURSOR THEIR GAME IS SHOWING, rather than
+// always as the plain arrow. OFF while the reported drift is being isolated.
+//
+// The report (2026-08-28) was that the peer pointer is exact until the player
+// starts AIMING, at which point it moves. `mode` is the only thing in
+// draw_cursor that changes at that moment, so it is the only candidate, and the
+// shipped art says why it could move anything at all:
+//
+//   state       ink box              ink h    vs default
+//   default     ( 29, 2)-(108,108)   106      --
+//   move        ( 29, 2)-(107,120)   118      x1.113
+//   spell       ( 29, 2)-(111,123)   121      x1.142
+//   attack      ( 29, 2)-(106,128)   126      x1.189
+//
+// Every aiming state shares default's ink ORIGIN and is 11-19% TALLER, because
+// the badge hangs below the arrow. The sizing divided by that height, so the
+// glyph changed size the moment the state changed -- measured from the shipped
+// PNGs, not inferred.
+//
+// That defect is fixed independently (kCursorInkRefH below), so turning this
+// back on no longer changes the geometry. It is off because the report has not
+// been re-measured since, and one word restores it.
+constexpr bool     kPeerCursorArt  = false;
+
+// Sizing reference: `default`'s ink height, measured above. EVERY state is now
+// scaled by this rather than by its own ink box, so which cursor a peer is
+// showing can never change how big their pointer is or where it sits. The badge
+// on an aiming cursor simply hangs below the arrow, which is what it does in
+// the game.
+constexpr float    kCursorInkRefH  = 106.0f;
+// THE GAME'S FIXED CONTENT ASPECT, and the letterbox rectangle is derived from
+// it rather than from the GL viewport.
+//
+// The viewport was the original source and it is not trustworthy: whether the
+// value observed at swap time belongs to the game's fixed-aspect offscreen pass
+// or to its full-window composite depends on which pass happened to be bound
+// last. When it is the composite, the "content rectangle" collapses to the whole
+// window and the letterbox correction silently disappears -- which is invisible
+// while both peers run the SAME window size, because both then measure the
+// pointer against the same wrong rectangle and the error cancels exactly. It
+// only shows when the two aspects differ, and it shows as the peer pointer
+// gaining speed on the short axis and straying into the black bars. Reported
+// from the wild 2026-08-28, with "same resolution everything is good" as the
+// tell.
+//
+// 16:9, from TWO independent readings. The shipped `swfs/ui.swf` declares a
+// stage of 25600x14400 twips = 1280x720 exactly, which is what the whole UI is
+// authored against; and the one recorded runtime measurement agrees -- a
+// 958x1120 window rendered content 958x539 (958 * 9 / 16 = 538.9) with
+// 290-pixel bars top and bottom ((1120 - 539) / 2 = 290.5).
+//
+// Derived arithmetic is identical on both peers and does not depend on GL state,
+// which is exactly the property the viewport lacked. The binary confirms why it
+// lacked it: the game's own cursor pass (sub_140A16B00 @ 0x140A16E05 and
+// 0x140A17069) calls SDL_GetWindowSizeInPixels and then
+// glViewport(0, 0, whole drawable) before drawing, so on any frame that pass
+// runs last the viewport we observe at swap time is the full window.
+//
+// It is cross-checked rather than trusted: the overlay logs the game's own
+// viewport beside the derived rectangle, so a wrong aspect is one line away
+// from being visible instead of being a slow drift nobody can name.
+constexpr int      kContentAspectW = 16;
+constexpr int      kContentAspectH = 9;
+
 // Exponential smoothing time constant. CURSOR is throttled to ~20 messages a
 // second, so drawn raw the arrow reads as a peer with an unsteady hand. 60 ms
 // is roughly one throttle interval.

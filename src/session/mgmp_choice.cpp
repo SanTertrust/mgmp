@@ -384,7 +384,7 @@ void choice_init() {
                            " the two runs to diverge on the first event.");
         return;
     }
-    log_line("CHOICE", "armed -- %s",
+    log_line_lvl(LogLevel::Trace, "CHOICE", "armed -- %s",
              g.is_client ? "taking the host's event and level-up choices; local clicks"
                            " on those screens are suppressed"
                          : "publishing this peer's event and level-up choices");
@@ -392,7 +392,8 @@ void choice_init() {
 
 void choice_shutdown() {
     if (!g.on) return;
-    log_line("CHOICE", "done: %u sent, %u applied, %u local click(s) suppressed",
+    log_line_lvl(LogLevel::Trace, "CHOICE",
+             "done: %u sent, %u applied, %u local click(s) suppressed",
              g.sent, g.applied, g.swallowed);
     g.on = false;
     if (g.cs_ready) { DeleteCriticalSection(&g.cs); g.cs_ready = false; }

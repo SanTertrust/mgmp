@@ -20,6 +20,7 @@
 #include "mgmp_battleid.h"   // kNoBattle
 #include "mgmp_follow.h"
 #include "mgmp_combatlock.h"
+#include "mgmp_leave.h"
 
 // Declared by imgui_impl_win32.h's owner rather than the header itself.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
@@ -433,6 +434,23 @@ void draw_connect() {
         ImGui::SameLine();
         ImGui::TextDisabled("applying...");
     }
+
+    // ARM THE LEAVE PATH BY HAND. This exists because the feature has three
+    // stages that fail identically from the outside -- the host never announced,
+    // the client declined, or the client armed and never saw the button -- and
+    // pressing this skips the first two. If the pause menu is open and this does
+    // nothing, the fault is the click; if it works, the fault is upstream.
+    if (ImGui::Button("arm leave")) leave_request_local();
+    ImGui::SetItemTooltip("Pretend the host announced that it left the run:"
+                          " open the pause menu and the mod presses Quit To Menu."
+                          " A test of the click half on its own.");
+    ImGui::SameLine();
+    // Live, beside the button, because every stage of this fails invisibly and
+    // reading it out of the log afterwards has already cost two rounds of "it
+    // did not work" with no way to say which half.
+    char leave[192];
+    leave_status(leave, sizeof(leave));
+    ImGui::TextDisabled("%s", leave);
 
     if (session_last_action()[0]) {
         const char* a = session_last_action();

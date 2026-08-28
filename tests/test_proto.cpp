@@ -527,6 +527,7 @@ int main() {
         out.slot = 2;
         out.size = (uint32_t)sizeof(save);
         out.hash = savefile_hash(save, out.size);
+        out.fresh = 1;
         strcpy(out.name, "steamcampaign03.sav");
         out.data = save;
 
@@ -546,8 +547,68 @@ int main() {
         check(in.data != save, "and it is a copy, not the sender's buffer");
         check(memcmp(in.data, save, out.size) == 0, "bytes survive intact");
         check(savefile_hash(in.data, in.size) == out.hash, "hash agrees with the sender's");
+        check(in.fresh == 1, "fresh survives");
         free(in.data);
         free(frame);
+    }
+
+    // `fresh` sits between the name and the payload, so a wrong offset would
+    // shift the whole blob. Both values are round-tripped rather than just the
+    // interesting one: a decoder that ignored the byte and left the field at
+    // its default would pass a test that only ever checked fresh = 0.
+    printf("\n-- SAVEFILE's `fresh` byte round-trips both ways --\n");
+    {
+        uint8_t save[64];
+        for (size_t i = 0; i < sizeof(save); ++i) save[i] = (uint8_t)(i + 7u);
+
+        for (int want = 0; want <= 1; ++want) {
+            SaveFileMsg out{};
+            out.slot  = 1;
+            out.size  = (uint32_t)sizeof(save);
+            out.hash  = savefile_hash(save, out.size);
+            out.fresh = (uint8_t)want;
+            strcpy(out.name, "steamcampaign02.sav");
+            out.data = save;
+
+            uint32_t cap = savefile_frame_size(out);
+            uint8_t* frame = (uint8_t*)malloc(cap);
+            uint32_t n = enc_savefile(frame, cap, out);
+
+            Reader r(frame, n);
+            r.u8v();
+            SaveFileMsg in{};
+            check(dec_savefile(r, in), "decodes");
+            check(in.fresh == (uint8_t)want, want ? "fresh = 1 survives"
+                                                  : "fresh = 0 survives");
+            check(memcmp(in.data, save, out.size) == 0,
+                  "the payload is still aligned behind it");
+            free(in.data);
+            free(frame);
+        }
+    }
+
+    // The other half of the same story as `fresh`: that field says the host is
+    // STARTING a run, this message says it has left one. It carries nothing but
+    // a diagnostic scene name, so the only thing worth pinning is that an empty
+    // one is legal -- a host whose scene walk came back blank must still be able
+    // to say it left.
+    printf("\n-- HOSTLEFT round-trips, empty scene name included --\n");
+    {
+        const char* names[] = { "House", "MainMenu", "" };
+        for (const char* want : names) {
+            HostLeftMsg out{};
+            strcpy(out.scene, want);
+
+            uint8_t  frame[128];
+            uint32_t n = enc_hostleft(frame, sizeof(frame), out);
+            check(n > 0, "encodes");
+
+            Reader r(frame, n);
+            check(r.u8v() == MSG_HOSTLEFT, "type byte");
+            HostLeftMsg in{};
+            check(dec_hostleft(r, in), "decodes");
+            check(strcmp(in.scene, want) == 0, "the scene name survives");
+        }
     }
 
     printf("\n-- a truncated or oversized SAVEFILE allocates nothing --\n");

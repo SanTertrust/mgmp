@@ -50,6 +50,7 @@
 #include "mgmp_lockstep.h"
 #include "mgmp_follow.h"
 #include "mgmp_savefile.h"
+#include "mgmp_leave.h"
 #include "mgmp_rng.h"
 #include "mgmp_rtti.h"
 #include "mgmp_turnaction.h"
@@ -566,6 +567,21 @@ void __fastcall h_ButtonUpdate(void* self) {
     // load and a branch: combatlock_on_button's first test is the scope flag.
     combatlock_on_button(self);
     o_ButtonUpdate(self);
+
+    // AFTER the original, and this one has to be. Button::update recomputes the
+    // button's state and pushes it into the SWF before it returns, and
+    // Button::Click's own guards read that state -- clicking first would test
+    // the previous frame's. It is also where the game's own click would have
+    // landed: update dispatches at the bottom of its hover branch.
+    //
+    // Same trampoline reasoning as everywhere else: Button::Click is a call
+    // target, not a hook, so nothing here re-enters this detour.
+    savefile_on_button_update(self);
+
+    // The other half of the same idea: Play on the main menu gets a client
+    // INTO the host's run, Quit To Menu in the pause sidebar gets it back
+    // OUT when the host has left. Same slot, same trampoline reasoning.
+    leave_on_button_update(self);
 }
 
 // The aim preview turns the acting cat while a decision is held, writing the
@@ -731,6 +747,66 @@ bool rng_binding(Target t, void** detour, void*** original) {
     }
 }
 
+// Install one binding. Returns true only if it went live on THIS call, so a
+// caller can count what it actually added.
+//
+// `announce_off` separates the two passes. The startup pass lists every hook it
+// did not install, because that banner is meant to be a complete inventory of
+// what this process is running. The late pass (hooks_install_late) is only
+// interested in what it managed to add -- repeating the "off by default" lines
+// there would print the same inventory twice.
+bool install_one(const Binding& b, bool announce_off) {
+    const TargetDesc& t = kTargets[b.target];
+
+    // Already live. The late pass walks the whole table, so this is the normal
+    // case there rather than an error.
+    if (b.target >= 0 && b.target < T_COUNT && g_live[b.target]) return false;
+
+    if (!config().hook[b.target]) {
+        if (announce_off) {
+            // The RNG hooks default off and are implied by debug.record, so
+            // a flat "disabled" was misleading for them -- it read as if
+            // something had been turned off when it had not.
+            bool is_rng = (b.target == T_RandInt || b.target == T_RandFloat ||
+                           b.target == T_Rand2);
+            log_raw("  [-] %-9s %s (%s)", t.name, t.symbol,
+                    is_rng && !config().record ? "off: needs debug.record"
+                                               : "off by default");
+        }
+        return false;
+    }
+
+    void*  detour   = b.detour;
+    void** original = b.original;
+    rng_binding(b.target, &detour, &original);
+    if (!detour || !original) {
+        log_raw("  [!] %-9s no detour bound", t.name);
+        return false;
+    }
+
+    // Resolved by signature, not by RVA. Zero means it did not resolve at
+    // all, and resolve_init has already said so and decided whether that
+    // was survivable -- here it is simply a hook we do not install.
+    void* addr = (void*)addr_of(b.target);
+    if (!addr) {
+        log_raw("  [!] %-9s unresolved -- not hooking", t.name);
+        return false;
+    }
+    MH_STATUS s = MH_CreateHook(addr, detour, original);
+    if (s != MH_OK) {
+        log_raw("  [!] %-9s MH_CreateHook failed (%d) at %p", t.name, (int)s, addr);
+        return false;
+    }
+    s = MH_EnableHook(addr);
+    if (s != MH_OK) {
+        log_raw("  [!] %-9s MH_EnableHook failed (%d) at %p", t.name, (int)s, addr);
+        return false;
+    }
+    log_raw("  [+] %-9s %p  %s", t.name, addr, t.symbol);
+    if (b.target >= 0 && b.target < T_COUNT) g_live[b.target] = true;
+    return true;
+}
+
 } // namespace
 
 bool hooks_verify_module(uintptr_t base, char* err, size_t err_size) {
@@ -781,58 +857,31 @@ int hooks_install() {
     cursor_set_base(g_base);
     choice_set_base(g_base);
     savefile_set_base(g_base);
+    leave_set_base(g_base);
     overlay_set_base(g_base);
 
     int installed = 0;
-    for (const Binding& b : kBindings) {
-        const TargetDesc& t = kTargets[b.target];
-        if (!config().hook[b.target]) {
-            // The RNG hooks default off and are implied by debug.record, so
-            // a flat "disabled" was misleading for them -- it read as if
-            // something had been turned off when it had not.
-            bool is_rng = (b.target == T_RandInt || b.target == T_RandFloat ||
-                           b.target == T_Rand2);
-            log_raw("  [-] %-9s %s (%s)", t.name, t.symbol,
-                    is_rng && !config().record ? "off: needs debug.record"
-                                               : "off by default");
-            continue;
-        }
-
-        void*  detour   = b.detour;
-        void** original = b.original;
-        rng_binding(b.target, &detour, &original);
-        if (!detour || !original) {
-            log_raw("  [!] %-9s no detour bound", t.name);
-            continue;
-        }
-
-        // Resolved by signature, not by RVA. Zero means it did not resolve at
-        // all, and resolve_init has already said so and decided whether that
-        // was survivable -- here it is simply a hook we do not install.
-        void* addr = (void*)addr_of(b.target);
-        if (!addr) {
-            log_raw("  [!] %-9s unresolved -- not hooking", t.name);
-            continue;
-        }
-        MH_STATUS s = MH_CreateHook(addr, detour, original);
-        if (s != MH_OK) {
-            log_raw("  [!] %-9s MH_CreateHook failed (%d) at %p", t.name, (int)s, addr);
-            continue;
-        }
-        s = MH_EnableHook(addr);
-        if (s != MH_OK) {
-            log_raw("  [!] %-9s MH_EnableHook failed (%d) at %p", t.name, (int)s, addr);
-            continue;
-        }
-        log_raw("  [+] %-9s %p  %s", t.name, addr, t.symbol);
-        if (b.target >= 0 && b.target < T_COUNT) g_live[b.target] = true;
-        ++installed;
-    }
+    for (const Binding& b : kBindings)
+        if (install_one(b, /*announce_off=*/true)) ++installed;
 
     // After every hook is known, not before: a feature that is only safe while
     // another hook runs has to be told, and aim_set_base ran above -- before
     // anything was installed -- so it could not have asked then.
     aim_on_hooks_installed();
+    return installed;
+}
+
+int hooks_install_late() {
+    int installed = 0;
+    for (const Binding& b : kBindings)
+        if (install_one(b, /*announce_off=*/false)) ++installed;
+
+    // Re-asked for the same reason it is asked at startup, and it MATTERS here:
+    // T_HighlightRefresh is one of the hooks this pass exists to add, and
+    // mgmp_aim refuses to call the ability highlight without it. Skipping this
+    // would leave the aim preview permanently disarmed in exactly the session
+    // that just fixed its hooks.
+    if (installed) aim_on_hooks_installed();
     return installed;
 }
 

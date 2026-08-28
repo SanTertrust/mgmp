@@ -544,6 +544,9 @@ enum Call : int {
     // second block below the table.
     C_TacticsMove,           // void(TacticsObject*, iVec2D tile, bool, bool)
     C_RecomputeStats,        // void(Character*, Ability*, bool)
+
+    // --- pressing Play for a client that is stuck on the menu ------------
+    C_ButtonClick,           // void(Button*, bool force) -- sub_1409764B0
     C_COUNT
 };
 
@@ -744,6 +747,36 @@ static const CallDesc kCalls[C_COUNT] = {
     //     rcx = Character*,     edx = 0 (no ability),       r8b = 1
     { 0x0082E520, "TacticsObject::Move" },
     { 0x00101C60, "Character::recompute_stats" },
+
+    // sub_1409764B0 -- glaiel::Button::Click(Button*, bool force).
+    //
+    // CALLING IT IS PRESSING THAT BUTTON, the same claim as
+    // SaveSelection::ContinueSlot, and established the same way -- by reading
+    // what the game's own click path does. Button::update @ 0x140975F00
+    // reaches it at 0x14097644D as `sub_1409764B0(this, 0)`, at the bottom of
+    // the hover-and-mouse-up branch, and that is the ONLY call site.
+    //
+    // The body is the whole click: it plays `<button name>_Click`, then
+    //
+    //     v8 = *(Button + 240);
+    //     if (v8) (*(*(_QWORD*)v8 + 16))(v8);      // std::function _Do_call
+    //
+    // -- the callback MenuPanel::register_button stored on the button -- and
+    // finishes with the radio-group and focus bookkeeping. For the main menu's
+    // Play button that callback is the lambda at 0x1401BEBE0, which starts the
+    // game's own fade transition into the SaveSelectionScreen scene.
+    //
+    // WE PASS force = 0, matching the game's call exactly. `force` only
+    // bypasses the Button+89 guard; the other three -- Button+764 != 1, the
+    // Button+96 <= Button+104 timer, and sub_1409766C0 -- still apply, so a
+    // button the player genuinely could not click is one we do not click
+    // either. A press that does not take is logged rather than forced, because
+    // "the button refused" and "the button is not there" need different fixes
+    // and forcing would hide both.
+    //
+    // The button is identified by the std::string at Button+504 (kBtn_Name),
+    // never by pointer or by position in a panel.
+    { 0x009764B0, "glaiel::Button::Click" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only
@@ -940,6 +973,77 @@ constexpr uintptr_t kRefGenOffset    = 8;     // generation lives at ptr-8
 // while the state is 4, so the bar stops eating clicks as a side effect.
 constexpr uintptr_t kBtn_State    = 752;
 constexpr int32_t   kBtnState_Disabled = 4;
+
+// Button+504 is the button's own name, a std::string, and it is how the client
+// finds the main menu's Play button without knowing anything about the menu.
+//
+// Two readings, both in this build:
+//   * MainMenu::init__inner_0 @ 0x1401B85BB assigns it directly --
+//     sub_140052080(button + 504, "MainMenu_Button_Play", 20), and the three
+//     lines after it do the same for Settings, Quit and Meow;
+//   * Button::Click reads the SIZE of that same string as *(Button + 520) to
+//     build the "<name>_Click" sound event -- 504 + 16 is exactly where an
+//     MSVC std::string keeps its length.
+//
+// The four names in the main menu are MainMenu_Button_{Play,Settings,Quit,Meow}.
+constexpr uintptr_t kBtn_Name     = 504;
+constexpr const char kBtnName_MainMenuPlay[] = "MainMenu_Button_Play";
+
+// The pause menu's way out of a run, named the same way and registered by the
+// same helper: PauseMenu::SetupMainSidebar @ 0x14028AB50 calls
+// MenuPanel::register_button and then sub_140052080(button + 504,
+// "Button_PauseMenu_QuitToMenu", 27). Its callback is the lambda whose body is
+// PauseMenu::SetupMainSidebar__inner_3 @ 0x14029E7F0, which builds a
+// "QuitToMenuTransition" component -- i.e. clicking it IS quitting to the menu,
+// fade and all.
+//
+// THE BUTTON ONLY EXISTS WHILE THE PAUSE MENU IS OPEN, and that is a real limit
+// rather than an oversight. PauseMenu::init runs when the player pauses (it
+// plays "PauseMenu_Open" as its last statement) and SetupMainSidebar builds the
+// buttons from there, so a client that has been told the host left the run
+// cannot be dragged out on its own -- see mgmp_leave.h.
+//
+// The sidebar's five buttons are Button_PauseMenu_{Resume, Settings,
+// QuitToMenu, QuitToDesktop, GiveUp}.
+constexpr const char kBtnName_PauseQuitToMenu[] = "Button_PauseMenu_QuitToMenu";
+
+// --- the loaded-scene list ---------------------------------------------------
+//
+// READ, NEVER CALLED. glaiel's own scene lookup is sub_1409CA630(Director*,
+// std::string*): a linear scan of a std::vector<Scene*> whose begin/end sit at
+// Director+0 and Director+8, comparing the std::string at Scene+1208 (size at
+// +1224, capacity at +1232 -- the ordinary MSVC layout). sub_1409CA700 is the
+// identical scan with one extra test, Scene+1243 == 0, and that byte is the
+// "marked for destruction" flag: sub_1401BFE80 and sub_1401BFDC0 both set it on
+// the current scene immediately before getting-or-creating the one they are
+// transitioning to.
+//
+// Walking it ourselves costs three guarded reads per scene and needs no call
+// target, no signature and no std::string of ours in the game's allocator. It
+// is also self-proving: the names come back in the log, so a moved offset shows
+// up as garbage rather than as a confident wrong answer.
+//
+// Director* is Component+40, with three readings that agree --
+// MewDirector::IsTutorialRunActive @ 0x1403AECB0 (*(this+40) -> the "Cutscene"
+// lookup), PauseMenu::SetupMainSidebar (*(this+40) -> the "House" lookup), and
+// the MainMenu transitions above (*(MainMenu+40) -> get-or-create "MainMenu").
+constexpr uintptr_t kDir_SceneDirector   = 40;    // MewDirector+40 = Director*
+constexpr uintptr_t kDirector_ScenesBegin = 0;    // Scene**
+constexpr uintptr_t kDirector_ScenesEnd   = 8;    // Scene**
+constexpr uintptr_t kScene_Name           = 1208; // std::string
+constexpr uintptr_t kScene_Destroying     = 1243; // u8, 1 = being torn down
+
+// The three scene names that mean "this peer is NOT inside an adventure". All
+// three are used as scene keys by the game itself: "House" and "Cutscene" in
+// PauseMenu::SetupMainSidebar's lookups, "MainMenu" in the two transition
+// bodies at 0x1401BFDC0 / 0x140756DE0, "SaveSelectionScreen" in sub_1401BFE80.
+//
+// MewDirector::ContinueAdventure's first statement is DestroyScene("House"),
+// which is what makes the House test decisive rather than suggestive: starting
+// an adventure explicitly tears that scene down.
+constexpr const char kScene_House      [] = "House";
+constexpr const char kScene_MainMenu   [] = "MainMenu";
+constexpr const char kScene_SaveSelect [] = "SaveSelectionScreen";
 
 // glaiel::Brain -- the Character the brain drives. Read off the two sites in
 // Brain::UpdateDecision described in the PREVIEWFACE target above: one passes

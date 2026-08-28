@@ -55,6 +55,7 @@ add_library(mgmp SHARED
     src/session/mgmp_session.cpp
     src/session/mgmp_follow.cpp
     src/session/mgmp_savefile.cpp
+    src/session/mgmp_leave.cpp
     src/session/mgmp_catsync.cpp
     src/session/mgmp_invsync.cpp
     src/session/mgmp_runhist.cpp

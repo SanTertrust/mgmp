@@ -180,21 +180,26 @@ uint64_t* remembered(uint64_t id) {
     return &g.sent_hash[g.sent_count++];
 }
 
+// Read from the CONFIG rather than the live session, for the same reason
+// mgmp_savefile does: the host publishes at its first map node, which can be
+// before a peer has finished connecting.
+//
+// NOT LATCHED -- see the note on mgmp_savefile's ensure_state. The panel's
+// connect buttons can set the role after this has already run once, and a
+// latched "off" is a module that never arms for the rest of the process.
 void ensure_state() {
-    static bool once = false;
-    if (once) return;
-    once = true;
-    // Read from the CONFIG rather than the live session, for the same reason
-    // mgmp_savefile does: the host publishes at its first map node, which can be
-    // before a peer has finished connecting.
     const Config& c = config();
     bool host   = _stricmp(c.net_role, "host")   == 0;
     bool client = _stricmp(c.net_role, "client") == 0;
     g.is_client = client;
     g.on = tune::kCatSync && (host || client) && g.resolved;
-    if (!g.on && tune::kCatSync && (host || client))
+
+    static bool said = false;
+    if (!g.on && tune::kCatSync && (host || client) && !said) {
+        said = true;
         log_line("CATSYNC", "!! disabled: the game functions it calls did not "
                             "verify against this build");
+    }
 }
 
 } // namespace
@@ -239,7 +244,7 @@ void catsync_init() {
     ensure_state();
     if (!g.on || g.announced) return;
     g.announced = true;
-    log_line("CATSYNC", "armed -- %s",
+    log_line_lvl(LogLevel::Trace, "CATSYNC", "armed -- %s",
              g.is_client ? "cats will be overwritten with the host's"
                          : "this peer's cats will be published to the client");
 }
@@ -250,8 +255,11 @@ void catsync_shutdown() {
     if (!g.announced) return;
     // `stranded` is the drop this module is allowed to make, so it says so:
     // a cat held for a map tick that never came is a cat this peer never got.
-    log_line("CATSYNC", "done: %u pushed, %u applied, %u unchanged, "
-                        "%u held (%u superseded), %u still held at exit",
+    // It is also the ONLY thing in this line that means something went wrong,
+    // which is why it and not the line decides the severity.
+    log_line_lvl(stranded ? LogLevel::Warn : LogLevel::Trace, "CATSYNC",
+             "done: %u pushed, %u applied, %u unchanged, "
+             "%u held (%u superseded), %u still held at exit",
              g.pushed, g.applied, g.skipped, g.deferred, g.coalesced, stranded);
 }
 
