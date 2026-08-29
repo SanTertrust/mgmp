@@ -156,10 +156,14 @@ constexpr uint32_t kCursorRefH     = 720;
 // glyph changed size the moment the state changed -- measured from the shipped
 // PNGs, not inferred.
 //
-// That defect is fixed independently (kCursorInkRefH below), so turning this
-// back on no longer changes the geometry. It is off because the report has not
-// been re-measured since, and one word restores it.
-constexpr bool     kPeerCursorArt  = false;
+// That defect is fixed independently (kCursorInkRefH below): every state is
+// scaled by `default`'s ink height, so the glyph is the same size and sits in
+// the same place whichever cursor the peer is showing. The one candidate the
+// report had is therefore gone, and this is back ON -- while it was off, `mode`
+// was read, published, transmitted and stored, and then thrown away one line
+// into draw_cursor. A field that survives the whole pipeline and dies at the
+// draw call looks exactly like a replication failure from every log line.
+constexpr bool     kPeerCursorArt  = true;
 
 // Sizing reference: `default`'s ink height, measured above. EVERY state is now
 // scaled by this rather than by its own ink box, so which cursor a peer is

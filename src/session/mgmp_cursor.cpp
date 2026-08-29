@@ -390,11 +390,19 @@ void cursor_on_status_menu(void* sm) {
         out.on_board = 0;
     }
 
+    // EVERY FIELD OF THE MESSAGE, and `mode` is the one that used to be left
+    // out. This test decides whether the frame is worth a packet, so a field
+    // missing from it is a field that only ever travels on the 500 ms
+    // heartbeat: pick up a spell and the peer keeps drawing the plain arrow for
+    // up to half a second, and a player who selects, aims and clicks inside
+    // that window never shows the spell cursor at all. Same class of defect as
+    // sending a field nobody draws -- the pipeline is intact, the screen wrong.
     const bool moved = !g.have_sent ||
                        out.x != g.last_sent.x || out.y != g.last_sent.y ||
                        out.on_board  != g.last_sent.on_board ||
                        out.owns_turn != g.last_sent.owns_turn ||
                        out.nx != g.last_sent.nx || out.ny != g.last_sent.ny ||
+                       out.mode != g.last_sent.mode ||
                        out.battle_id != g.last_sent.battle_id;
     const uint64_t since = now - g.last_send_at;
     if ((moved && since >= kMinSendGapMs) || since >= kHeartbeatMs) {
