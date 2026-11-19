@@ -53,12 +53,7 @@ void format_turn_action(char* out, size_t out_size, const void* ta, bool raw_byt
                             " [abil=%p actor=%p]", a.ability, a.actor);
         if (m > 0) n += m;
     }
-
-    if (raw_bytes && tune::kTaDump) {
-        char hex[832];
-        mem_hexdump(hex, sizeof(hex), ta, tune::kTaDump);
-        _snprintf_s(out + n, out_size - n, _TRUNCATE, " raw=[%s]", hex);
-    }
+    (void)raw_bytes;
 }
 
 uint64_t turn_action_digest(const void* ta) {

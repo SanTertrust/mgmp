@@ -778,7 +778,7 @@ void snapshot_cats(void* turn_control) {
         strcpy_s(bcls[i], "?");
         if (mem_read((const uint8_t*)g.cats[i] + kChar_Brain, &brain, sizeof(brain)) && brain)
             rtti_class_name(brain, bcls[i], sizeof(bcls[i]));
-        g.human_cat[i] = (strstr(bcls[i], tune::kReplayBrains) != nullptr);
+        g.human_cat[i] = (strstr(bcls[i], "PlayerBrain") != nullptr);
         if (g.human_cat[i]) ++g.humans;
     }
 
@@ -948,7 +948,7 @@ void snapshot_cats(void* turn_control) {
 
     if (g.humans == 0)
         log_line("LOCKSTEP", "!! no human-driven cats in this battle -- lockstep has"
-                             " nothing to split (matched brain '%s')", tune::kReplayBrains);
+                             " nothing to split (matched brain 'PlayerBrain')");
 
     // --- publish the split ---------------------------------------------
     //

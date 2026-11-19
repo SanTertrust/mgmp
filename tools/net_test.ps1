@@ -11,7 +11,6 @@
 #
 #   .\tools\net_test.ps1 -Build                     build, deploy, launch both
 #   .\tools\net_test.ps1                            deploy + launch (no rebuild)
-#   .\tools\net_test.ps1 -Record                    also capture .mgr files
 #   .\tools\net_test.ps1 -HostCats 19,20 -ClientCats 21,22   (manual override)
 #   .\tools\net_test.ps1 -Summary                   read the newest log pair
 #   .\tools\net_test.ps1 -Stop                      kill both instances
@@ -32,11 +31,6 @@ param(
     [switch]$Build,
     [switch]$Stop,
     [switch]$Summary,
-    # The RNG hooks are pure overhead unless a capture is being taken, so they
-    # follow `record` and are OFF in a normal lockstep run -- which is why no
-    # lockstep log so far can name the passive behind a proc. Turn this on when
-    # the question is 'which RollChance fired', not 'did the peers agree'.
-    [switch]$Record,
     # Stop the client following the host through the map screen, i.e. drive
     # both instances to the same battle by hand. That is how phase 4 was
     # tested, and it is still the way to tell a battle-layer problem from a
@@ -267,12 +261,6 @@ foreach ($peer in 'host', 'client') {
     # and the evidence -- with it, which is the whole thing -NoHalt is trying to
     # keep alive.
     $cfg.debug.desync_halt     = -not $NoHalt
-    $cfg.debug.record          = [bool]$Record
-    $cfg.debug.record_note     = "lockstep $peer, cats [$cats]"
-    # Lockstep owns Brain::GetChoice. Leaving a replay file configured would put
-    # two injectors on one buffer, and lockstep wins -- so the replay would
-    # silently never advance.
-    $cfg.debug.replay          = ''
 
     # Save sharing is not optional and has no knob any more -- it is how the
     # client acquires the run. It used to be gated by a switch that defaulted

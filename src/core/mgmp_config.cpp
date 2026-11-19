@@ -163,13 +163,6 @@ void hook_defaults() {
     // below by net.role and by the panel.
     g_cfg.hook[T_FrameBegin] = false;
 
-    // The hottest things in the harness and pure overhead unless a recording is
-    // being taken, so they follow debug.record rather than standing alone.
-    g_cfg.hook[T_RandInt]    = false;
-    g_cfg.hook[T_RandFloat]  = false;
-    g_cfg.hook[T_Rand2]      = false;
-    g_cfg.hook[T_RollChance] = false;
-
     // The two that MODIFY the game -- see mgmp_tuning.h.
     g_cfg.hook[T_SaveScumPenalty] = tune::kHookSaveScum;
     g_cfg.hook[T_TimeDelayTick]   = tune::kHookTimeDelay;
@@ -262,14 +255,6 @@ void hooks_implied_by(bool net_configured) {
     // start a session in a process launched with role = off, and a socket with
     // nothing pumping it is the same dead handshake as above.
     if (g_cfg.ui) g_cfg.hook[T_FrameBegin] = true;
-
-    if (g_cfg.record) {
-        g_cfg.hook[T_RandInt]    = true;
-        g_cfg.hook[T_RandFloat]  = true;
-        g_cfg.hook[T_Rand2]      = true;
-        g_cfg.hook[T_RollChance] = true;
-        if (tune::kRecordFrames) g_cfg.hook[T_FrameBegin] = true;
-    }
 }
 
 } // namespace
@@ -338,22 +323,10 @@ void config_load(const wchar_t* dll_dir) {
         read_bool(*d, "follow",          g_cfg.net_follow);
         read_bool(*d, "join_barrier",    g_cfg.net_join_barrier);
         read_bool(*d, "desync_halt",     g_cfg.net_desync_halt);
-        read_bool(*d, "record",          g_cfg.record);
-        read_str (*d, "record_note",     g_cfg.record_note, sizeof(g_cfg.record_note));
-        read_path(*d, "replay", dll_dir, g_cfg.replay_path, 512);
         // Capped rather than trusted: a stray extra digit here would look
         // exactly like the mod having hung.
         read_uint(*d, "follow_delay_ms", g_cfg.net_follow_delay_ms, 0, 600000);
     }
-
-    // The capture is named after the log rather than separately. The two belong
-    // to one run, and two independent names is how run A's text output was lost
-    // to run B -- both defaulted to a fixed filename and the second clobbered
-    // the first.
-    wcsncpy_s(g_cfg.record_path, g_cfg.log_path, _TRUNCATE);
-    if (wchar_t* dot = wcsrchr(g_cfg.record_path, L'.'))
-        if (!wcschr(dot, L'\\')) *dot = 0;
-    wcsncat_s(g_cfg.record_path, L".mgr", _TRUNCATE);
 
     const bool net_configured = _stricmp(g_cfg.net_role, "host")   == 0 ||
                                 _stricmp(g_cfg.net_role, "client") == 0;

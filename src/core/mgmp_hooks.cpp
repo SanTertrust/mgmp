@@ -43,15 +43,12 @@
 #include "mgmp_hooks.h"
 #include "mgmp_log.h"
 #include "mgmp_mem.h"
-#include "mgmp_record.h"
-#include "mgmp_replay.h"
 #include "mgmp_resolve.h"
 #include "mgmp_session.h"
 #include "mgmp_lockstep.h"
 #include "mgmp_follow.h"
 #include "mgmp_savefile.h"
 #include "mgmp_leave.h"
-#include "mgmp_rng.h"
 #include "mgmp_rtti.h"
 #include "mgmp_turnaction.h"
 
@@ -90,7 +87,6 @@ fn_this_i32   o_BeginTurn   = nullptr;
 fn_this       o_EndTurn     = nullptr;
 fn_this       o_FrameBegin  = nullptr;
 fn_this_ptr   o_ApplyAction = nullptr;
-fn_this_ptr   o_QueueDecision = nullptr;
 fn_ptr_i32    o_SaveScum      = nullptr;
 fn_this       o_TimeDelay     = nullptr;
 fn_this       o_MapUpdate     = nullptr;
@@ -121,17 +117,6 @@ typedef void* (__fastcall* fn_three_ptr)(void* a, void* b, void* c);
 fn_three_ptr  o_SFStoreBlob   = nullptr;
 fn_three_ptr  o_SFLoadBlob    = nullptr;
 
-// TurnControl+0x60 is the live count of queued decisions, read off the drain
-// loop in TurnControl::update (ring at +0x48, capacity at +0x50, head at +0x58,
-// count at +0x60). Recorded rather than derived because a queue that grows in
-// one run and not another is the cheapest desync signal we have.
-uint32_t queue_depth(const void* turn_control) {
-    if (!turn_control) return 0;
-    uint64_t n = 0;
-    if (!mem_read((const uint8_t*)turn_control + 0x60, &n, sizeof(n))) return 0;
-    return n > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)n;
-}
-
 // ---- shared formatting helpers -------------------------------------------
 
 // "cls=glaiel::MoveAbility" plus, when pointers=1, " this=00007FF6..."
@@ -150,7 +135,7 @@ struct Who {
 struct TaDump {
     char text[1200];
     explicit TaDump(const void* ta) {
-        format_turn_action(text, sizeof(text), ta, tune::kTaRaw);
+        format_turn_action(text, sizeof(text), ta, false);
     }
 };
 
@@ -171,29 +156,6 @@ void __fastcall h_NextTurn(void* self) {
     Who      w(self, "tc");
     log_line("NEXTTURN", ">>> turn %u begins  %s", t, w.text);
 
-    // Also the flush point for the binary stream: a turn boundary is the one
-    // place in a turn-based game where a few hundred microseconds of file I/O
-    // cannot be mistaken for a frame-pacing effect.
-    uint64_t total = 0, global = 0;
-    rng_counters(&total, &global);
-    record_turn(t, self, total, global);
-    if (record_active()) {
-        uint32_t distinct = 0; bool overflow = false;
-        uint64_t st = 0, hp = 0, im = 0, tl = 0;
-        record_stream_stats(&distinct, &overflow, &st, &hp, &im, &tl);
-        uint32_t unknown = record_unknown_slots();
-        log_line("RNG", "turn %u: %llu draws | tls+0x178=%llu other_tls=%llu"
-                        " stack=%llu heap=%llu image=%llu | %u distinct streams%s%s",
-                 t, (unsigned long long)total, (unsigned long long)global,
-                 (unsigned long long)tl, (unsigned long long)st,
-                 (unsigned long long)hp, (unsigned long long)im, distinct,
-                 overflow ? " (TABLE OVERFLOWED)" : "",
-                 unknown ? " (UNRESOLVED ABILITY SLOTS)" : "");
-        if (unknown)
-            log_line("SLOT", "%u action(s) so far named an ability the actor does not"
-                             " own -- replay cannot reproduce those", unknown);
-    }
-
     o_NextTurn(self);
     log_line("NEXTTURN", "<<< turn %u dispatched", t);
 }
@@ -201,31 +163,8 @@ void __fastcall h_NextTurn(void* self) {
 void* __fastcall h_GetChoice(void* self, void* out) {
     void* ret = o_GetChoice(self, out);
 
-    // --- run B: inject the recorded decision -----------------------------
-    //
-    // The original still runs first. It is a poll with no RNG of its own
-    // (Brain::GetChoice has zero TLS loads), but it does its own bookkeeping,
-    // and overwriting its result is a smaller intervention than skipping it.
-    //
-    // Two cases, and the second matters as much as the first:
-    //   - we have a decision to inject -> overwrite the buffer with it;
-    //   - we have one outstanding but not yet applied -> force type=1, so a
-    //     stray click during replay cannot queue a second decision on top of
-    //     the one already in flight.
-    // Lockstep and replay are alternatives, never both: one injects from a
-    // socket, the other from a file, and they would fight over the same buffer.
     if (lockstep_active()) {
         if (lockstep_fill_choice(self, ret)) return ret;
-    } else if (replay_active()) {
-        if (replay_fill_choice(self, ret)) {
-            TaDump d(ret);
-            log_line("REPLAY", "injected %s", d.text);
-            return ret;
-        }
-        if (replay_outstanding()) {
-            uint32_t none = TA_None;
-            mem_write(ret, &none, sizeof(none));
-        }
     }
 
     // Suppress the poll. Without this a single tutorial battle produced 3422
@@ -234,7 +173,7 @@ void* __fastcall h_GetChoice(void* self, void* out) {
     TurnAction a{};
     bool       decided = mem_read(ret, &a, sizeof(a)) && a.type != TA_None;
 
-    if (!decided && !tune::kChoiceAll) {
+    if (!decided) {
         InterlockedIncrement(&polls);
         return ret;
     }
@@ -279,91 +218,9 @@ void __fastcall h_ApplyAction(void* self, void* ta) {
     TaDump d(ta);
     log_line("APPLY", "%s", d.text);
 
-    if (record_active()) {
-        TurnAction a{};
-        if (mem_read(ta, &a, sizeof(a))) {
-            EvAction e{};
-            e.turn        = log_turn();
-            e.type        = a.type;
-            e.target_x    = a.target_x;
-            e.target_y    = a.target_y;
-            e.dir_x       = a.dir_x;
-            e.dir_y       = a.dir_y;
-            e.ability_ptr = (uint64_t)a.ability;
-            e.actor_ptr   = (uint64_t)a.actor;
-            e.ability_cls = record_intern_class(a.ability);
-            e.actor_cls   = record_intern_class(a.actor);
-            e.queue_depth = queue_depth(self);
-            e.b30         = a.tail[0x30 - 0x28];
-            e.b31         = a.tail[0x31 - 0x28];
-
-            // The identity the replayer will actually use. TurnAction+0x20
-            // arrives NULL from the brain -- Character::DoAction fills it in,
-            // and that runs *after* ApplyTurnAction -- so the actor has to come
-            // from TurnControl itself here. Prefer the action's own actor when
-            // it happens to be set (type 6 reaction broadcasts carry one).
-            const void* actor = a.actor ? a.actor : current_actor(self);
-            AbilitySlot slot  = ability_slot_of(actor, a.ability);
-            e.slot_kind  = slot.kind;
-            e.slot_index = slot.index;
-            if (slot.kind == SLOT_UNKNOWN) record_note_unknown_slot();
-
-            char gon[64];
-            if (ability_gon_name(a.ability, gon, sizeof(gon)))
-                e.ability_name = record_intern_name(gon);
-
-            // Character+0x68 is the Brain (TurnControl::update reads exactly
-            // this to call UpdateDecision). Its class separates the human's
-            // decisions from the AI's, and only the human's are replayable.
-            const void* brain = nullptr;
-            if (actor && mem_read((const uint8_t*)actor + 0x68, &brain, sizeof(brain)))
-                e.brain_cls = record_intern_class(brain);
-
-            // +0x04 is deliberately absent: it is uninitialized padding and
-            // would differ between runs for no reason. See mgmp_turnaction.h.
-            record_action(e);
-        }
-    }
-
-    // Advance and validate the replay FIFO. Done before the original runs, so
-    // the comparison sees the action exactly as it was recorded -- ApplyTurnAction
-    // mutates the slot at TurnControl+0x90 on its way through.
-    if (replay_active())   replay_on_applied(ta, current_actor(self));
     if (lockstep_active()) lockstep_on_applied(ta, current_actor(self));
 
     o_ApplyAction(self, ta);
-}
-
-// The push side of the ring. Fires for every deferred reaction a passive or
-// status queues, which is where types 6 and 7 come from -- neither ever
-// originates in a brain, so neither goes on the wire, but both are derived from
-// proc rolls and so both diverge the instant an RNG stream does.
-void __fastcall h_QueueDecision(void* self, void* ta) {
-    if (record_active()) {
-        uint32_t type = 0;
-        if (mem_read(ta, &type, sizeof(type)) && type > TA_None) {
-            // type == 1 is the brain's "nothing decided yet" poll. QueueDecision
-            // rejects it internally, so it never reaches the ring -- but the call
-            // still happens, once per frame, for as long as the player is
-            // thinking. Run A recorded 3787 of them against 30 real pushes.
-            //
-            // They are not just volume: the count is a function of how long a
-            // human took to move and of the frame rate, so it differs between
-            // any two runs by construction. Recording them would make every
-            // diff fail on the first turn for a reason that means nothing.
-            EvQueue q{};
-            q.turn = log_turn();
-            q.type = type;
-            // Depth is sampled before the push, so +1 is what the ring will
-            // hold once the original returns.
-            q.depth_after = queue_depth(self) + 1;
-            uintptr_t ret = (uintptr_t)_ReturnAddress();
-            q.site = (ret >= g_base && (ret - g_base) <= 0xFFFFFFFFull)
-                         ? (uint32_t)(ret - g_base) : 0;
-            record_queue(q);
-        }
-    }
-    o_QueueDecision(self, ta);
 }
 
 // The one hook that changes the game instead of watching it.
@@ -661,18 +518,6 @@ void* __fastcall h_SFLoadBlob(void* self, void* key, void* bs) {
 }
 
 void __fastcall h_FrameBegin(void* self) {
-    static LONG volatile frames = 0;
-    LONG n = InterlockedIncrement(&frames);
-    uint32_t every = tune::kFrameLogEvery;
-    if (every && (n == 1 || (n % (LONG)every) == 0))
-        log_line("FRAME", "frame %ld", n);
-
-    // Frame markers are what let Run D ask its question: with identical actions
-    // and a deliberately stalled frame rate, does the draw sequence between two
-    // actions change? Off by default because on a clean recording they are just
-    // volume.
-    if (tune::kRecordFrames) record_frame((uint32_t)n);
-
     // The network is pumped here rather than at a turn boundary so messages
     // keep arriving while a brain is polled -- a peer's decision has to be able
     // to land in the middle of our wait for it, not only between turns.
@@ -700,8 +545,6 @@ const Binding kBindings[] = {
     { T_FrameBegin,  (void*)&h_FrameBegin,  (void**)&o_FrameBegin  },
     { T_ApplyAction, (void*)&h_ApplyAction, (void**)&o_ApplyAction },
 
-    { T_QueueDecision, (void*)&h_QueueDecision, (void**)&o_QueueDecision },
-
     { T_MapUpdate,   (void*)&h_MapUpdate,   (void**)&o_MapUpdate   },
     { T_EnterNode,   (void*)&h_EnterNode,   (void**)&o_EnterNode   },
 
@@ -726,26 +569,7 @@ const Binding kBindings[] = {
 
     { T_SaveScumPenalty, (void*)&h_SaveScum, (void**)&o_SaveScum },
     { T_TimeDelayTick,   (void*)&h_TimeDelay, (void**)&o_TimeDelay },
-
-    // Detours and originals live in mgmp_rng.cpp so the hot path is compiled
-    // without the tracing machinery this file pulls in.
-    { T_RandInt,   nullptr, nullptr },
-    { T_RandFloat, nullptr, nullptr },
-    { T_Rand2,     nullptr, nullptr },
-    { T_RollChance,nullptr, nullptr },
 };
-
-// Resolves the three RNG bindings, which are not static initialisers because
-// their detours are defined in another translation unit.
-bool rng_binding(Target t, void** detour, void*** original) {
-    switch (t) {
-    case T_RandInt:   *detour = rng_detour_randint();   *original = rng_original_randint();   return true;
-    case T_RandFloat: *detour = rng_detour_randfloat(); *original = rng_original_randfloat(); return true;
-    case T_Rand2:     *detour = rng_detour_rand2();     *original = rng_original_rand2();     return true;
-    case T_RollChance:*detour = rng_detour_rollchance();*original = rng_original_rollchance();return true;
-    default: return false;
-    }
-}
 
 // Install one binding. Returns true only if it went live on THIS call, so a
 // caller can count what it actually added.
@@ -764,21 +588,13 @@ bool install_one(const Binding& b, bool announce_off) {
 
     if (!config().hook[b.target]) {
         if (announce_off) {
-            // The RNG hooks default off and are implied by debug.record, so
-            // a flat "disabled" was misleading for them -- it read as if
-            // something had been turned off when it had not.
-            bool is_rng = (b.target == T_RandInt || b.target == T_RandFloat ||
-                           b.target == T_Rand2);
-            log_raw("  [-] %-9s %s (%s)", t.name, t.symbol,
-                    is_rng && !config().record ? "off: needs debug.record"
-                                               : "off by default");
+            log_raw("  [-] %-9s %s (off by default)", t.name, t.symbol);
         }
         return false;
     }
 
     void*  detour   = b.detour;
     void** original = b.original;
-    rng_binding(b.target, &detour, &original);
     if (!detour || !original) {
         log_raw("  [!] %-9s no detour bound", t.name);
         return false;
@@ -847,7 +663,6 @@ int hooks_install() {
         return -1;
     }
 
-    rng_set_base(g_base);
     catsync_set_base(g_base);
     invsync_set_base(g_base);
     runhist_set_base(g_base);

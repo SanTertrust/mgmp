@@ -10,8 +10,6 @@
 #include "mgmp_hooks.h"
 #include "mgmp_resolve.h"
 #include "mgmp_log.h"
-#include "mgmp_record.h"
-#include "mgmp_replay.h"
 #include "mgmp_session.h"
 #include "mgmp_ui.h"
 
@@ -56,7 +54,7 @@ DWORD WINAPI init_thread(LPVOID) {
     config_load(g_dll_dir);
     breadcrumb("init_thread: config loaded");
 
-    log_init(config().log_path, tune::kConsole);
+    log_init(config().log_path);
     breadcrumb("init_thread: log open");
 
     wchar_t exe[MAX_PATH] = {};
@@ -64,12 +62,11 @@ DWORD WINAPI init_thread(LPVOID) {
     HMODULE   main_mod = GetModuleHandleW(nullptr);
     uintptr_t base     = (uintptr_t)main_mod;
 
-    log_raw("=== mgmp phase 1 trace harness ===");
+    log_raw("=== mgmp ===");
     log_raw("host   : %S", exe);
     log_raw("base   : %p  (pinned imagebase 0x140000000)", (void*)base);
     log_raw("pid    : %lu", GetCurrentProcessId());
-    log_raw("dumping %u bytes of TurnAction, pointers=%d",
-            tune::kTaDump, (int)tune::kPointers);
+    log_raw("pointers=%d", (int)tune::kPointers);
 
     char err[256] = {};
     if (!hooks_verify_module(base, err, sizeof(err))) {
@@ -95,39 +92,6 @@ DWORD WINAPI init_thread(LPVOID) {
     if (config().parse_warnings[0])
         log_raw("[!] mgmp.json: %s", config().parse_warnings);
 
-    if (config().record) {
-        const IMAGE_DOS_HEADER*   dos = (const IMAGE_DOS_HEADER*)base;
-        const IMAGE_NT_HEADERS64* nt  = (const IMAGE_NT_HEADERS64*)(base + dos->e_lfanew);
-        record_set_image(base, nt->OptionalHeader.SizeOfImage);
-        record_init(config().record_path, nt->OptionalHeader.SizeOfImage, config().record_note);
-        if (record_active())
-            log_raw("record : ON  -> %S   note='%s'",
-                    config().record_path, config().record_note);
-        else
-            log_raw("[!] record: ON was requested but the stream did not open"
-                    " -- continuing WITHOUT a capture");
-    } else {
-        log_raw("record : OFF (debug.record = true in mgmp.json captures a run)");
-    }
-
-    // Run B. Loaded after the recorder so a replay run captures its own stream
-    // to diff against the one it is replaying -- replaying without recording
-    // reproduces a battle but measures nothing.
-    if (config().replay_path[0]) {
-        replay_init(config().replay_path, tune::kReplayBrains);
-        if (replay_active())
-            log_raw("replay : ON  <- %S   inject into brains matching '%s'",
-                    config().replay_path, tune::kReplayBrains);
-        else
-            log_raw("[!] replay: a capture was named but did not load"
-                    " -- continuing WITHOUT injection");
-        if (!config().record)
-            log_raw("[!] replay is ON but record is OFF -- this run will"
-                    " reproduce the battle without capturing anything to diff");
-    } else {
-        log_raw("replay : OFF (debug.replay = \"<capture>.mgr\" injects a run)");
-    }
-
     // The debug panel. Started before the session so its log pane already
     // exists when the handshake starts talking, and independently of it because
     // it works -- and is worth having -- with no session at all.
@@ -145,9 +109,6 @@ DWORD WINAPI init_thread(LPVOID) {
                 config().net_control_count ? "see below" : "(nothing -- observer)");
         for (uint32_t i = 0; i < config().net_control_count; ++i)
             log_raw("         local cat %u", (unsigned)config().net_control[i]);
-        if (config().replay_path[0])
-            log_raw("[!] net and replay are both ON -- lockstep wins at"
-                    " Brain::GetChoice and the replay FIFO will not advance");
     } else {
         log_raw("net    : OFF (set net.role to \"host\" or \"client\" in mgmp.json)");
     }
@@ -215,8 +176,6 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         mgmp::hooks_uninstall();
         // After the hooks are gone, so nothing can append to a closed stream.
         mgmp::session_shutdown();
-        mgmp::replay_shutdown();
-        mgmp::record_shutdown();
         mgmp::log_shutdown();
         break;
     }

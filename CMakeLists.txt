@@ -47,9 +47,7 @@ add_library(mgmp SHARED
     src/core/mgmp_resolve.cpp
     src/determinism/mgmp_turnaction.cpp
     src/determinism/mgmp_ability.cpp
-    src/determinism/mgmp_record.cpp
     src/determinism/mgmp_rng.cpp
-    src/determinism/mgmp_replay.cpp
     src/net/mgmp_net.cpp
     src/session/mgmp_lockstep.cpp
     src/session/mgmp_session.cpp

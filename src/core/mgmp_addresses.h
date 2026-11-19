@@ -27,13 +27,6 @@ enum Target : int {
     T_FrameBegin,        // glaiel::ApplicationBase::FrameBegin()  -- off by default
     T_ApplyAction,       // glaiel::TurnControl::ApplyTurnAction(TurnAction)
 
-    // --- phase 2: the recorder -------------------------------------------
-    T_QueueDecision,     // glaiel::TurnControl::QueueDecision(TurnAction)
-    T_RandInt,           // randint(int, u64*)      -- hot
-    T_RandFloat,         // randfloat(double, u64*) -- hot
-    T_Rand2,             // rand2(double, u64*)     -- hot, draws twice
-    T_RollChance,        // RollChance(double,double,u64*) -- the proc/crit gate
-
     // --- phase 5: the meta layer -----------------------------------------
     T_MapUpdate,         // glaiel::MapScreen::update()   -- the follow tick
     T_EnterNode,         // glaiel::MapScreen::EnterNode(MapScreen*, MapNode*)
@@ -112,38 +105,6 @@ static const TargetDesc kTargets[T_COUNT] = {
     // here exactly once. Character::DoAction only sees the ability case, which
     // is why an end-turn does not show up there.
     { 0x008E4DE0, "APPLY",    "glaiel::TurnControl::ApplyTurnAction" },
-
-    // Where deferred reactions enter the ring. 54 callers, all of them passive/
-    // status callbacks -- the return address recorded here names which one, and
-    // a type-6 or type-7 that appears in one run and not another is the earliest
-    // available desync signal.
-    { 0x008E3870, "QUEUE",    "glaiel::TurnControl::QueueDecision" },
-
-    // The three xoshiro256 entry points. These are the hot ones -- see
-    // mgmp_rng.h for the ABI, the TLS global-stream filter, and the important
-    // caveat that inlined draw sites are invisible to them.
-    { 0x0094F340, "RANDINT",  "randint(int, u64*)" },
-
-    { 0x001595A0, "RANDFLT",  "randfloat(double, u64*)" },
-
-    { 0x0094F4C0, "RAND2",    "rand2(double, u64*)" },
-
-    // glaiel::RollChance(double p, double scale, u64* state) -- THE proc/crit
-    // gate, and the fourth RNG entry point. It calls rand2, which calls
-    // randfloat, so one logical proc roll lands two EV_RNG records whose return
-    // addresses are both INSIDE the RNG module: the passive that actually
-    // rolled sits one frame further up and was invisible in every capture taken
-    // before this hook existed. That is the real explanation for the
-    // long-standing "combat takes no RNG" puzzle -- the draws were never
-    // absent, they were misattributed.
-    //
-    // 38 call sites, all lockstep-critical: Character::ReceiveDamage__inner_0
-    // (6), ChanceToBlockAndCounter, CounterAttack, ChanceToBackflip, Brittle,
-    // Confusion, DejaVu, DelayedFury, Shop::roll_item, combat rewards.
-    //
-    // Takes NO draw when p >= 1.0, so stream position depends on which procs
-    // were POSSIBLE, not merely which fired -- both peers must agree on that.
-    { 0x0094F7E0, "ROLL",     "glaiel::RollChance(double,double,u64*)" },
 
     // glaiel::MapScreen::update -- virtual-only (0 code xrefs; its two data
     // xrefs are one vftable at 0x140F0D100 and .pdata), 0x1B9E bytes and

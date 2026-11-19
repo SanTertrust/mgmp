@@ -16,7 +16,7 @@
 
 namespace mgmp {
 
-void log_init(const wchar_t* path, bool console);
+void log_init(const wchar_t* path);
 void log_shutdown();
 
 // Emits one complete line (newline appended, flushed).

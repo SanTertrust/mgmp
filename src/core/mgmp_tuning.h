@@ -24,48 +24,10 @@ namespace tune {
 
 // --- the phase-1 text trace -------------------------------------------------
 
-// Open a console window alongside the log file. OFF: everything it ever showed
-// is now readable somewhere better -- the stamped file log keeps the whole run,
-// the ImGui panel shows it live and filtered, and the failures that happen
-// before the logger exists go to mgmp_boot.log, which the console never saw
-// either. All it added was a second window to alt-tab past.
-constexpr bool     kConsole      = false;
 // Print raw pointers in trace lines. They differ between processes, so two
 // peers' logs only diff cleanly with this off -- which is why it existed. In
 // practice the diffing is done on the tagged lines, not the whole log.
 constexpr bool     kPointers     = true;
-// Bytes of TurnAction to hexdump when kTaRaw asks for one.
-constexpr uint32_t kTaDump       = 64;
-constexpr bool     kTaRaw        = false;
-// Log every Brain::GetChoice poll, not just the ones that decided something.
-// 1695 of 1711 calls in one battle return "nothing decided".
-constexpr bool     kChoiceAll    = false;
-// Frames between FRAME lines; 0 silences them. Effectively always 0 already:
-// the frame hook is forced on by net_role and by the panel, and both silenced
-// the logging when they did it, because they wanted the socket pumped and not
-// a line every 60 frames.
-constexpr uint32_t kFrameLogEvery = 0;
-
-// --- phase 2: the recorder --------------------------------------------------
-
-// Record draws from every RNG stream, not just the simulation one. On is the
-// wrong setting and always was: the non-global draws turned out to be the
-// interesting ones (they are how TLS+0x198 was found at all), and the volume
-// that justified filtering never materialised.
-constexpr bool     kRngGlobalOnly = false;
-// Put EV_FRAME records in the stream. Only run D needed them -- a starved run
-// has fewer frames by construction, so frames are excluded from the diff.
-constexpr bool     kRecordFrames  = false;
-
-// Which brains a decision may be injected into, and -- the load-bearing use --
-// which cats count as HUMAN when the control split is derived. Substring match
-// against the live RTTI class name.
-//
-// This is the one culled setting with a real consequence: it decides which cats
-// the two peers divide between them. It is a constant because there has never
-// been a second answer. If a summonable cat ever turns up with a PlayerBrain,
-// this is where the exception goes -- see the summon note in CLAUDE.md.
-constexpr const char* kReplayBrains = "PlayerBrain";
 
 // --- the two hooks that CHANGE the game rather than watch it ----------------
 //

@@ -66,22 +66,6 @@ struct Config {
     // wrong cat rather than watching two numbers drift. (-NoHalt)
     bool     net_desync_halt = true;
 
-    // --- the recorder --------------------------------------------------------
-
-    // debug.record opens the binary event stream and implies the RNG hooks --
-    // a recording without them is a stream of actions and no draws, which is
-    // silently useless and only noticed after playing a whole battle.
-    bool     record            = false;
-    wchar_t  record_path[512]  = {};   // derived from the log name
-    char     record_note[256]  = {};   // stored in EV_META
-
-    // debug.replay = "<file>" injects that capture's decisions instead of
-    // polling the brain. Empty means no replay. Meant to be used WITH record:
-    // run B replays run A while recording its own stream, and the two captures
-    // are diffed. Enabling only replay reproduces a battle and measures
-    // nothing.
-    wchar_t  replay_path[512]  = {};
-
     // --- the debug panel -----------------------------------------------------
 
     bool     ui         = true;    // ui.enabled

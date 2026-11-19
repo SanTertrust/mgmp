@@ -143,17 +143,14 @@ int main() {
 
     printf("-- booleans accept 0/1, because people type them --\n");
     {
-        const Config& c = load(R"({ "debug": { "desync_halt": 0, "record": 1 } })");
+        const Config& c = load(R"({ "debug": { "desync_halt": 0 } })");
         check(!c.net_desync_halt, "0 is false");
-        check(c.record,           "1 is true");
     }
 
-    printf("-- the capture is named after the log, so one name sets both --\n");
+    printf("-- log path is honoured --\n");
     {
-        const Config& c = load(R"({ "log": "runF.log", "debug": { "record": true } })");
+        const Config& c = load(R"({ "log": "runF.log" })");
         check(wcsstr(c.log_path,    L"runF.log") != nullptr, "log path honoured");
-        check(wcsstr(c.record_path, L"runF.mgr") != nullptr,
-              "and the capture takes the same stem");
     }
 
     printf("-- hooks the file cannot name are still implied correctly --\n");
@@ -172,14 +169,6 @@ int main() {
         const Config& c = load(R"({ "ui": { "enabled": true } })");
         check(c.hook[T_FrameBegin],
               "the panel alone forces it too -- its connect buttons open a socket");
-        check(!c.hook[T_RandInt],
-              "but the RNG hooks stay off without debug.record");
-    }
-    {
-        const Config& c = load(R"({ "debug": { "record": true } })");
-        check(c.hook[T_RandInt] && c.hook[T_RandFloat] &&
-              c.hook[T_Rand2]   && c.hook[T_RollChance],
-              "debug.record implies all four RNG hooks");
     }
 
     printf(g_fail ? "\n%d FAILED\n" : "\nall good\n", g_fail);

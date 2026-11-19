@@ -19,9 +19,6 @@
     "follow": true,
     "follow_delay_ms": 0,
     "join_barrier": true,
-    "desync_halt": true,
-    "record": false,
-    "record_note": "",
-    "replay": ""
+    "desync_halt": true
   }
 }

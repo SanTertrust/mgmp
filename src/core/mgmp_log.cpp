@@ -11,7 +11,6 @@ namespace {
 CRITICAL_SECTION g_cs;
 bool             g_cs_ready = false;
 FILE*            g_file     = nullptr;
-bool             g_console  = false;
 LONG volatile    g_seq      = 0;
 LONG volatile    g_turn     = 0;
 
@@ -100,30 +99,14 @@ void emit_locked(const char* s, size_t n) {
         fwrite(s, 1, n, g_file);
         fflush(g_file);
     }
-    if (g_console) {
-        DWORD written = 0;
-        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (h && h != INVALID_HANDLE_VALUE)
-            WriteFile(h, s, (DWORD)n, &written, nullptr);
-    }
 }
 
 } // namespace
 
-void log_init(const wchar_t* path, bool console) {
+void log_init(const wchar_t* path) {
     if (!g_cs_ready) {
         InitializeCriticalSection(&g_cs);
         g_cs_ready = true;
-    }
-    if (console && !g_console) {
-        if (AllocConsole()) {
-            SetConsoleTitleW(L"mgmp trace");
-            // Re-point the CRT's stdout at the new console so printf-style
-            // output from anywhere in the DLL lands somewhere visible.
-            FILE* dummy = nullptr;
-            freopen_s(&dummy, "CONOUT$", "w", stdout);
-        }
-        g_console = true;
     }
     if (path && !g_file) {
         // Stamp the name with local time: <stem>_YYYYMMDD-HHMMSS<ext>.
