@@ -263,7 +263,7 @@ you enter a map node, the two machines exchange a fingerprint of their state
 and compare it. Agreement is proven, not hoped for.
 
 The full technical story — every address, struct offset, measurement and dead
-end — is in `CLAUDE.md`. It is long, and it is the real documentation.
+end — is in `AGENTS.md`. It is long, and it is the real documentation.
 
 ---
 
