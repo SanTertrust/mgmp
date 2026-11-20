@@ -459,12 +459,12 @@ bool flush_live_run() {
     return true;
 }
 
-bool publish(uint8_t to, bool fresh) {
+bool publish(uint8_t to, bool fresh, bool flush_adventure = true) {
     ensure_dir();
     if (!g.have_dir) return false;
 
-    const bool flushed = flush_live_run();
-    if (!flushed && !g.said_no_flush) {
+    const bool flushed = flush_adventure ? flush_live_run() : false;
+    if (flush_adventure && !flushed && !g.said_no_flush) {
         g.said_no_flush = true;
         // Not a warning on the normal path. Publishing from the save-selection
         // screen SHOULD skip the flush: there is no adventure loaded, and the
@@ -659,6 +659,53 @@ void savefile_catchup(uint8_t peer) {
     // client already in the run must keep it and resync from the per-node
     // pushes; only a slot click means "drop what you have".
     publish(peer, /*fresh=*/false);
+}
+
+bool savefile_publish_active(uint8_t peer, bool fresh, bool flush_adventure) {
+    ensure_state();
+    if (!g.on || g.is_client || !net_active()) return false;
+    if (!g.director_slot) return false;
+    const void* director = nullptr;
+    if (!mem_read(g.director_slot, &director, sizeof(director)) || !director)
+        return false;
+
+    // Ensure any outer SQLite transaction is committed and no async backup is
+    // currently reading/copying the database.
+    int32_t tx_stack = 0;
+    if (!mem_read((const uint8_t*)director + kDir_SaveFile_Db + kSQLSF_TransactionStack,
+                  &tx_stack, sizeof(tx_stack)) || tx_stack != 0)
+        return false;
+    uint8_t backing_up = 0;
+    if (mem_read((const uint8_t*)director + kDir_SaveFile_Backup, &backing_up, 1) &&
+        backing_up)
+        return false;
+
+    // If no SaveSelection click was observed (host was already in House),
+    // recover the active save filename from MewDirector's MewSaveFile::filename.
+    if (!g.have_slot || !g.name[0]) {
+        char fname[128] = {};
+        if (!mem_read_std_string((const uint8_t*)director + kDir_SaveFile_Filename, fname, sizeof(fname)) ||
+            !fname[0])
+            return false;
+        // MewSaveFile::filename can include "saves/" prefix or be a bare filename;
+        // strip any directory prefix so it joins cleanly with g.dir.
+        const char* base = fname;
+        for (const char* p = fname; *p; ++p)
+            if (*p == '/' || *p == '\\') base = p + 1;
+        if (!base[0]) return false;
+        strncpy_s(g.name, base, _TRUNCATE);
+        g.have_slot = true;
+    }
+
+    if (!publish(peer, fresh, flush_adventure))
+        return false;
+    g.published = true;
+    return true;
+}
+
+bool savefile_has_pending() {
+    ensure_state();
+    return g.pending;
 }
 
 void savefile_pump() {

@@ -167,6 +167,16 @@ bool decode_into(const uint8_t* buf, uint32_t len, NetMsg& m) {
         case MSG_STATEDUMP: return dec_statedump(r, m.statedump);
         case MSG_NODEHASH:  return dec_nodehash(r, m.nodehash);
         case MSG_HOSTLEFT:  return dec_hostleft(r, m.hostleft);
+        case MSG_HOUSE_BASELINE: return dec_house_baseline(r, m.house_baseline);
+        case MSG_HOUSE_POSE:     return dec_house_pose(r, m.house_pose);
+        case MSG_HOUSE_GRAB_REQ: return dec_house_grab_req(r, m.house_grab_req);
+        case MSG_HOUSE_GRAB_RESP:return dec_house_grab_resp(r, m.house_grab_resp);
+        case MSG_HOUSE_DRAG_MOVE:return dec_house_drag_move(r, m.house_drag_move);
+        case MSG_HOUSE_DROP_REQ: return dec_house_drop_req(r, m.house_drop_req);
+        case MSG_HOUSE_DROP_RESP:return dec_house_drop_resp(r, m.house_drop_resp);
+        case MSG_HOUSE_CURSOR:   return dec_house_cursor(r, m.house_cursor);
+        case MSG_HOUSE_PREP:     return dec_house_prep(r, m.house_prep);
+        case MSG_HOUSE_PHASE:    return dec_house_phase(r, m.house_phase);
         case MSG_PEERS:   return dec_peers(r, m.peers);
         case MSG_HALT:    return dec_halt(r, m.halt);
         case MSG_REFUSE:  r.str(m.refuse, sizeof(m.refuse)); return r.ok;
@@ -219,6 +229,7 @@ bool relayed(uint8_t type) {
         // than two players a client's has to reach the other clients, exactly
         // like the per-turn HASH above it.
         case MSG_NODEHASH:
+        case MSG_HOUSE_CURSOR:
             return true;
         default:
             return false;
@@ -685,6 +696,105 @@ bool net_send_refuse_to(uint8_t peer, const char* reason) {
     return n && net_send_peer(peer, p, n);
 }
 
+bool net_send_house_baseline(const HouseBaselineMsg& m) {
+    uint32_t cap = 64u + (uint32_t)m.count * 200u;
+    if (cap > kMaxPayload) cap = kMaxPayload;
+    uint8_t* p = (uint8_t*)malloc(cap);
+    if (!p) return false;
+    uint32_t n = enc_house_baseline(p, cap, m);
+    bool ok = n && net_send(p, n);
+    free(p);
+    return ok;
+}
+
+bool net_send_house_baseline_to(uint8_t peer, const HouseBaselineMsg& m) {
+    uint32_t cap = 64u + (uint32_t)m.count * 200u;
+    if (cap > kMaxPayload) cap = kMaxPayload;
+    uint8_t* p = (uint8_t*)malloc(cap);
+    if (!p) return false;
+    uint32_t n = enc_house_baseline(p, cap, m);
+    bool ok = n && net_send_peer(peer, p, n);
+    free(p);
+    return ok;
+}
+
+bool net_send_house_pose(const HousePoseMsg& m) {
+    uint32_t cap = 64u + (uint32_t)m.count * 200u;
+    if (cap > kMaxPayload) cap = kMaxPayload;
+    uint8_t* p = (uint8_t*)malloc(cap);
+    if (!p) return false;
+    uint32_t n = enc_house_pose(p, cap, m);
+    bool ok = n && net_send(p, n);
+    free(p);
+    return ok;
+}
+
+bool net_send_house_grab_req(const HouseGrabReqMsg& m) {
+    uint8_t p[256];
+    uint32_t n = enc_house_grab_req(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_house_grab_resp(const HouseGrabRespMsg& m) {
+    uint8_t p[256];
+    uint32_t n = enc_house_grab_resp(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_house_grab_resp_to(uint8_t peer, const HouseGrabRespMsg& m) {
+    uint8_t p[256];
+    uint32_t n = enc_house_grab_resp(p, sizeof(p), m);
+    return n && net_send_peer(peer, p, n);
+}
+
+bool net_send_house_drag_move(const HouseDragMoveMsg& m) {
+    uint8_t p[256];
+    uint32_t n = enc_house_drag_move(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_house_drop_req(const HouseDropReqMsg& m) {
+    uint8_t p[256];
+    uint32_t n = enc_house_drop_req(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_house_drop_resp(const HouseDropRespMsg& m) {
+    uint8_t p[256];
+    uint32_t n = enc_house_drop_resp(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_house_cursor(const HouseCursorMsg& m) {
+    uint8_t p[256];
+    uint32_t n = enc_house_cursor(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_house_prep(const HousePrepMsg& m) {
+    uint8_t p[2048];
+    uint32_t n = enc_house_prep(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_house_prep_to(uint8_t peer, const HousePrepMsg& m) {
+    uint8_t p[2048];
+    uint32_t n = enc_house_prep(p, sizeof(p), m);
+    return n && net_send_peer(peer, p, n);
+}
+
+bool net_send_house_phase(const HousePhaseMsg& m) {
+    uint8_t p[64];
+    uint32_t n = enc_house_phase(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_house_phase_to(uint8_t peer, const HousePhaseMsg& m) {
+    uint8_t p[64];
+    uint32_t n = enc_house_phase(p, sizeof(p), m);
+    return n && net_send_peer(peer, p, n);
+}
+
 namespace {
 // Shared by the broadcast and the point-to-point form so the frame cap check
 // and the malloc live in exactly one place.
@@ -780,6 +890,8 @@ void net_msg_release(NetMsg& m) {
     if (m.catdata.data)  { free(m.catdata.data);  m.catdata.data  = nullptr; }
     if (m.runhist.data)  { free(m.runhist.data);  m.runhist.data  = nullptr; }
     if (m.statedump.data){ free(m.statedump.data);m.statedump.data= nullptr; }
+    if (m.house_baseline.cats) { free(m.house_baseline.cats); m.house_baseline.cats = nullptr; }
+    if (m.house_pose.cats)     { free(m.house_pose.cats);     m.house_pose.cats     = nullptr; }
     for (uint32_t i = 0; i < kInvBuckets; ++i)
         if (m.inventory.data[i]) { free(m.inventory.data[i]); m.inventory.data[i] = nullptr; }
 }
@@ -797,6 +909,8 @@ bool net_poll(NetMsg& out) {
         g.queue[g.head].catdata.data  = nullptr;
         g.queue[g.head].runhist.data  = nullptr;
         g.queue[g.head].statedump.data = nullptr;
+        g.queue[g.head].house_baseline.cats = nullptr;
+        g.queue[g.head].house_pose.cats = nullptr;
         for (uint32_t i = 0; i < kInvBuckets; ++i)
             g.queue[g.head].inventory.data[i] = nullptr;
         g.head = (g.head + 1) % kQueueCap;

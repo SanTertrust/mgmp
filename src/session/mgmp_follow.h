@@ -72,6 +72,9 @@ void follow_on_message(const EnterNodeMsg& m);
 // afterwards would sit on the map forever.
 void follow_catchup(uint8_t peer);
 
+// Reset per-run follow state when returning to House.
+void follow_forget();
+
 // --- "are we standing ON the map, or inside a node?" -------------------------
 //
 // True only while MapScreen::update is actually ticking, i.e. the map is on

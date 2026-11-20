@@ -189,6 +189,9 @@ void hook_defaults() {
     // aim for, so the guard it reads can never be raised and the hook would be
     // a detour on a function the game calls constantly for no reason at all.
     g_cfg.hook[T_HighlightRefresh] = false;
+
+    for (int t = T_HouseTestInit; t <= T_ReturnCatFromAdv; ++t)
+        g_cfg.hook[t] = false;
 }
 
 // Hooks that other settings imply. This used to be interleaved with "did the
@@ -249,12 +252,23 @@ void hooks_implied_by(bool net_configured) {
         // mutation that cost a run on 2026-08-26. If this hook is ever missing,
         // the highlight must not be called at all.
         g_cfg.hook[T_HighlightRefresh] = tune::kAimPreview;
+
+        if (tune::kHouseCoop) {
+            for (int t = T_HouseTestInit; t <= T_ReturnCatFromAdv; ++t)
+                g_cfg.hook[t] = true;
+        }
     }
 
     // The panel needs the frame hook one step removed: its connect buttons can
     // start a session in a process launched with role = off, and a socket with
     // nothing pumping it is the same dead handshake as above.
-    if (g_cfg.ui) g_cfg.hook[T_FrameBegin] = true;
+    if (g_cfg.ui) {
+        g_cfg.hook[T_FrameBegin] = true;
+        if (tune::kHouseCoop) {
+            for (int t = T_HouseTestInit; t <= T_ReturnCatFromAdv; ++t)
+                g_cfg.hook[t] = true;
+        }
+    }
 }
 
 } // namespace

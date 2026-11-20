@@ -67,6 +67,16 @@ struct NetMsg {
     StateDumpMsg statedump;   // owns its buffer, same contract as catdata
     NodeHashMsg  nodehash;
     HostLeftMsg  hostleft;
+    HouseBaselineMsg house_baseline;
+    HousePoseMsg     house_pose;
+    HouseGrabReqMsg  house_grab_req;
+    HouseGrabRespMsg house_grab_resp;
+    HouseDragMoveMsg house_drag_move;
+    HouseDropReqMsg  house_drop_req;
+    HouseDropRespMsg house_drop_resp;
+    HouseCursorMsg   house_cursor;
+    HousePrepMsg     house_prep;
+    HousePhaseMsg    house_phase;
     HaltMsg   halt;
     char      refuse[192] = {};
 };
@@ -168,6 +178,22 @@ bool net_send_action_to(uint8_t peer, const ActionMsg& a);
 bool net_send_enter_node_to(uint8_t peer, const EnterNodeMsg& m);
 bool net_send_welcome_to(uint8_t peer, const Welcome& w);
 bool net_send_refuse_to(uint8_t peer, const char* reason);
+
+// House co-op sends
+bool net_send_house_baseline(const HouseBaselineMsg& m);
+bool net_send_house_baseline_to(uint8_t peer, const HouseBaselineMsg& m);
+bool net_send_house_pose(const HousePoseMsg& m);
+bool net_send_house_grab_req(const HouseGrabReqMsg& m);
+bool net_send_house_grab_resp(const HouseGrabRespMsg& m);
+bool net_send_house_grab_resp_to(uint8_t peer, const HouseGrabRespMsg& m);
+bool net_send_house_drag_move(const HouseDragMoveMsg& m);
+bool net_send_house_drop_req(const HouseDropReqMsg& m);
+bool net_send_house_drop_resp(const HouseDropRespMsg& m);
+bool net_send_house_cursor(const HouseCursorMsg& m);
+bool net_send_house_prep(const HousePrepMsg& m);
+bool net_send_house_prep_to(uint8_t peer, const HousePrepMsg& m);
+bool net_send_house_phase(const HousePhaseMsg& m);
+bool net_send_house_phase_to(uint8_t peer, const HousePhaseMsg& m);
 
 // Pops one decoded message, or returns false if the queue is empty. Call it
 // from the game thread; drain in a loop until it returns false.

@@ -63,6 +63,7 @@ add_library(mgmp SHARED
     src/session/mgmp_combatlock.cpp
     src/session/mgmp_cursor.cpp
     src/session/mgmp_overlay.cpp
+    src/session/mgmp_house.cpp
     src/ui/mgmp_ui.cpp
     # Dear ImGui, compiled straight into mgmp.dll -- same rule as minhook and
     # stb_image: the payload runs inside the game's process and cannot pull in

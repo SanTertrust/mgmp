@@ -112,4 +112,10 @@ void leave_status(char* out, size_t out_size);
 // because the debug panel should be able to show it.
 bool leave_in_run();
 
+// Reuse the scene reader to query whether a non-dying scene with `name` is
+// currently loaded, optionally returning its Scene* and suspended flag.
+bool leave_find_scene(const char* name,
+                      const void** out_scene = nullptr,
+                      bool* out_suspended = nullptr);
+
 } // namespace mgmp

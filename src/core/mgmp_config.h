@@ -79,7 +79,7 @@ struct Config {
     // ever correct, and an ini that turned one off by hand produced failures
     // that looked like missing features (see the hook_sfstoreblob note in
     // mgmp_config.cpp).
-    bool     hook[32] = {};
+    bool     hook[64] = {};
 
     // Anything the parser could not make sense of, printed in the startup
     // banner: a misconfigured mod must announce itself, not fail silently.

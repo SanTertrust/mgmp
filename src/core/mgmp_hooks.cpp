@@ -32,6 +32,7 @@
 #include "mgmp_combatlock.h"
 #include "mgmp_cursor.h"
 #include "mgmp_choice.h"
+#include "mgmp_house.h"
 #include "mgmp_overlay.h"
 #include "mgmp_invsync.h"
 #include "mgmp_aim.h"
@@ -116,6 +117,21 @@ fn_this_c     o_HighlightRefresh = nullptr;
 typedef void* (__fastcall* fn_three_ptr)(void* a, void* b, void* c);
 fn_three_ptr  o_SFStoreBlob   = nullptr;
 fn_three_ptr  o_SFLoadBlob    = nullptr;
+
+typedef void  (__fastcall* fn_this_bb)(void* self, bool a1, bool a2);
+typedef void* (__fastcall* fn_this_i64)(void* self, int64_t a1);
+fn_this_bb    o_HouseTestInit      = nullptr;
+fn_this       o_HouseCatUpdate     = nullptr;
+fn_this       o_HouseCatLateUpdate = nullptr;
+fn_this       o_HouseCatPhysUpdate = nullptr;
+fn_this       o_HouseCatClickUpd   = nullptr;
+fn_this       o_HouseCatClickDrop  = nullptr;
+fn_this       o_HousePassDayCb     = nullptr;
+fn_this       o_GoOnAdventureCb    = nullptr;
+fn_this       o_StartAdventureCb   = nullptr;
+fn_this       o_ReturnHouseSuccess = nullptr;
+fn_this       o_ReturnHouseFail    = nullptr;
+fn_this_i64   o_ReturnCatFromAdv   = nullptr;
 
 // ---- shared formatting helpers -------------------------------------------
 
@@ -419,6 +435,74 @@ char __fastcall h_HighlightRefresh(void* self) {
     return o_HighlightRefresh(self);
 }
 
+// --- house co-op detours ---------------------------------------------------
+
+void __fastcall h_HouseTestInit(void* self, bool a1, bool a2) {
+    o_HouseTestInit(self, a1, a2);
+    house_on_house_test_init(self, a1, a2);
+}
+
+void __fastcall h_HouseCatUpdate(void* self) {
+    if (!house_on_housecat_update(self)) return;
+    o_HouseCatUpdate(self);
+}
+
+void __fastcall h_HouseCatLateUpdate(void* self) {
+    if (!house_on_housecat_late_update(self)) return;
+    o_HouseCatLateUpdate(self);
+}
+
+void __fastcall h_HouseCatPhysUpdate(void* self) {
+    if (!house_on_housecat_physics_update(self)) return;
+    o_HouseCatPhysUpdate(self);
+}
+
+void __fastcall h_HouseCatClickUpd(void* self) {
+    if (!house_on_click_manager_update(self)) return;
+    o_HouseCatClickUpd(self);
+    house_on_click_manager_update_post(self);
+}
+
+void __fastcall h_HouseCatClickDrop(void* self) {
+    if (!house_on_click_manager_drop(self)) return;
+    o_HouseCatClickDrop(self);
+}
+
+void __fastcall h_HousePassDayCb(void* self) {
+    house_on_pass_day_cb_pre();
+    o_HousePassDayCb(self);
+    house_on_pass_day_cb_post();
+}
+
+void __fastcall h_GoOnAdventureCb(void* self) {
+    house_on_go_on_adventure_cb_pre();
+    o_GoOnAdventureCb(self);
+    house_on_go_on_adventure_cb_post();
+}
+
+void __fastcall h_StartAdventureCb(void* self) {
+    o_StartAdventureCb(self);
+    house_on_start_adventure_cb_post();
+}
+
+void __fastcall h_ReturnHouseSuccess(void* self) {
+    house_on_return_house_pre(true);
+    o_ReturnHouseSuccess(self);
+    house_on_return_house_post(true);
+}
+
+void __fastcall h_ReturnHouseFail(void* self) {
+    house_on_return_house_pre(false);
+    o_ReturnHouseFail(self);
+    house_on_return_house_post(false);
+}
+
+void* __fastcall h_ReturnCatFromAdv(void* self, int64_t cat_id) {
+    void* ret = o_ReturnCatFromAdv(self, cat_id);
+    house_on_return_cat_from_adv(self, cat_id);
+    return ret;
+}
+
 void __fastcall h_ButtonUpdate(void* self) {
     // Fires for every button in the game. Outside a combat-menu tick this is a
     // load and a branch: combatlock_on_button's first test is the scope flag.
@@ -569,6 +653,19 @@ const Binding kBindings[] = {
 
     { T_SaveScumPenalty, (void*)&h_SaveScum, (void**)&o_SaveScum },
     { T_TimeDelayTick,   (void*)&h_TimeDelay, (void**)&o_TimeDelay },
+
+    { T_HouseTestInit,      (void*)&h_HouseTestInit,      (void**)&o_HouseTestInit      },
+    { T_HouseCatUpdate,     (void*)&h_HouseCatUpdate,     (void**)&o_HouseCatUpdate     },
+    { T_HouseCatLateUpdate, (void*)&h_HouseCatLateUpdate, (void**)&o_HouseCatLateUpdate },
+    { T_HouseCatPhysUpdate, (void*)&h_HouseCatPhysUpdate, (void**)&o_HouseCatPhysUpdate },
+    { T_HouseCatClickUpd,   (void*)&h_HouseCatClickUpd,   (void**)&o_HouseCatClickUpd   },
+    { T_HouseCatClickDrop,  (void*)&h_HouseCatClickDrop,  (void**)&o_HouseCatClickDrop  },
+    { T_HousePassDayCb,     (void*)&h_HousePassDayCb,     (void**)&o_HousePassDayCb     },
+    { T_GoOnAdventureCb,    (void*)&h_GoOnAdventureCb,    (void**)&o_GoOnAdventureCb    },
+    { T_StartAdventureCb,   (void*)&h_StartAdventureCb,   (void**)&o_StartAdventureCb   },
+    { T_ReturnHouseSuccess, (void*)&h_ReturnHouseSuccess, (void**)&o_ReturnHouseSuccess },
+    { T_ReturnHouseFail,    (void*)&h_ReturnHouseFail,    (void**)&o_ReturnHouseFail    },
+    { T_ReturnCatFromAdv,   (void*)&h_ReturnCatFromAdv,   (void**)&o_ReturnCatFromAdv   },
 };
 
 // Install one binding. Returns true only if it went live on THIS call, so a
@@ -674,6 +771,7 @@ int hooks_install() {
     savefile_set_base(g_base);
     leave_set_base(g_base);
     overlay_set_base(g_base);
+    house_set_base(g_base);
 
     int installed = 0;
     for (const Binding& b : kBindings)

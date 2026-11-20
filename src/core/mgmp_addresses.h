@@ -69,6 +69,20 @@ enum Target : int {
     T_HighlightRefresh,  // sub_140151CE0 -- the status half of the ability
                          // highlight. Swallowed, and ONLY while this peer is
                          // drawing another player's aim. See mgmp_aim.h.
+
+    // --- host-authoritative house co-op (mgmp_house.h) -------------------
+    T_HouseTestInit,     // glaiel::HouseTest::init(bool, bool)
+    T_HouseCatUpdate,    // glaiel::HouseCat::update()
+    T_HouseCatLateUpdate,// glaiel::HouseCat::late_update()
+    T_HouseCatPhysUpdate,// glaiel::HouseCatPhysics::update()
+    T_HouseCatClickUpd,  // glaiel::HouseCatClickManager::update()
+    T_HouseCatClickDrop, // glaiel::HouseCatClickManager::drop()
+    T_HousePassDayCb,    // House::PassDay::<lambda_1>::operator()
+    T_GoOnAdventureCb,   // MewDirector::GoOnAnAdventure::<lambda_1>::operator()
+    T_StartAdventureCb,  // MewDirector::StartAdventure::<lambda_1>::operator()
+    T_ReturnHouseSuccess,// MewDirector::ReturnToHouseSuccess_Internal()
+    T_ReturnHouseFail,   // MewDirector::ReturnToHouseFail()
+    T_ReturnCatFromAdv,  // House::ReturnCatFromAdventure(int64_t)
     T_COUNT
 };
 
@@ -429,6 +443,20 @@ static const TargetDesc kTargets[T_COUNT] = {
     // draw of ANOTHER player's aim, on the peer that does not own that cat.
     // Outside that window it is one predictable branch on a global.
     { 0x00152700, "HILITE",    "ability highlight status refresh (sub_140151CE0)" },
+
+    // --- host-authoritative house co-op ----------------------------------
+    { 0x00332D40, "HOUSEINIT",   "glaiel::HouseTest::init" },
+    { 0x001FACC0, "HCATUPD",     "glaiel::HouseCat::update" },
+    { 0x001FD8B0, "HCATLUPD",    "glaiel::HouseCat::late_update" },
+    { 0x001FF3F0, "HCATPHYS",    "glaiel::HouseCatPhysics::update" },
+    { 0x001FE940, "HCATCLK",     "glaiel::HouseCatClickManager::update" },
+    { 0x001FF140, "HCATDROP",    "glaiel::HouseCatClickManager::drop" },
+    { 0x001EF4D0, "PASSDAY",     "glaiel::House::PassDay::<lambda_1>::operator()" },
+    { 0x003B0550, "GOADV",       "glaiel::MewDirector::GoOnAnAdventure::<lambda_1>::operator()" },
+    { 0x003B10B0, "STARTADV",    "glaiel::MewDirector::StartAdventure::<lambda_1>::operator()" },
+    { 0x003B5430, "RETHOUSEOK",  "glaiel::MewDirector::ReturnToHouseSuccess_Internal" },
+    { 0x003B4750, "RETHOUSEFAIL","glaiel::MewDirector::ReturnToHouseFail" },
+    { 0x001E5C10, "RETCAT",      "glaiel::House::ReturnCatFromAdventure" },
 };
 
 // Coarse module guard, checked before the per-target signatures.
@@ -511,6 +539,14 @@ enum Call : int {
 
     // --- syncing click-to-turn facing on endturn (mgmp_lockstep.cpp) -----
     C_CharacterFace,         // void(Character*, iVec2D dir, bool, bool)
+
+    // --- house co-op (mgmp_house.cpp) ------------------------------------
+    C_HouseLocationUnderPoint, // CatPlacementArea*(House*, Vec2D*)
+    C_CatPlacementPlaceCat,    // HouseCat**(CatPlacementArea*, HouseCat*)
+    C_CatPlacementRemoveCat,   // __int64(CatPlacementArea*, HouseCat*)
+    C_SceneUpdateCachedList,   // void(Scene*, int comp_type_id)
+    C_CameraGetMouse,          // Vec2D*(Camera*, Vec2D* out)
+    C_CameraMatrix,            // float*(Camera*, float* out_mat4x4)
     C_COUNT
 };
 
@@ -742,6 +778,12 @@ static const CallDesc kCalls[C_COUNT] = {
     // never by pointer or by position in a panel.
     { 0x0097E8E0, "glaiel::Button::Click" },
     { 0x0010CE50, "glaiel::Character::Face" },
+    { 0x001E6460, "glaiel::House::location_under_point" },
+    { 0x002E88D0, "glaiel::CatPlacementArea::place_cat" },
+    { 0x002E89C0, "glaiel::CatPlacementArea::remove_cat" },
+    { 0x0096B470, "glaiel::Scene::UpdateCachedList" },
+    { 0x009796D0, "glaiel::Camera::get_mouse" },
+    { 0x009785E0, "glaiel::Camera::camera_matrix" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only
@@ -1104,5 +1146,70 @@ constexpr uint32_t kRva_SdlGetWindowSizePxSlot = 0x012E8178;
 constexpr uint32_t  kRva_ApplicationBase = 0x013C4A30;   // ApplicationBase**
 constexpr uintptr_t kApp_CursorState  = 3392;  // std::string, the state name
 constexpr uintptr_t kApp_CursorShown  = 3424;  // bool, cursor visible this frame
+
+// --- house co-op offsets & component IDs -----------------------------------
+// All verified against Mewgenics.exe.i64 type info and decompiled functions.
+constexpr int       kCompId_CatPlacementArea = 466;
+constexpr int       kCompId_House            = 1094;
+constexpr int       kCompId_HouseCat         = 1096;
+
+constexpr uintptr_t kComp_Entity             = 24;   // Component::entity
+constexpr uintptr_t kComp_Director           = 40;   // Component::director
+constexpr uintptr_t kEntity_Scene            = 8;    // Entity::scene
+constexpr uintptr_t kScene_CachedCompLists   = 32;   // Scene::CachedActiveComponentLists (stride 16 per id)
+constexpr uintptr_t kScene_Suspended         = 1242; // bool
+constexpr uintptr_t kScene_ControlsPrevented = 1244; // bool
+
+constexpr uintptr_t kDir_SaveFile_Db         = 1192; // MewDirector+56+1136 = SQLSaveFile
+constexpr uintptr_t kSQLSF_TransactionStack  = 40;   // SQLSaveFile::transaction_stack (i32)
+constexpr uintptr_t kDir_SaveFile_Filename   = 1352; // MewDirector+56+1296 = std::string
+constexpr uintptr_t kDir_SaveFile_Backup     = 1400; // MewDirector+56+1344 = std::atomic<bool>
+
+constexpr uintptr_t kHouse_MainCam           = 88;   // Camera*
+constexpr uintptr_t kHouse_Night             = 177;  // bool
+
+constexpr uintptr_t kHCat_Physics            = 56;   // HouseCatPhysics*
+constexpr uintptr_t kHCat_Transform          = 64;   // Transform*
+constexpr uintptr_t kHCat_Renderer           = 72;   // MaskedRenderer* (+81 = visible)
+constexpr uintptr_t kHCat_NameTag            = 80;   // Renderer* (+81 = visible)
+constexpr uintptr_t kHCat_IconTag            = 88;   // Renderer* (+81 = visible)
+constexpr uintptr_t kHCat_Animator           = 104;  // Animator*
+constexpr uintptr_t kHCat_CatId              = 128;  // int64_t
+constexpr uintptr_t kHCat_Exists             = 136;  // bool
+constexpr uintptr_t kHCat_CheckOverlaps      = 217;  // bool
+constexpr uintptr_t kHCat_Departed           = 220;  // bool
+constexpr uintptr_t kHCat_CurrentLocation    = 232;  // CatPlacementArea*
+constexpr uintptr_t kHCat_Depth              = 248;  // int32_t
+constexpr uintptr_t kHCat_ClickBounds        = 256;  // CircleCollider*
+
+constexpr uintptr_t kHCatPhys_Transform      = 56;   // Transform*
+constexpr uintptr_t kHCatPhys_Cat            = 64;   // HouseCat*
+constexpr uintptr_t kHCatPhys_Velocity       = 72;   // Vec2D (2 doubles)
+constexpr uintptr_t kHCatPhys_PrevPos        = 88;   // Vec2D (2 doubles)
+constexpr uintptr_t kHCatPhys_PrevDragging   = 104;  // bool
+constexpr uintptr_t kHCatPhys_Grounded       = 105;  // bool
+
+constexpr uintptr_t kHCatClick_HeldCat       = 56;   // HouseCat*
+
+constexpr uintptr_t kCPA_Transform           = 56;   // Transform*
+constexpr uintptr_t kCPA_RoomName            = 64;   // std::string
+
+constexpr uintptr_t kTransform_Pos           = 128;  // Vec3D (3 doubles)
+constexpr uintptr_t kTransform_Scale         = 152;  // Vec2D (2 doubles)
+constexpr uintptr_t kTransform_Flip          = 184;  // Vec2D (2 doubles)
+
+constexpr uintptr_t kAnim_Transform          = 112;  // Transform*
+constexpr uintptr_t kAnim_CurrentState       = 256;  // AnimatorState (0x48)
+constexpr uintptr_t kAnim_RequestedState     = 328;  // AnimatorState (0x48)
+constexpr uintptr_t kAnimState_State         = 0;    // int32_t
+constexpr uintptr_t kAnimState_Flip          = 4;    // int32_t
+constexpr uintptr_t kAnimState_Anim          = 8;    // std::string
+constexpr uintptr_t kAnimState_Substate      = 40;   // std::string
+
+constexpr uintptr_t kRenderer_Visible        = 81;   // bool
+
+constexpr uintptr_t kCatData_Class           = 3088; // std::string
+
+constexpr uint32_t  kRva_ScreenBounds        = 0x013C5C04; // 4 floats: left, right, top, bottom
 
 } // namespace mgmp

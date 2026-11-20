@@ -419,6 +419,14 @@ void follow_request_jump(uint32_t index) {
     g.jump_index   = index;
 }
 
+void follow_forget() {
+    Guard guard;
+    g.pending_head  = 0;
+    g.pending_count = 0;
+    g.have_here     = false;
+    g.map           = nullptr;
+}
+
 void follow_catchup(uint8_t peer) {
     if (!g.on || g.is_client || !net_active()) return;
 

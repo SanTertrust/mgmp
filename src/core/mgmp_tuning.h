@@ -203,5 +203,16 @@ constexpr bool     kAimPreview = true;
 // Lines the log pane keeps for scrollback. The ring behind it holds 4096.
 constexpr uint32_t kUiLogLines = 2000;
 
+// --- host-authoritative house co-op -----------------------------------------
+
+// Replicate the House scene, per-cat drag ownership, peer cursors, day
+// transitions, and adventure preparation/return across 2-4 players.
+constexpr bool     kHouseCoop          = true;
+constexpr uint32_t kHouseFullPoseMs    = 500;   // 2 Hz full pose baseline
+constexpr uint32_t kHouseMovePoseMs    = 80;    // ~12.5 Hz moving/changed cats
+constexpr uint32_t kHouseCursorMs      = 33;    // ~30 Hz cursor/drag motion
+constexpr uint32_t kHouseInterpDelayMs = 50;    // remote pose/cursor buffer
+constexpr uint32_t kHouseMaxExtrapMs   = 120;   // bounded extrapolation cap
+
 } // namespace tune
 } // namespace mgmp

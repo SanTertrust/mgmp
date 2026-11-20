@@ -8,6 +8,7 @@
 #include "mgmp_tuning.h"
 #include "mgmp_gpak.h"
 #include "mgmp_cursor.h"
+#include "mgmp_house.h"
 #include "mgmp_log.h"
 #include "mgmp_mem.h"
 #include "mgmp_net.h"
@@ -1288,8 +1289,11 @@ void overlay_on_swap(void* window) {
     const uint8_t self = net_self();
     const uint64_t now = GetTickCount64();
     bool any = false;
-    for (uint8_t i = 0; i < kMaxPeers && !any; ++i)
-        any = (i != self) && g.peers[i].have && (now - g.peers[i].at <= kStaleMs);
+    for (uint8_t i = 0; i < kMaxPeers && !any; ++i) {
+        bool hactive = false;
+        any = (i != self) && ((g.peers[i].have && (now - g.peers[i].at <= kStaleMs)) ||
+              (house_get_peer_cursor(i, nullptr, nullptr, nullptr, &hactive) && hactive));
+    }
     if (!any && !test) {
         if (!g.said_quiet) {
             trace("no peer position has arrived yet -- nothing to draw."
@@ -1382,6 +1386,19 @@ void overlay_on_swap(void* window) {
 
     for (uint8_t i = 0; i < kMaxPeers; ++i) {
         if (i == self) continue;
+        float hnx = 0.0f, hny = 0.0f;
+        uint8_t hmode = 0;
+        bool hactive = false;
+        if (house_get_peer_cursor(i, &hnx, &hny, &hmode, &hactive) && hactive) {
+            Peer& p = g.peers[i];
+            if (!p.placed) { p.cx = hnx; p.cy = hny; p.placed = true; }
+            p.cx += (hnx - p.cx) * k;
+            p.cy += (hny - p.cy) * k;
+            draw_cursor(hmode, p.cx, p.cy, kPeerRGB[i % kMaxPeers],
+                        (float)alpha_for(true), w, h);
+            ++g.drawn;
+            continue;
+        }
         Peer& p = g.peers[i];
         if (!p.have || now - p.at > kStaleMs) continue;
 

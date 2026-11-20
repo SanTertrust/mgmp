@@ -9,6 +9,7 @@
 #include "mgmp_net.h"
 #include "mgmp_catsync.h"
 #include "mgmp_cursor.h"
+#include "mgmp_house.h"
 #include "mgmp_overlay.h"
 #include "mgmp_invsync.h"
 #include "mgmp_aim.h"
@@ -2128,6 +2129,19 @@ void lockstep_pump() {
                 leave_on_message(m.hostleft);
                 break;
 
+            case MSG_HOUSE_BASELINE:
+            case MSG_HOUSE_POSE:
+            case MSG_HOUSE_GRAB_REQ:
+            case MSG_HOUSE_GRAB_RESP:
+            case MSG_HOUSE_DRAG_MOVE:
+            case MSG_HOUSE_DROP_REQ:
+            case MSG_HOUSE_DROP_RESP:
+            case MSG_HOUSE_CURSOR:
+            case MSG_HOUSE_PREP:
+            case MSG_HOUSE_PHASE:
+                house_on_message(m.from, m);
+                break;
+
             // Not epoch-gated, and deliberately so: a cat is RUN state, not
             // battle state. It stays true across a battle boundary, so a late
             // one is still correct -- unlike an ACTION, which means nothing
@@ -2233,6 +2247,8 @@ void lockstep_pump() {
         // that fact in one place instead of one place per case.
         net_msg_release(m);
     }
+
+    house_pump();
 }
 
 // Defined just below, after its first caller.

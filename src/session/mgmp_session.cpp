@@ -1,6 +1,7 @@
 // mgmp_session.cpp -- see mgmp_session.h.
 
 #include "mgmp_cursor.h"
+#include "mgmp_house.h"
 #include "mgmp_overlay.h"
 #include "mgmp_session.h"
 #include "mgmp_net.h"
@@ -180,6 +181,7 @@ void go_ready(const char* how) {
     choice_init();
     cursor_init();
     overlay_init();
+    house_init();
 }
 
 // Refuse one peer. On the host the session survives it -- the other players keep
@@ -257,6 +259,11 @@ void handle_hello(uint8_t from, const Hello& h) {
     // first peer, and it is a no-op on every peer after that. Either way it has
     // to have happened before the catch-up send.
     go_ready("host");
+
+    // Route joiner catch-up by host phase: when the host is in House or
+    // adventure preparation, publish the active House checkpoint + live
+    // House baseline instead of the adventure-only follow/runhist burst.
+    if (house_catchup(from)) return;
 
     // A peer that joined after the save was already published gets it now.
     // Without this it would be accepted and welcomed and then sit forever on a
@@ -456,6 +463,7 @@ void session_shutdown() {
     if (!g.started) return;
     cursor_shutdown();
     overlay_shutdown();
+    house_shutdown();
     savefile_shutdown();
     leave_shutdown();
     catsync_shutdown();

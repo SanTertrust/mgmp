@@ -9,6 +9,7 @@
 #include "mgmp_log.h"
 #include "mgmp_addresses.h"
 #include "mgmp_resolve.h"
+#include "mgmp_tuning.h"
 
 #include <cstring>
 #include <cstdio>
@@ -47,9 +48,11 @@ constexpr uint32_t kMaxPresses  = 5;
 enum class Where { Unknown, InRun, OutOfRun };
 
 struct SceneList {
-    uint32_t count = 0;
-    char     name[kMaxScenes][40] = {};
-    bool     dying[kMaxScenes] = {};
+    uint32_t    count = 0;
+    char        name[kMaxScenes][40] = {};
+    bool        dying[kMaxScenes] = {};
+    bool        suspended[kMaxScenes] = {};
+    const void* ptr[kMaxScenes] = {};
 };
 
 struct State {
@@ -153,11 +156,14 @@ bool read_scenes(SceneList& out) {
     for (size_t i = 0; i < n; ++i) {
         char* dst = out.name[i];
         dst[0] = 0;
-        out.dying[i] = false;
+        out.dying[i]     = false;
+        out.suspended[i] = false;
+        out.ptr[i]       = nullptr;
 
         const void* scene = nullptr;
         if (!mem_read(begin + i * sizeof(void*), &scene, sizeof(scene)) || !scene)
             continue;
+        out.ptr[i] = scene;
         if (!mem_read_std_string((const uint8_t*)scene + kScene_Name, dst,
                                  sizeof(out.name[0]))) {
             dst[0] = 0;
@@ -173,6 +179,9 @@ bool read_scenes(SceneList& out) {
         uint8_t dying = 0;
         if (mem_read((const uint8_t*)scene + kScene_Destroying, &dying, 1))
             out.dying[i] = (dying != 0);
+        uint8_t susp = 0;
+        if (mem_read((const uint8_t*)scene + kScene_Suspended, &susp, 1))
+            out.suspended[i] = (susp != 0);
         ++named;
     }
     // Nothing read as a name: this is not a scene vector.
@@ -335,6 +344,26 @@ void leave_set_base(uintptr_t /*base*/) {
 // which is finer than the thing it describes changes.
 bool leave_in_run() { return g.where == Where::InRun; }
 
+bool leave_find_scene(const char* name,
+                      const void** out_scene,
+                      bool* out_suspended) {
+    if (out_scene)     *out_scene = nullptr;
+    if (out_suspended) *out_suspended = false;
+    if (!name || !name[0]) return false;
+    ensure_state();
+    SceneList s{};
+    if (!read_scenes(s)) return false;
+    for (uint32_t i = 0; i < s.count; ++i) {
+        if (s.dying[i]) continue;
+        if (strcmp(s.name[i], name) == 0) {
+            if (out_scene)     *out_scene = s.ptr[i];
+            if (out_suspended) *out_suspended = s.suspended[i];
+            return true;
+        }
+    }
+    return false;
+}
+
 void leave_pump() {
     ensure_state();
 
@@ -423,6 +452,16 @@ void leave_pump() {
     // legitimately been caught up into.
     if (!g.was_in_run || g.announced) return;
     if (++g.out_polls < kConfirmPolls) return;
+
+    // Supported return to House keeps the peer session alive when House co-op
+    // is enabled; only quit-to-menu / save-selection emits HOSTLEFT.
+    if (tune::kHouseCoop && out && strcmp(out, kScene_House) == 0) {
+        g.was_in_run = false;
+        g.out_polls  = 0;
+        log_line("LEAVE", "host returned to '%s' -- keeping session alive (House co-op)",
+                 where_name);
+        return;
+    }
 
     g.announced  = true;
     g.was_in_run = false;

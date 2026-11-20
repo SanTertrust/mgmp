@@ -86,6 +86,15 @@ void savefile_set_base(uintptr_t base);
 // the host has not published yet, or on a client.
 void savefile_catchup(uint8_t peer);
 
+// Publish the host's currently loaded save file (resolved from MewDirector's
+// active MewSaveFile::filename if no SaveSelection click was observed in this
+// session). Returns false if no save is loaded or a SQLite transaction/backup
+// is currently in flight.
+bool savefile_publish_active(uint8_t peer, bool fresh, bool flush_adventure);
+
+// Whether a fresh save checkpoint is currently queued on this client.
+bool savefile_has_pending();
+
 // From h_SaveSlotClick. Returns false if the caller must NOT run the original,
 // which is how a client's local pick is swallowed.
 bool savefile_on_slot_click(void* save_selection, int slot);

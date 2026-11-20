@@ -729,6 +729,69 @@ int main() {
         check(enc_action(tiny, sizeof(tiny), a) == 0, "enc_action returns 0");
     }
 
+    printf("\n-- house co-op protocol messages --\n");
+    {
+        uint8_t buf[2048];
+        HouseCatPose poses[2] = {};
+        poses[0].cat_id = 42; poses[0].x = 12.5f; poses[0].y = -3.25f; poses[0].z = 0.0f;
+        poses[0].depth = 100; poses[0].flip = -1; poses[0].anim_state = 2;
+        strncpy_s(poses[0].anim, "walk", _TRUNCATE);
+        strncpy_s(poses[0].substate, "happy", _TRUNCATE);
+        strncpy_s(poses[0].zone, "Attic", _TRUNCATE);
+        poses[0].visible = 1; poses[0].holder_peer = 1; poses[0].capture_id = 7;
+
+        poses[1].cat_id = 99; poses[1].x = -4.0f; poses[1].y = 8.0f;
+        poses[1].holder_peer = kNoPeer; poses[1].capture_id = 0;
+
+        HouseBaselineMsg base{};
+        base.generation = 3; base.roster_rev = 5; base.host_tick_ms = 123456;
+        base.phase = 1; base.night = 1; base.count = 2; base.cats = poses;
+        uint32_t n = enc_house_baseline(buf, sizeof(buf), base);
+        check(n > 0, "enc_house_baseline");
+        Reader r(buf, n); check(r.u8v() == MSG_HOUSE_BASELINE, "baseline tag");
+        HouseBaselineMsg out{};
+        check(dec_house_baseline(r, out) && r.pos == r.len, "dec_house_baseline");
+        check(out.generation == 3 && out.count == 2 && out.cats != nullptr, "baseline fields");
+        check(out.cats[0].cat_id == 42 && out.cats[0].holder_peer == 1 && out.cats[0].capture_id == 7,
+              "baseline cat0 capture");
+        check(strcmp(out.cats[0].zone, "Attic") == 0 && out.cats[0].flip == -1, "baseline cat0 zone/flip");
+        free(out.cats);
+
+        HouseGrabReqMsg greq{ 3, 42, 11, 1.5f, 2.5f };
+        n = enc_house_grab_req(buf, sizeof(buf), greq);
+        Reader rg(buf, n); check(rg.u8v() == MSG_HOUSE_GRAB_REQ, "grab req tag");
+        HouseGrabReqMsg greq2{};
+        check(dec_house_grab_req(rg, greq2) && greq2.cat_id == 42 && greq2.req_seq == 11, "dec_house_grab_req");
+
+        HouseDropRespMsg dresp{ 3, 42, 7, 1, 10.0f, 20.0f, "Kitchen", 1 };
+        n = enc_house_drop_resp(buf, sizeof(buf), dresp);
+        Reader rd(buf, n); check(rd.u8v() == MSG_HOUSE_DROP_RESP, "drop resp tag");
+        HouseDropRespMsg dresp2{};
+        check(dec_house_drop_resp(rd, dresp2) && strcmp(dresp2.zone, "Kitchen") == 0 && dresp2.accepted == 1,
+              "dec_house_drop_resp");
+
+        HouseCursorMsg hcur{ 3, 5.0f, -2.0f, 0.5f, 0.5f, 0, 1 };
+        n = enc_house_cursor(buf, sizeof(buf), hcur);
+        Reader rc(buf, n); check(rc.u8v() == MSG_HOUSE_CURSOR, "house cursor tag");
+        HouseCursorMsg hcur2{};
+        check(dec_house_cursor(rc, hcur2) && hcur2.in_house == 1, "dec_house_cursor");
+
+        HousePrepMsg prep{};
+        prep.generation = 3; prep.active = 1; prep.count = 1;
+        prep.cats[0].cat_id = 42;
+        strncpy_s(prep.cats[0].cat_class, "Hunter", _TRUNCATE);
+        n = enc_house_prep(buf, sizeof(buf), prep);
+        Reader rp(buf, n); check(rp.u8v() == MSG_HOUSE_PREP, "house prep tag");
+        HousePrepMsg prep2{};
+        check(dec_house_prep(rp, prep2) && strcmp(prep2.cats[0].cat_class, "Hunter") == 0, "dec_house_prep");
+
+        HousePhaseMsg ph{ 3, 2, 1 };
+        n = enc_house_phase(buf, sizeof(buf), ph);
+        Reader rph(buf, n); check(rph.u8v() == MSG_HOUSE_PHASE, "house phase tag");
+        HousePhaseMsg ph2{};
+        check(dec_house_phase(rph, ph2) && ph2.phase == 2 && ph2.flags == 1, "dec_house_phase");
+    }
+
     printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED",
            g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;

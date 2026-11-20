@@ -21,6 +21,7 @@
 #include "mgmp_follow.h"
 #include "mgmp_combatlock.h"
 #include "mgmp_leave.h"
+#include "mgmp_house.h"
 
 // Declared by imgui_impl_win32.h's owner rather than the header itself.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
@@ -451,6 +452,10 @@ void draw_connect() {
     char leave[192];
     leave_status(leave, sizeof(leave));
     ImGui::TextDisabled("%s", leave);
+
+    char hstat[192];
+    house_status(hstat, sizeof(hstat));
+    ImGui::TextDisabled("House: %s", hstat);
 
     if (session_last_action()[0]) {
         const char* a = session_last_action();
