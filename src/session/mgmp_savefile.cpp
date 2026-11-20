@@ -708,6 +708,35 @@ bool savefile_has_pending() {
     return g.pending;
 }
 
+bool savefile_write_pending_coop() {
+    ensure_state();
+    if (!g.on || !g.is_client || !g.pending || !g.blob || !g.blob_size)
+        return false;
+    ensure_dir();
+    if (!g.have_dir) { g.pending = false; return false; }
+
+    wchar_t wcoop[64];
+    wide(kCoopSaveName, wcoop, 64);
+    back_up(g.dir, wcoop);
+
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\%s", g.dir, wcoop);
+    if (!write_whole_file(path, g.blob, g.blob_size)) {
+        DWORD e = GetLastError();
+        if (e == ERROR_SHARING_VIOLATION)
+            log_line("SAVEFILE", "!! %ls is still open (win32 sharing violation)", path);
+        else
+            log_line("SAVEFILE", "!! could not write %ls (win32 %lu)", path, e);
+        return false;
+    }
+
+    log_line("SAVEFILE", "wrote the host's House checkpoint to %ls (%u bytes)",
+             path, g.blob_size);
+    g.pending = false;
+    g.applied = true;
+    return true;
+}
+
 void savefile_pump() {
     ensure_state();
 

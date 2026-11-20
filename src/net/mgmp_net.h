@@ -77,6 +77,7 @@ struct NetMsg {
     HouseCursorMsg   house_cursor;
     HousePrepMsg     house_prep;
     HousePhaseMsg    house_phase;
+    HouseInterstitialsMsg house_interstitials;
     HaltMsg   halt;
     char      refuse[192] = {};
 };
@@ -194,6 +195,8 @@ bool net_send_house_prep(const HousePrepMsg& m);
 bool net_send_house_prep_to(uint8_t peer, const HousePrepMsg& m);
 bool net_send_house_phase(const HousePhaseMsg& m);
 bool net_send_house_phase_to(uint8_t peer, const HousePhaseMsg& m);
+bool net_send_house_interstitials(const HouseInterstitialsMsg& m);
+bool net_send_house_interstitials_to(uint8_t peer, const HouseInterstitialsMsg& m);
 
 // Pops one decoded message, or returns false if the queue is empty. Call it
 // from the game thread; drain in a loop until it returns false.

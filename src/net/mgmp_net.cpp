@@ -177,6 +177,7 @@ bool decode_into(const uint8_t* buf, uint32_t len, NetMsg& m) {
         case MSG_HOUSE_CURSOR:   return dec_house_cursor(r, m.house_cursor);
         case MSG_HOUSE_PREP:     return dec_house_prep(r, m.house_prep);
         case MSG_HOUSE_PHASE:    return dec_house_phase(r, m.house_phase);
+        case MSG_HOUSE_INTERSTITIALS: return dec_house_interstitials(r, m.house_interstitials);
         case MSG_PEERS:   return dec_peers(r, m.peers);
         case MSG_HALT:    return dec_halt(r, m.halt);
         case MSG_REFUSE:  r.str(m.refuse, sizeof(m.refuse)); return r.ok;
@@ -796,6 +797,31 @@ bool net_send_house_phase_to(uint8_t peer, const HousePhaseMsg& m) {
 }
 
 namespace {
+bool send_house_interstitials_frame(const HouseInterstitialsMsg& m, bool broadcast, uint8_t peer) {
+    uint32_t need = house_interstitials_frame_size(m);
+    if (need > kMaxFrame) {
+        log_line("NET", "!! house interstitials payload is %u bytes, over the %u-byte frame cap",
+                 m.size, kMaxFrame);
+        return false;
+    }
+    uint8_t* p = (uint8_t*)malloc(need);
+    if (!p) return false;
+    uint32_t n = enc_house_interstitials(p, need, m);
+    bool ok = n && (broadcast ? net_send(p, n) : net_send_peer(peer, p, n));
+    free(p);
+    return ok;
+}
+} // namespace
+
+bool net_send_house_interstitials(const HouseInterstitialsMsg& m) {
+    return send_house_interstitials_frame(m, true, kNoPeer);
+}
+
+bool net_send_house_interstitials_to(uint8_t peer, const HouseInterstitialsMsg& m) {
+    return send_house_interstitials_frame(m, false, peer);
+}
+
+namespace {
 // Shared by the broadcast and the point-to-point form so the frame cap check
 // and the malloc live in exactly one place.
 bool send_savefile_frame(const SaveFileMsg& m, bool broadcast, uint8_t peer) {
@@ -892,6 +918,7 @@ void net_msg_release(NetMsg& m) {
     if (m.statedump.data){ free(m.statedump.data);m.statedump.data= nullptr; }
     if (m.house_baseline.cats) { free(m.house_baseline.cats); m.house_baseline.cats = nullptr; }
     if (m.house_pose.cats)     { free(m.house_pose.cats);     m.house_pose.cats     = nullptr; }
+    if (m.house_interstitials.data) { free(m.house_interstitials.data); m.house_interstitials.data = nullptr; }
     for (uint32_t i = 0; i < kInvBuckets; ++i)
         if (m.inventory.data[i]) { free(m.inventory.data[i]); m.inventory.data[i] = nullptr; }
 }
@@ -911,6 +938,7 @@ bool net_poll(NetMsg& out) {
         g.queue[g.head].statedump.data = nullptr;
         g.queue[g.head].house_baseline.cats = nullptr;
         g.queue[g.head].house_pose.cats = nullptr;
+        g.queue[g.head].house_interstitials.data = nullptr;
         for (uint32_t i = 0; i < kInvBuckets; ++i)
             g.queue[g.head].inventory.data[i] = nullptr;
         g.head = (g.head + 1) % kQueueCap;

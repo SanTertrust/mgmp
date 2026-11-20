@@ -83,6 +83,7 @@ enum Target : int {
     T_ReturnHouseSuccess,// MewDirector::ReturnToHouseSuccess_Internal()
     T_ReturnHouseFail,   // MewDirector::ReturnToHouseFail()
     T_ReturnCatFromAdv,  // House::ReturnCatFromAdventure(int64_t)
+    T_DoInterstitials,   // glaiel::DoInterstitialsInternal(InterstitialQueue)
     T_COUNT
 };
 
@@ -457,6 +458,7 @@ static const TargetDesc kTargets[T_COUNT] = {
     { 0x003B5430, "RETHOUSEOK",  "glaiel::MewDirector::ReturnToHouseSuccess_Internal" },
     { 0x003B4750, "RETHOUSEFAIL","glaiel::MewDirector::ReturnToHouseFail" },
     { 0x001E5C10, "RETCAT",      "glaiel::House::ReturnCatFromAdventure" },
+    { 0x0020DB30, "INTERSTITIAL","glaiel::DoInterstitialsInternal" },
 };
 
 // Coarse module guard, checked before the per-target signatures.
@@ -547,6 +549,21 @@ enum Call : int {
     C_SceneUpdateCachedList,   // void(Scene*, int comp_type_id)
     C_CameraGetMouse,          // Vec2D*(Camera*, Vec2D* out)
     C_CameraMatrix,            // float*(Camera*, float* out_mat4x4)
+    C_ComponentDestroy,        // void(Component*)
+    C_SceneCreateEntity,       // Entity*(Scene*)
+    C_SceneCreateMewDirector,  // MewDirector*(Scene*, Entity*, std::string&)
+    C_MewDirectorContinueSave, // void(MewDirector*)
+    C_CatDataCtor,             // CatData*(CatData*)
+    C_CatDataDtor,             // void(CatData*)
+    C_VecCatDataPushBack,      // void(std::vector<CatData>*, const CatData&)
+    C_VecStrPushBack,          // void(std::vector<std::string>*, const std::string&)
+    C_StrAssign,               // std::string*(std::string*, const char*, size_t)
+    C_WStrAssign,              // std::wstring*(std::wstring*, const wchar_t*, size_t)
+    C_PodBuf8Resize,           // void(PodBuffer<8>*, uint32_t)
+    C_InterstitialCtor,        // Interstitial*(Interstitial*)
+    C_InterstitialDtor,        // void(Interstitial*)
+    C_VecInterstitialEmplace,  // Interstitial*(std::vector<Interstitial>*, Interstitial*, const Interstitial&)
+    C_InterstitialQueueDtor,   // void(InterstitialQueue*)
     C_COUNT
 };
 
@@ -784,6 +801,21 @@ static const CallDesc kCalls[C_COUNT] = {
     { 0x0096B470, "glaiel::Scene::UpdateCachedList" },
     { 0x009796D0, "glaiel::Camera::get_mouse" },
     { 0x009785E0, "glaiel::Camera::camera_matrix" },
+    { 0x0094EBA0, "glaiel::Component::Destroy" },
+    { 0x0096B3E0, "glaiel::Scene::CreateEntity" },
+    { 0x001BE1A0, "glaiel::Scene::CreateComponent<MewDirector>" },
+    { 0x003AEFD0, "glaiel::MewDirector::ContinueSave" },
+    { 0x0005D6B0, "glaiel::CatData::CatData()" },
+    { 0x0005D630, "glaiel::CatData::~CatData()" },
+    { 0x00141300, "std::vector<CatData>::push_back" },
+    { 0x00048270, "std::vector<string>::push_back" },
+    { 0x000520D0, "std::string::assign(const char*,size_t)" },
+    { 0x0005B150, "std::wstring::assign(const wchar_t*,size_t)" },
+    { 0x00048FB0, "glaiel::PodBuffer<8>::resize" },
+    { 0x001E3240, "glaiel::Interstitial::Interstitial()" },
+    { 0x001E3320, "glaiel::Interstitial::~Interstitial()" },
+    { 0x001F3A80, "std::vector<Interstitial>::_Emplace_reallocate" },
+    { 0x0020E330, "glaiel::InterstitialQueue::~InterstitialQueue()" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only
@@ -1156,7 +1188,9 @@ constexpr int       kCompId_HouseCat         = 1096;
 constexpr uintptr_t kComp_Entity             = 24;   // Component::entity
 constexpr uintptr_t kComp_Director           = 40;   // Component::director
 constexpr uintptr_t kEntity_Scene            = 8;    // Entity::scene
+constexpr uintptr_t kDirector_Shared         = 24;   // Director::shared (Scene*)
 constexpr uintptr_t kScene_CachedCompLists   = 32;   // Scene::CachedActiveComponentLists (stride 16 per id)
+constexpr uintptr_t kScene_DoingDestruction  = 1200; // Scene::doing_scene_destruction (bool)
 constexpr uintptr_t kScene_Suspended         = 1242; // bool
 constexpr uintptr_t kScene_ControlsPrevented = 1244; // bool
 
@@ -1177,6 +1211,7 @@ constexpr uintptr_t kHCat_Animator           = 104;  // Animator*
 constexpr uintptr_t kHCat_CatId              = 128;  // int64_t
 constexpr uintptr_t kHCat_Exists             = 136;  // bool
 constexpr uintptr_t kHCat_CheckOverlaps      = 217;  // bool
+constexpr uintptr_t kHCat_Ragdolling         = 219;  // bool
 constexpr uintptr_t kHCat_Departed           = 220;  // bool
 constexpr uintptr_t kHCat_CurrentLocation    = 232;  // CatPlacementArea*
 constexpr uintptr_t kHCat_Depth              = 248;  // int32_t
@@ -1209,6 +1244,29 @@ constexpr uintptr_t kAnimState_Substate      = 40;   // std::string
 constexpr uintptr_t kRenderer_Visible        = 81;   // bool
 
 constexpr uintptr_t kCatData_Class           = 3088; // std::string
+constexpr size_t    kCatData_Size            = 3160; // sizeof(glaiel::CatData)
+
+constexpr size_t    kInterstitial_Size       = 240;  // sizeof(glaiel::Interstitial)
+constexpr uintptr_t kInterstitial_Str0       = 0;    // std::string
+constexpr uintptr_t kInterstitial_Str1       = 32;   // std::string
+constexpr uintptr_t kInterstitial_Str2       = 64;   // std::string
+constexpr uintptr_t kInterstitial_WStr0      = 96;   // std::wstring
+constexpr uintptr_t kInterstitial_WStr1      = 128;  // std::wstring
+constexpr uintptr_t kInterstitial_Flag0      = 160;  // uint8_t
+constexpr uintptr_t kInterstitial_Flag1      = 161;  // uint8_t
+constexpr uintptr_t kInterstitial_Pod        = 168;  // glaiel::PodBuffer<8> (cap, count, i64*)
+constexpr uintptr_t kInterstitial_Cats0      = 184;  // std::vector<CatData>
+constexpr uintptr_t kInterstitial_Cats1      = 208;  // std::vector<CatData>
+constexpr uintptr_t kInterstitial_TailU64    = 232;  // uint64_t
+
+constexpr size_t    kInterstitialQueue_Size  = 144;  // sizeof(glaiel::InterstitialQueue)
+constexpr uintptr_t kIQ_Items                = 0;    // std::vector<Interstitial>
+constexpr uintptr_t kIQ_NightCutscenes       = 24;   // std::vector<std::string>
+constexpr uintptr_t kIQ_DayCutscenes         = 48;   // std::vector<std::string>
+constexpr uintptr_t kIQ_Callback             = 72;   // std::function<void()> (64 bytes)
+constexpr uintptr_t kIQ_Flag0                = 136;  // uint8_t
+constexpr uintptr_t kIQ_Flag1                = 137;  // uint8_t
+constexpr uintptr_t kIQ_State                = 140;  // uint32_t
 
 constexpr uint32_t  kRva_ScreenBounds        = 0x013C5C04; // 4 floats: left, right, top, bottom
 

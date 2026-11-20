@@ -132,6 +132,7 @@ fn_this       o_StartAdventureCb   = nullptr;
 fn_this       o_ReturnHouseSuccess = nullptr;
 fn_this       o_ReturnHouseFail    = nullptr;
 fn_this_i64   o_ReturnCatFromAdv   = nullptr;
+fn_this       o_DoInterstitials    = nullptr;
 
 // ---- shared formatting helpers -------------------------------------------
 
@@ -445,6 +446,7 @@ void __fastcall h_HouseTestInit(void* self, bool a1, bool a2) {
 void __fastcall h_HouseCatUpdate(void* self) {
     if (!house_on_housecat_update(self)) return;
     o_HouseCatUpdate(self);
+    house_on_housecat_update_post(self);
 }
 
 void __fastcall h_HouseCatLateUpdate(void* self) {
@@ -455,6 +457,7 @@ void __fastcall h_HouseCatLateUpdate(void* self) {
 void __fastcall h_HouseCatPhysUpdate(void* self) {
     if (!house_on_housecat_physics_update(self)) return;
     o_HouseCatPhysUpdate(self);
+    house_on_housecat_physics_update_post(self);
 }
 
 void __fastcall h_HouseCatClickUpd(void* self) {
@@ -501,6 +504,11 @@ void* __fastcall h_ReturnCatFromAdv(void* self, int64_t cat_id) {
     void* ret = o_ReturnCatFromAdv(self, cat_id);
     house_on_return_cat_from_adv(self, cat_id);
     return ret;
+}
+
+void __fastcall h_DoInterstitials(void* queue) {
+    house_on_do_interstitials(queue);
+    o_DoInterstitials(queue);
 }
 
 void __fastcall h_ButtonUpdate(void* self) {
@@ -666,6 +674,7 @@ const Binding kBindings[] = {
     { T_ReturnHouseSuccess, (void*)&h_ReturnHouseSuccess, (void**)&o_ReturnHouseSuccess },
     { T_ReturnHouseFail,    (void*)&h_ReturnHouseFail,    (void**)&o_ReturnHouseFail    },
     { T_ReturnCatFromAdv,   (void*)&h_ReturnCatFromAdv,   (void**)&o_ReturnCatFromAdv   },
+    { T_DoInterstitials,    (void*)&h_DoInterstitials,    (void**)&o_DoInterstitials    },
 };
 
 // Install one binding. Returns true only if it went live on THIS call, so a
@@ -776,6 +785,7 @@ int hooks_install() {
     int installed = 0;
     for (const Binding& b : kBindings)
         if (install_one(b, /*announce_off=*/true)) ++installed;
+    house_set_do_interstitials_orig((void*)o_DoInterstitials);
 
     // After every hook is known, not before: a feature that is only safe while
     // another hook runs has to be told, and aim_set_base ran above -- before

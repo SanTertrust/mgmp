@@ -95,6 +95,10 @@ bool savefile_publish_active(uint8_t peer, bool fresh, bool flush_adventure);
 // Whether a fresh save checkpoint is currently queued on this client.
 bool savefile_has_pending();
 
+// Write a queued host save checkpoint to mgmp_coop.sav on disk and mark it
+// applied (used by House co-op when reloading in-place without SaveSelection).
+bool savefile_write_pending_coop();
+
 // From h_SaveSlotClick. Returns false if the caller must NOT run the original,
 // which is how a client's local pick is swallowed.
 bool savefile_on_slot_click(void* save_selection, int slot);
