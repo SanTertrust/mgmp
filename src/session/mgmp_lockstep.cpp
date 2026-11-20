@@ -130,6 +130,15 @@ constexpr uintptr_t kChar_Dead     = 0x4C2;
 constexpr uintptr_t kTObj_Tile     = 0x48;
 constexpr uintptr_t kTObj_Owner    = 0x98;
 
+// PlayerBrain::og_orientation (iVec2D): PlayerBrain::update saves this at the
+// top of each frame and restores Character+0x388 to it at the end unless the
+// player clicked to turn. Updating it alongside Character::Face keeps the
+// peer's PlayerBrain::update from snapping facing back on the next frame.
+constexpr uintptr_t kPlayerBrain_OgOrientation = 0x41C;
+
+struct FaceVec2D { int32_t x, y; };
+typedef void (__fastcall *fn_character_face)(void* chr, FaceVec2D dir, char a3, char a4);
+
 // glaiel::Character::get_affecting_elements(Character*, ElementList* out).
 // Returns `out`. See the kCalls entry for why this is worth calling: it is the
 // value Character::receive_damage_passives branches on, and its tile half is
@@ -2346,6 +2355,19 @@ bool lockstep_fill_choice(void* brain, void* out) {
         msg.b30 = a.tail[0x30 - 0x28];
         msg.b31 = a.tail[0x31 - 0x28];
 
+        // PlayerBrain::update lets the active player click a tile to turn their
+        // cat without generating a TurnAction. Carry Character+0x388 in the
+        // otherwise-unused dir fields of endturn so the peer matches before
+        // EndTurn / enemy turns evaluate backstabs.
+        if (a.type == TA_EndTurn && actor) {
+            int32_t fx = 0, fy = 0;
+            if (mem_read((const uint8_t*)actor + kChar_Facing,     &fx, sizeof(fx)) &&
+                mem_read((const uint8_t*)actor + kChar_Facing + 4, &fy, sizeof(fy))) {
+                msg.dx = fx;
+                msg.dy = fy;
+            }
+        }
+
         if (a.type == TA_Ability) {
             AbilitySlot slot = ability_slot_of(actor, a.ability);
             msg.slot_kind  = slot.kind;
@@ -2409,11 +2431,27 @@ static void apply_remote(const ActionMsg& msg, const void* actor, void* out) {
     memset(&a, 0, sizeof(a));
     a.type     = msg.type;
     a.target_x = msg.tx; a.target_y = msg.ty;
-    a.dir_x    = msg.dx; a.dir_y    = msg.dy;
+    a.dir_x    = msg.type == TA_EndTurn ? 0 : msg.dx;
+    a.dir_y    = msg.type == TA_EndTurn ? 0 : msg.dy;
     a.actor    = nullptr;                  // arrives null from a real brain too;
                                            // Character::DoAction fills it in
     a.tail[0x30 - 0x28] = msg.b30;
     a.tail[0x31 - 0x28] = msg.b31;
+
+    if (msg.type == TA_EndTurn && (msg.dx != 0 || msg.dy != 0) && actor) {
+        if (auto fn = (fn_character_face)addr_of_call(C_CharacterFace)) {
+            fn((void*)actor, FaceVec2D{ msg.dx, msg.dy }, 0, 0);
+        } else {
+            mem_write((uint8_t*)actor + kChar_Facing,     &msg.dx, sizeof(msg.dx));
+            mem_write((uint8_t*)actor + kChar_Facing + 4, &msg.dy, sizeof(msg.dy));
+        }
+        uint8_t* brain = nullptr;
+        if (cat < g.cat_count && g.human_cat[cat] &&
+            mem_read((const uint8_t*)actor + kChar_Brain, &brain, sizeof(brain)) && brain) {
+            mem_write(brain + kPlayerBrain_OgOrientation,     &msg.dx, sizeof(msg.dx));
+            mem_write(brain + kPlayerBrain_OgOrientation + 4, &msg.dy, sizeof(msg.dy));
+        }
+    }
 
     if (msg.type == TA_Ability) {
         AbilitySlot slot{ msg.slot_kind, msg.slot_index };

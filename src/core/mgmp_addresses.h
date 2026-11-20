@@ -508,6 +508,9 @@ enum Call : int {
 
     // --- pressing Play for a client that is stuck on the menu ------------
     C_ButtonClick,           // void(Button*, bool force) -- sub_1409764B0
+
+    // --- syncing click-to-turn facing on endturn (mgmp_lockstep.cpp) -----
+    C_CharacterFace,         // void(Character*, iVec2D dir, bool, bool)
     C_COUNT
 };
 
@@ -738,6 +741,7 @@ static const CallDesc kCalls[C_COUNT] = {
     // The button is identified by the std::string at Button+504 (kBtn_Name),
     // never by pointer or by position in a panel.
     { 0x0097E8E0, "glaiel::Button::Click" },
+    { 0x0010CE50, "glaiel::Character::Face" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only

@@ -104,6 +104,8 @@ static const SigTargetDesc kCallSigs[] = {
       "48 8B C4 44 88 40 18 48 89 50 10 55 53 56 57 41 54 41 55 41 56 41 57 48 8D A8 88 FE FF FF" },
     { 0x0097E8E0, "glaiel::Button::Click",
       "48 89 74 24 18 57 48 83 EC 60 33 F6" },
+    { 0x0010CE50, "glaiel::Character::Face",
+      "48 89 5C 24 20 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 00 FD FF FF" },
 };
 
 // Globals, recovered from a referencing instruction's own
@@ -111,13 +113,13 @@ static const SigTargetDesc kCallSigs[] = {
 static const SigDataDesc kSigData[] = {
     { 0x013DAC30, "MewDirectorPtr",
       "89 54 24 10 4C 8B DC 55 56 57 41 54 41 56 41 57 49 8D 6B A1 48 81 EC B8 00 00 00 48 8B 05 ? ? ? ? 4C 8D 79 10",
-      30, 34 },  // via 0x1400689FB in sub_1400689E0
+      30, 34 },  // via 0x1400689FB in `glaiel::ActSelectionScreen::init'::`7'::<lambda_4>::operator()
     { 0x012FBE80, "MouseCache",
       "40 57 48 83 EC 30 83 3D ? ? ? ? 02 48 8B F9 0F 85 ? ? ? ? 80 3D ? ? ? ? 00 74 12 F2 0F 10 15 ? ? ? ? F2 0F 10 1D ? ? ? ? EB 31",
-      43, 47 },  // via 0x140986827 in sub_140986800
+      43, 47 },  // via 0x140986827 in ?earliest_update@ControlSet@glaiel@@UEAAXXZ
     { 0x013C4A30, "ApplicationBase",
       "48 83 EC 28 B9 50 0F 00 00 E8 ? ? ? ? 48 89 44 24 30 48 8B C8 E8 ? ? ? ? 90 48 89 05 ? ? ? ? 48 83 C4 28",
-      31, 35 },  // via 0x1400256EC in sub_1400256D0
+      31, 35 },  // via 0x1400256EC in glaiel::`dynamic initializer for 'Application''
 };
 static const int kSigDataCount = 3;
 
