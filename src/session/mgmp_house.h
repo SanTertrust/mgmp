@@ -82,4 +82,7 @@ void house_on_return_cat_from_adv(void* house, int64_t cat_id);
 void house_set_do_interstitials_orig(void* fn);
 void house_on_do_interstitials(void* queue);
 
+void house_set_go_on_adventure_orig(void* fn);
+void house_on_go_on_adventure_pre(void* md, void* map_str, void* collars_vec, void* cat_ids_buf);
+
 } // namespace mgmp

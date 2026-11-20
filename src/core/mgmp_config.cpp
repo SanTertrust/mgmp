@@ -190,7 +190,7 @@ void hook_defaults() {
     // a detour on a function the game calls constantly for no reason at all.
     g_cfg.hook[T_HighlightRefresh] = false;
 
-    for (int t = T_HouseTestInit; t <= T_DoInterstitials; ++t)
+    for (int t = T_HouseTestInit; t <= T_GoOnAdventure; ++t)
         g_cfg.hook[t] = false;
 }
 
@@ -254,7 +254,7 @@ void hooks_implied_by(bool net_configured) {
         g_cfg.hook[T_HighlightRefresh] = tune::kAimPreview;
 
         if (tune::kHouseCoop) {
-            for (int t = T_HouseTestInit; t <= T_DoInterstitials; ++t)
+            for (int t = T_HouseTestInit; t <= T_GoOnAdventure; ++t)
                 g_cfg.hook[t] = true;
         }
     }
@@ -265,7 +265,7 @@ void hooks_implied_by(bool net_configured) {
     if (g_cfg.ui) {
         g_cfg.hook[T_FrameBegin] = true;
         if (tune::kHouseCoop) {
-            for (int t = T_HouseTestInit; t <= T_DoInterstitials; ++t)
+            for (int t = T_HouseTestInit; t <= T_GoOnAdventure; ++t)
                 g_cfg.hook[t] = true;
         }
     }

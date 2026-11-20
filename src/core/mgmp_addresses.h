@@ -84,6 +84,7 @@ enum Target : int {
     T_ReturnHouseFail,   // MewDirector::ReturnToHouseFail()
     T_ReturnCatFromAdv,  // House::ReturnCatFromAdventure(int64_t)
     T_DoInterstitials,   // glaiel::DoInterstitialsInternal(InterstitialQueue)
+    T_GoOnAdventure,     // MewDirector::GoOnAnAdventure(map, collars, cats)
     T_COUNT
 };
 
@@ -459,6 +460,7 @@ static const TargetDesc kTargets[T_COUNT] = {
     { 0x003B4750, "RETHOUSEFAIL","glaiel::MewDirector::ReturnToHouseFail" },
     { 0x001E5C10, "RETCAT",      "glaiel::House::ReturnCatFromAdventure" },
     { 0x0020DB30, "INTERSTITIAL","glaiel::DoInterstitialsInternal" },
+    { 0x003B13F0, "GOADV_UI",    "glaiel::MewDirector::GoOnAnAdventure(map,collars,cats)" },
 };
 
 // Coarse module guard, checked before the per-target signatures.
@@ -564,6 +566,8 @@ enum Call : int {
     C_InterstitialDtor,        // void(Interstitial*)
     C_VecInterstitialEmplace,  // Interstitial*(std::vector<Interstitial>*, Interstitial*, const Interstitial&)
     C_InterstitialQueueDtor,   // void(InterstitialQueue*)
+    C_DirectorAddScene,        // Scene*(Director*, std::string)
+    C_CreateActSelection,      // ActSelectionScreen*(Scene*, Entity*)
     C_COUNT
 };
 
@@ -816,6 +820,8 @@ static const CallDesc kCalls[C_COUNT] = {
     { 0x001E3320, "glaiel::Interstitial::~Interstitial()" },
     { 0x001F3A80, "std::vector<Interstitial>::_Emplace_reallocate" },
     { 0x0020E330, "glaiel::InterstitialQueue::~InterstitialQueue()" },
+    { 0x009D4950, "glaiel::Director::AddScene" },
+    { 0x003C47E0, "glaiel::Scene::CreateComponent<ActSelectionScreen>" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only

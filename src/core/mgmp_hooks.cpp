@@ -133,6 +133,8 @@ fn_this       o_ReturnHouseSuccess = nullptr;
 fn_this       o_ReturnHouseFail    = nullptr;
 fn_this_i64   o_ReturnCatFromAdv   = nullptr;
 fn_this       o_DoInterstitials    = nullptr;
+using fn_go_adv = void(__fastcall*)(void*, void*, void*, void*);
+fn_go_adv     o_GoOnAdventure      = nullptr;
 
 // ---- shared formatting helpers -------------------------------------------
 
@@ -511,6 +513,11 @@ void __fastcall h_DoInterstitials(void* queue) {
     o_DoInterstitials(queue);
 }
 
+void __fastcall h_GoOnAdventure(void* self, void* map_str, void* collars_vec, void* cat_ids_buf) {
+    house_on_go_on_adventure_pre(self, map_str, collars_vec, cat_ids_buf);
+    o_GoOnAdventure(self, map_str, collars_vec, cat_ids_buf);
+}
+
 void __fastcall h_ButtonUpdate(void* self) {
     // Fires for every button in the game. Outside a combat-menu tick this is a
     // load and a branch: combatlock_on_button's first test is the scope flag.
@@ -675,6 +682,7 @@ const Binding kBindings[] = {
     { T_ReturnHouseFail,    (void*)&h_ReturnHouseFail,    (void**)&o_ReturnHouseFail    },
     { T_ReturnCatFromAdv,   (void*)&h_ReturnCatFromAdv,   (void**)&o_ReturnCatFromAdv   },
     { T_DoInterstitials,    (void*)&h_DoInterstitials,    (void**)&o_DoInterstitials    },
+    { T_GoOnAdventure,      (void*)&h_GoOnAdventure,      (void**)&o_GoOnAdventure      },
 };
 
 // Install one binding. Returns true only if it went live on THIS call, so a
@@ -786,6 +794,7 @@ int hooks_install() {
     for (const Binding& b : kBindings)
         if (install_one(b, /*announce_off=*/true)) ++installed;
     house_set_do_interstitials_orig((void*)o_DoInterstitials);
+    house_set_go_on_adventure_orig((void*)o_GoOnAdventure);
 
     // After every hook is known, not before: a feature that is only safe while
     // another hook runs has to be told, and aim_set_base ran above -- before

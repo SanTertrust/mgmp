@@ -57,6 +57,9 @@ using FnWStrAssign            = void*(__fastcall*)(void* wstr, const wchar_t* pt
 using FnPodBufResize          = void(__fastcall*)(void* pod, uint32_t count);
 using FnVecInterEmplace       = void*(__fastcall*)(void* vec, void* where, const void* elem);
 using FnDoInterstitials       = void(__fastcall*)(void* iq);
+using FnGoOnAdventure         = void(__fastcall*)(void* md, void* map_str, void* collars_vec, void* cat_ids_buf);
+using FnDirectorAddScene      = void*(__fastcall*)(void* dir, void* std_str);
+using FnCreateActSel          = void*(__fastcall*)(void* scene, void* entity);
 
 struct InterpSample {
     uint32_t host_tick_ms = 0;
@@ -138,15 +141,20 @@ struct HouseState {
     FnVoidPtr               inter_dtor      = nullptr;
     FnVecInterEmplace       vec_inter_empl  = nullptr;
     FnDoInterstitials       do_interstitials= nullptr;
+    FnGoOnAdventure         go_on_adv       = nullptr;
+    FnDirectorAddScene      dir_add_scene   = nullptr;
+    FnCreateActSel          create_act_sel  = nullptr;
 
     // Lifecycle & phase
     HostPhase phase            = HostPhase::Outside;
+    PrepStage prep_stage       = PrepStage::None;
     uint32_t  generation       = 0;
     uint32_t  roster_rev       = 1;
     bool      in_pass_day      = false;
     bool      need_day_publish = false;
     bool      need_ret_publish = false;
     bool      need_adv_publish = false;
+    bool      need_prep_publish= false;
     bool      need_baseline    = false;
     bool      suppress_local_drag = false;
 
@@ -194,6 +202,9 @@ struct HouseState {
     bool                      has_queued_interstitial = false;
     int                       reload_stage = 0; // 0 = idle, 1 = destroyed old MewDirector, waiting 1 frame
     void*                     cached_director = nullptr;
+    HousePrepMsg              pending_class_chooser{};
+    uint32_t                  pending_class_chooser_gen = 0;
+    bool                      has_pending_class_chooser = false;
 
     // Peer cursors & diagnostics
     PeerCursorState peer_cursors[kMaxPeers];
@@ -815,9 +826,13 @@ void host_poll_prep_state() {
     mem_read((const uint8_t*)director + kDir_CatRegistry, &reg, sizeof(reg));
 
     HousePrepMsg msg{};
-    msg.generation = g.generation;
-    msg.active     = 1;
-    msg.count      = (uint8_t)count;
+    msg.generation   = g.generation;
+    msg.active       = 1;
+    msg.stage        = (uint8_t)g.prep_stage;
+    msg.collar_count = g.last_prep.collar_count;
+    memcpy(msg.map_name, g.last_prep.map_name, sizeof(msg.map_name));
+    memcpy(msg.collars,  g.last_prep.collars,  sizeof(msg.collars));
+    msg.count        = (uint8_t)count;
     for (uint8_t i = 0; i < msg.count; ++i) {
         int64_t cid = 0;
         if (ids) mem_read(ids + i, &cid, sizeof(cid));
@@ -1313,6 +1328,8 @@ void house_set_base(uintptr_t base) {
     g.inter_ctor      = (FnVoidPtr)addr_of_call(C_InterstitialCtor);
     g.inter_dtor      = (FnVoidPtr)addr_of_call(C_InterstitialDtor);
     g.vec_inter_empl  = (FnVecInterEmplace)addr_of_call(C_VecInterstitialEmplace);
+    g.dir_add_scene   = (FnDirectorAddScene)addr_of_call(C_DirectorAddScene);
+    g.create_act_sel  = (FnCreateActSel)addr_of_call(C_CreateActSelection);
 }
 
 void house_pump() {
@@ -1320,17 +1337,48 @@ void house_pump() {
     check_peer_departures();
 
     if (!g.is_client) {
-        // Detect House scene liveness when host starts session already in House.
+        // Detect House or Prep scene liveness when host starts session already in it.
         const void* hscene = nullptr;
         bool suspended = false;
         bool has_house = leave_find_scene(kScene_House, &hscene, &suspended);
         if (has_house && !suspended && !g.in_pass_day && g.phase == HostPhase::Outside) {
             g.phase = HostPhase::House;
+            g.prep_stage = PrepStage::None;
             if (g.generation == 0) g.generation = 1;
             rebuild_actor_map();
             log_line("HOUSE", "host detected live House scene (gen=%u, cats=%zu)",
                      g.generation, g.cat_actors.size());
             send_baseline(kNoPeer);
+        }
+        if (g.phase == HostPhase::Outside) {
+            const void* psc = nullptr;
+            bool psusp = false;
+            PrepStage detected = PrepStage::None;
+            if (leave_find_scene("ActSelection", &psc, &psusp) && psc)
+                detected = PrepStage::ActSelection;
+            else if (leave_find_scene("StorageItems", &psc, &psusp) && psc)
+                detected = PrepStage::StorageItems;
+            else if (leave_find_scene("ClassChooser", &psc, &psusp) && psc)
+                detected = PrepStage::ClassChooser;
+            if (detected != PrepStage::None) {
+                g.phase = HostPhase::Prep;
+                g.prep_stage = detected;
+                if (g.generation == 0) g.generation = 1;
+                log_line("HOUSE", "host detected live Prep scene stage=%u (gen=%u)",
+                         (unsigned)detected, g.generation);
+                HousePhaseMsg pm{ g.generation, (uint8_t)HostPhase::Prep, 0 };
+                net_send_house_phase(pm);
+                host_poll_prep_state();
+            }
+        }
+        if (g.phase == HostPhase::Prep && g.prep_stage != PrepStage::ActSelection) {
+            const void* asc = nullptr;
+            bool asusp = false;
+            if (leave_find_scene("ActSelection", &asc, &asusp) && asc) {
+                g.prep_stage = PrepStage::ActSelection;
+                host_poll_prep_state();
+                log_line("HOUSE", "host entered ActSelection (gen=%u)", g.generation);
+            }
         }
         if (g.need_baseline && has_house && !suspended && !g.in_pass_day) {
             g.need_baseline = false;
@@ -1365,6 +1413,12 @@ void house_pump() {
                 send_baseline(kNoPeer);
             }
         }
+        if (g.need_prep_publish) {
+            if (savefile_publish_active(kNoPeer, /*fresh=*/true, /*flush_adventure=*/false)) {
+                g.need_prep_publish = false;
+                host_poll_prep_state();
+            }
+        }
         if (g.need_adv_publish) {
             if (savefile_publish_active(kNoPeer, /*fresh=*/true, /*flush_adventure=*/true)) {
                 g.need_adv_publish = false;
@@ -1377,33 +1431,155 @@ void house_pump() {
         host_poll_prep_state();
         send_cursor_sample();
     } else {
-        // Client: reload mgmp_coop.sav in-place when a fresh House save arrives
-        // (e.g. after PassDay or ReturnToHouse), so new kittens & removed cats match.
-        if (g.reload_stage == 0 && savefile_has_pending()) {
+        // Client: lock all interactive buttons/item boxes in prep scenes so only
+        // the host selects collars, items, and acts.
+        static const char* const kPrepScenes[] = { "ClassChooser", "StorageItems", "ActSelection" };
+        for (const char* sname : kPrepScenes) {
+            const void* psc = nullptr;
+            bool psusp = false;
+            if (leave_find_scene(sname, &psc, &psusp) && psc)
+                *(uint8_t*)((uintptr_t)psc + kScene_ControlsPrevented) = 1;
+        }
+
+        // Client: enter ClassChooser when host clicks GoOnAnAdventure in House.
+        if (g.has_pending_class_chooser && g.pending_class_chooser_gen == g.client_gen &&
+            g.reload_stage == 0 && !savefile_has_pending()) {
             const void* ss = nullptr;
             bool ss_susp = false;
             const void* hs = nullptr;
             bool hs_susp = false;
+            const void* cc = nullptr;
+            bool cc_susp = false;
             if (!leave_find_scene("SaveSelection", &ss, &ss_susp) &&
-                leave_find_scene(kScene_House, &hs, &hs_susp) && hs) {
-                void* old_md = nullptr;
+                leave_find_scene(kScene_House, &hs, &hs_susp) && hs &&
+                !leave_find_scene("ClassChooser", &cc, &cc_susp)) {
+                void* client_md = nullptr;
                 if (g.director_slot)
-                    mem_read(g.director_slot, &old_md, sizeof(old_md));
-                if (old_md && g.comp_destroy && g.create_entity && g.create_mew_dir && g.continue_save) {
-                    void* dir = nullptr;
-                    mem_read((const uint8_t*)old_md + kComp_Director, &dir, sizeof(dir));
-                    if (dir) {
-                        g.cached_director = dir;
-                        *(uint8_t*)((uintptr_t)hs + kScene_Destroying) = 1;
-                        g.comp_destroy(old_md);
-                        g.cat_actors.clear();
-                        g.client_tracks.clear();
-                        g.current_house = nullptr;
-                        g.current_scene = nullptr;
-                        g.current_click_mgr = nullptr;
-                        g.reload_stage = 1;
-                        log_line("HOUSE", "reloading House from host save checkpoint");
-                        return;
+                    mem_read(g.director_slot, &client_md, sizeof(client_md));
+                if (client_md && g.go_on_adv && g.str_assign && g.str_dtor &&
+                    g.vec_str_push && g.podbuf_resize) {
+                    const auto& pm = g.pending_class_chooser;
+                    uint8_t map_s[32];
+                    memset(map_s, 0, sizeof(map_s));
+                    uint64_t sso = 15;
+                    memcpy(map_s + 24, &sso, 8);
+                    g.str_assign(map_s, pm.map_name, strlen(pm.map_name));
+
+                    uint8_t collars_vec[24];
+                    memset(collars_vec, 0, sizeof(collars_vec));
+                    for (uint8_t i = 0; i < pm.collar_count; ++i) {
+                        uint8_t cs[32];
+                        memset(cs, 0, sizeof(cs));
+                        memcpy(cs + 24, &sso, 8);
+                        g.str_assign(cs, pm.collars[i], strlen(pm.collars[i]));
+                        g.vec_str_push(collars_vec, cs);
+                        g.str_dtor(cs);
+                    }
+
+                    uint8_t cat_ids[16];
+                    memset(cat_ids, 0, sizeof(cat_ids));
+                    if (pm.count > 0) {
+                        g.podbuf_resize(cat_ids, pm.count);
+                        uint32_t cnt = pm.count;
+                        memcpy(cat_ids + 4, &cnt, 4);
+                        int64_t* ptr = nullptr;
+                        memcpy(&ptr, cat_ids + 8, 8);
+                        if (ptr) {
+                            for (uint8_t i = 0; i < pm.count; ++i)
+                                ptr[i] = pm.cats[i].cat_id;
+                        }
+                    }
+
+                    log_line("HOUSE", "client entering ClassChooser (map=%s, cats=%u, collars=%u)",
+                             pm.map_name, (unsigned)pm.count, (unsigned)pm.collar_count);
+                    g.go_on_adv(client_md, map_s, collars_vec, cat_ids);
+                    g.has_pending_class_chooser = false;
+                }
+            }
+        }
+
+        // Client: transition StorageItems -> ActSelection when host opens ActSelection.
+        if (g.phase == HostPhase::Prep && g.have_prep &&
+            g.last_prep.stage == (uint8_t)PrepStage::ActSelection &&
+            g.reload_stage == 0 && !savefile_has_pending()) {
+            const void* st = nullptr;
+            bool st_susp = false;
+            const void* act = nullptr;
+            bool act_susp = false;
+            if (leave_find_scene("StorageItems", &st, &st_susp) && st &&
+                !leave_find_scene("ActSelection", &act, &act_susp)) {
+                void* client_md = nullptr;
+                if (g.director_slot)
+                    mem_read(g.director_slot, &client_md, sizeof(client_md));
+                void* dir = nullptr;
+                if (client_md)
+                    mem_read((const uint8_t*)client_md + kDir_SceneDirector, &dir, sizeof(dir));
+                if (dir && g.dir_add_scene && g.create_entity && g.create_act_sel) {
+                    *(uint8_t*)((uintptr_t)st + kScene_Destroying) = 1;
+                    uint8_t s_act[32];
+                    memset(s_act, 0, sizeof(s_act));
+                    const char* kAct = "ActSelection";
+                    uint64_t len = 12, cap = 15;
+                    memcpy(s_act, kAct, len + 1);
+                    memcpy(s_act + 16, &len, 8);
+                    memcpy(s_act + 24, &cap, 8);
+                    void* asc = g.dir_add_scene(dir, s_act);
+                    if (asc && !*(uint8_t*)((uintptr_t)asc + kScene_DoingDestruction)) {
+                        void* ent = g.create_entity(asc);
+                        g.create_act_sel(asc, ent);
+                        *(uint8_t*)((uintptr_t)asc + kScene_ControlsPrevented) = 1;
+                    }
+                    log_line("HOUSE", "client entered ActSelection");
+                }
+            }
+        }
+
+        // Client: reload mgmp_coop.sav in-place when a fresh House/Prep/Adventure
+        // save arrives while in House or any Prep scene.
+        if (g.reload_stage == 0 && savefile_has_pending()) {
+            const void* ss = nullptr;
+            bool ss_susp = false;
+            if (!leave_find_scene("SaveSelection", &ss, &ss_susp)) {
+                static const char* const kReloadable[] = {
+                    kScene_House, "ClassChooser", "StorageItems", "ActSelection"
+                };
+                bool in_reloadable = false;
+                for (const char* sname : kReloadable) {
+                    const void* sc = nullptr;
+                    bool susp = false;
+                    if (leave_find_scene(sname, &sc, &susp) && sc) {
+                        in_reloadable = true;
+                        break;
+                    }
+                }
+                if (in_reloadable) {
+                    void* old_md = nullptr;
+                    if (g.director_slot)
+                        mem_read(g.director_slot, &old_md, sizeof(old_md));
+                    if (old_md && g.comp_destroy && g.create_entity && g.create_mew_dir && g.continue_save) {
+                        void* dir = nullptr;
+                        mem_read((const uint8_t*)old_md + kComp_Director, &dir, sizeof(dir));
+                        if (dir) {
+                            g.cached_director = dir;
+                            static const char* const kTearDown[] = {
+                                kScene_House, "ClassChooser", "StorageItems", "ActSelection", "Map"
+                            };
+                            for (const char* sname : kTearDown) {
+                                const void* sc = nullptr;
+                                bool susp = false;
+                                if (leave_find_scene(sname, &sc, &susp) && sc)
+                                    *(uint8_t*)((uintptr_t)sc + kScene_Destroying) = 1;
+                            }
+                            g.comp_destroy(old_md);
+                            g.cat_actors.clear();
+                            g.client_tracks.clear();
+                            g.current_house = nullptr;
+                            g.current_scene = nullptr;
+                            g.current_click_mgr = nullptr;
+                            g.reload_stage = 1;
+                            log_line("HOUSE", "reloading from host save checkpoint");
+                            return;
+                        }
                     }
                 }
             }
@@ -1475,8 +1651,12 @@ bool house_catchup(uint8_t peer) {
     catsync_forget();
     catsync_publish("house join catchup");
     send_baseline(peer);
-    if (g.phase == HostPhase::Prep && g.have_prep)
-        net_send_house_prep_to(peer, g.last_prep);
+    if (g.phase == HostPhase::Prep) {
+        HousePhaseMsg pm{ g.generation, (uint8_t)HostPhase::Prep, 0 };
+        net_send_house_phase_to(peer, pm);
+        if (g.have_prep)
+            net_send_house_prep_to(peer, g.last_prep);
+    }
     return true;
 }
 
@@ -1670,6 +1850,11 @@ void house_on_message(uint8_t from, const NetMsg& m) {
             if (!g.is_client) break;
             g.last_prep = m.house_prep;
             g.have_prep = (m.house_prep.active != 0);
+            if (m.house_prep.active && m.house_prep.stage == (uint8_t)PrepStage::ClassChooser) {
+                g.pending_class_chooser     = m.house_prep;
+                g.pending_class_chooser_gen = m.house_prep.generation;
+                g.has_pending_class_chooser = true;
+            }
             break;
         }
         case MSG_HOUSE_PHASE: {
@@ -1687,6 +1872,8 @@ void house_on_message(uint8_t from, const NetMsg& m) {
                     g.client_tracks.clear();
                 } else if (g.phase == HostPhase::Adventure) {
                     // Clear House actor references before adventure transition.
+                    g.has_pending_class_chooser = false;
+                    g.prep_stage = PrepStage::None;
                     g.cat_actors.clear();
                     g.current_house = nullptr;
                     g.current_scene = nullptr;
@@ -2004,20 +2191,26 @@ void house_on_pass_day_cb_post() {
 void house_on_go_on_adventure_cb_pre() {
     if (!g.on || g.is_client) return;
     host_release_all_captures();
-    g.phase = HostPhase::Prep;
-    HousePhaseMsg pm{ g.generation, (uint8_t)HostPhase::Prep, 0 };
-    net_send_house_phase(pm);
-    log_line("HOUSE", "host entered adventure preparation (gen=%u)", g.generation);
+    if (g.phase != HostPhase::Prep) {
+        g.phase = HostPhase::Prep;
+        HousePhaseMsg pm{ g.generation, (uint8_t)HostPhase::Prep, 0 };
+        net_send_house_phase(pm);
+    }
+    log_line("HOUSE", "host finished ClassChooser -> StorageItems (gen=%u)", g.generation);
 }
 
 void house_on_go_on_adventure_cb_post() {
     if (!g.on || g.is_client) return;
+    g.prep_stage        = PrepStage::StorageItems;
+    g.need_prep_publish = true;
     host_poll_prep_state();
 }
 
 void house_on_start_adventure_cb_post() {
     if (!g.on || g.is_client) return;
-    g.phase = HostPhase::Adventure;
+    g.phase            = HostPhase::Adventure;
+    g.prep_stage       = PrepStage::None;
+    g.need_prep_publish = false;
     memset(g.peer_map_ready, 0, sizeof(g.peer_map_ready));
     g.need_adv_publish = true;
     log_line("HOUSE", "host started adventure -- publishing map checkpoint");
@@ -2055,6 +2248,60 @@ void house_on_do_interstitials(void* queue) {
         g.has_pending_interstitial_blob = false;
         g.pending_interstitial_blob.clear();
     }
+}
+
+void house_set_go_on_adventure_orig(void* fn) {
+    g.go_on_adv = (FnGoOnAdventure)fn;
+}
+
+void house_on_go_on_adventure_pre(void* /*md*/, void* map_str, void* collars_vec, void* cat_ids_buf) {
+    if (!g.on || g.is_client) return;
+    host_release_all_captures();
+    if (g.generation == 0) g.generation = 1;
+    g.phase      = HostPhase::Prep;
+    g.prep_stage = PrepStage::ClassChooser;
+
+    HousePrepMsg msg{};
+    msg.generation = g.generation;
+    msg.active     = 1;
+    msg.stage      = (uint8_t)PrepStage::ClassChooser;
+    if (map_str)
+        mem_read_std_string(map_str, msg.map_name, sizeof(msg.map_name));
+
+    if (collars_vec) {
+        const uint8_t* first = nullptr;
+        const uint8_t* last  = nullptr;
+        mem_read((const uint8_t*)collars_vec + 0, &first, sizeof(first));
+        mem_read((const uint8_t*)collars_vec + 8, &last,  sizeof(last));
+        if (first && last && last >= first) {
+            size_t cnt = (size_t)(last - first) / 32;
+            if (cnt > kMaxPrepCollars) cnt = kMaxPrepCollars;
+            msg.collar_count = (uint8_t)cnt;
+            for (size_t i = 0; i < cnt; ++i)
+                mem_read_std_string(first + i * 32, msg.collars[i], sizeof(msg.collars[i]));
+        }
+    }
+
+    if (cat_ids_buf) {
+        uint32_t count = 0;
+        const int64_t* ids = nullptr;
+        mem_read((const uint8_t*)cat_ids_buf + 4, &count, sizeof(count));
+        mem_read((const uint8_t*)cat_ids_buf + 8, &ids,   sizeof(ids));
+        if (count > kMaxPrepCats) count = kMaxPrepCats;
+        msg.count = (uint8_t)count;
+        for (uint8_t i = 0; i < msg.count; ++i) {
+            if (ids) mem_read(ids + i, &msg.cats[i].cat_id, sizeof(int64_t));
+        }
+    }
+
+    g.last_prep = msg;
+    g.have_prep = true;
+
+    HousePhaseMsg pm{ g.generation, (uint8_t)HostPhase::Prep, 0 };
+    net_send_house_phase(pm);
+    net_send_house_prep(msg);
+    log_line("HOUSE", "host entered ClassChooser (gen=%u, map=%s, cats=%u, collars=%u)",
+             g.generation, msg.map_name, (unsigned)msg.count, (unsigned)msg.collar_count);
 }
 
 } // namespace mgmp

@@ -52,7 +52,7 @@ namespace mgmp {
 // So: if the value a peer puts in a message changes meaning, that is a protocol
 // change even when every byte stays where it was. Refusing at connect is free;
 // diagnosing it from a turn-0 halt is not.
-constexpr uint32_t kProtoVersion = 29;  // 29 House co-op + breeding interstitials
+constexpr uint32_t kProtoVersion = 30;  // 30 House co-op + prep scene replication
 
 // A frame's payload may not exceed this. RUNSTATE (phase 5) is the only message
 // that will ever approach it; everything in phase 4 is under 128 bytes.
@@ -839,10 +839,23 @@ struct HousePrepCat {
     char    eq_summary[96] = {};
 };
 
+constexpr uint8_t  kMaxPrepCollars = 24;
+
+enum class PrepStage : uint8_t {
+    None         = 0,
+    ClassChooser = 1,
+    StorageItems = 2,
+    ActSelection = 3,
+};
+
 struct HousePrepMsg {
-    uint32_t     generation = 0;
-    uint8_t      active     = 0;
-    uint8_t      count      = 0;
+    uint32_t     generation   = 0;
+    uint8_t      active       = 0;
+    uint8_t      stage        = 0;
+    uint8_t      count        = 0;
+    uint8_t      collar_count = 0;
+    char         map_name[64] = {};
+    char         collars[kMaxPrepCollars][24] = {};
     HousePrepCat cats[kMaxPrepCats] = {};
 };
 
@@ -1372,8 +1385,14 @@ inline uint32_t enc_house_prep(uint8_t* p, uint32_t cap, const HousePrepMsg& m) 
     w.u8v(MSG_HOUSE_PREP);
     w.u32v(m.generation);
     w.u8v(m.active);
+    w.u8v(m.stage);
     uint8_t n = m.count > kMaxPrepCats ? kMaxPrepCats : m.count;
     w.u8v(n);
+    uint8_t nc = m.collar_count > kMaxPrepCollars ? kMaxPrepCollars : m.collar_count;
+    w.u8v(nc);
+    w.str(m.map_name);
+    for (uint8_t i = 0; i < nc; ++i)
+        w.str(m.collars[i]);
     for (uint8_t i = 0; i < n; ++i) {
         w.u64v((uint64_t)m.cats[i].cat_id);
         w.str(m.cats[i].cat_class);
@@ -1747,10 +1766,15 @@ inline bool dec_house_cursor(Reader& r, HouseCursorMsg& m) {
 }
 
 inline bool dec_house_prep(Reader& r, HousePrepMsg& m) {
-    m.generation = r.u32v();
-    m.active     = r.u8v();
-    m.count      = r.u8v();
-    if (!r.ok || m.count > kMaxPrepCats) return false;
+    m.generation   = r.u32v();
+    m.active       = r.u8v();
+    m.stage        = r.u8v();
+    m.count        = r.u8v();
+    m.collar_count = r.u8v();
+    if (!r.ok || m.count > kMaxPrepCats || m.collar_count > kMaxPrepCollars) return false;
+    r.str(m.map_name, sizeof(m.map_name));
+    for (uint8_t i = 0; i < m.collar_count; ++i)
+        r.str(m.collars[i], sizeof(m.collars[i]));
     for (uint8_t i = 0; i < m.count; ++i) {
         m.cats[i].cat_id = (int64_t)r.u64v();
         r.str(m.cats[i].cat_class, sizeof(m.cats[i].cat_class));

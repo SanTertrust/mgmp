@@ -88,6 +88,8 @@ static const SigTargetDesc kTargetSigs[] = {
       "48 89 5C 24 08 48 89 54 24 10 57 48 83 EC 30 48 8B 41 18" },
     { 0x0020DB30, "INTERSTITIAL",
       "48 89 4C 24 08 55 53 56 57 41 56 41 57 48 8D AC 24 68 FD FF FF" },
+    { 0x003B13F0, "GOADV_UI",
+      "4C 89 4C 24 20 4C 89 44 24 18 48 89 54 24 10 55 53 56 57 41 54 41 56 41 57 48 8D 6C 24 D9" },
 };
 
 // INDEXED BY enum Call -- order is load-bearing.
@@ -174,6 +176,10 @@ static const SigTargetDesc kCallSigs[] = {
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 54 41 55 41 56 41 57 48 83 EC 50 4D 8B F8 48 8B DA 48 8B F1 4C 8B 11" },
     { 0x0020E330, "glaiel::InterstitialQueue::~InterstitialQueue()",
       "48 89 5C 24 08 57 48 83 EC 20 48 8D 79 48 48 8B D9 48 8B 4F 38 48 85 C9 74 14 48 8B 01 48 3B CF 0F 95 C2 FF 50 20 48 C7 47 38 00 00 00 00 48 8D 4B 30 E8 ? ? ? ? 48 8D 4B 18 E8 ? ? ? ? 48 8B CB 48 8B 5C 24 30 48 83 C4 20 5F E9 ? ? ? ? CC CC CC CC CC CC CC CC CC CC CC CC CC CC 48 89 5C 24 08" },
+    { 0x009D4950, "glaiel::Director::AddScene",
+      "48 89 5C 24 18 48 89 74 24 20 48 89 54 24 10 57 48 83 EC 20" },
+    { 0x003C47E0, "glaiel::Scene::CreateComponent<ActSelectionScreen>",
+      "48 89 6C 24 20 57 48 83 EC 20 80 B9 B0 04 00 00 00 48 8B EA 48 8B F9 74 0D 33 C0 48 8B 6C 24 48 48 83 C4 20 5F C3 48 89 5C 24 38 48 8D 0D ? ? ? ? 48 89 74 24 40 E8 ? ? ? ? 48 89 44 24 30 48 8B D8 48 85 C0 0F 84 ? ? ? ? 8B 0D ? ? ? ? 33 C0 0F 57 C0 0F 11 03 0F 11 43 10 0F 11 43 20 0F 11 43 30 48 89 43 40 8D 41 01 89 05 ? ? ? ? 0F B6 43 0C 24 FE 89 4B 08 24 FD C7 43 0E 00 00 01 00 24 FB C6 43 40 00" },
 };
 
 // Globals, recovered from a referencing instruction's own

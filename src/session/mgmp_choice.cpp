@@ -9,6 +9,7 @@
 #include "mgmp_log.h"
 #include "mgmp_addresses.h"
 #include "mgmp_resolve.h"
+#include "mgmp_split.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -26,9 +27,11 @@ namespace {
 constexpr uintptr_t kEvt_OptBegin  = 224;
 constexpr uintptr_t kEvt_OptEnd    = 232;
 
+constexpr uintptr_t kLvl_Cat       = 160;   // LevelUpScreen::cat (CatData*)
 constexpr uintptr_t kLvl_OptBegin  = 864;
 constexpr uintptr_t kLvl_OptEnd    = 872;
 constexpr uintptr_t kLvl_Committed = 792;   // select_option's "already chose" guard
+constexpr uintptr_t kCatData_Uid   = 3144;  // CatData::cat_uid (int64_t)
 
 constexpr uintptr_t kOptStride     = 240;
 
@@ -458,6 +461,59 @@ void choice_on_event_update(void* world_event) {
 
 // --- the level-up screen ---------------------------------------------------
 
+bool levelup_is_local_owner(void* screen) {
+    if (!screen) return !g.is_client;
+    const void* cat = nullptr;
+    if (!mem_read((const uint8_t*)screen + kLvl_Cat, &cat, sizeof(cat)) || !cat)
+        return !g.is_client;
+    int64_t cat_uid = 0;
+    if (!mem_read((const uint8_t*)cat + kCatData_Uid, &cat_uid, sizeof(cat_uid)) || cat_uid == 0)
+        return !g.is_client;
+
+    const void** dir_slot = (const void**)addr_of_data(D_MewDirectorPtr);
+    const void* md = nullptr;
+    if (!dir_slot || !mem_read(dir_slot, &md, sizeof(md)) || !md)
+        return !g.is_client;
+
+    uint32_t count = 0;
+    const int64_t* ids = nullptr;
+    if (!mem_read((const uint8_t*)md + kDir_CatIdCount, &count, sizeof(count)) || count == 0)
+        return !g.is_client;
+    if (!mem_read((const uint8_t*)md + kDir_CatIdData, &ids, sizeof(ids)) || !ids)
+        return !g.is_client;
+
+    uint32_t found_idx = UINT32_MAX;
+    for (uint32_t i = 0; i < count && i < 16; ++i) {
+        int64_t id = 0;
+        if (mem_read(ids + i, &id, sizeof(id)) && id == cat_uid) {
+            found_idx = i;
+            break;
+        }
+    }
+    if (found_idx == UINT32_MAX) return !g.is_client;
+
+    const Config& cfg = config();
+    if (cfg.net_control_count > 0) {
+        for (uint32_t i = 0; i < cfg.net_control_count; ++i)
+            if (cfg.net_control[i] == found_idx) return true;
+        return false;
+    }
+
+    uint32_t P   = net_peer_count();
+    uint32_t pos = net_peer_pos();
+    if (P == 0) return !g.is_client;
+    return split_owns(split_for(count, P, pos), found_idx);
+}
+
+void set_levelup_controls_prevented(void* screen, bool prevent) {
+    if (!screen) return;
+    void* ent = nullptr;
+    if (!mem_read((const uint8_t*)screen + kComp_Entity, &ent, sizeof(ent)) || !ent) return;
+    void* scene = nullptr;
+    if (!mem_read((const uint8_t*)ent + kEntity_Scene, &scene, sizeof(scene)) || !scene) return;
+    *(uint8_t*)((uintptr_t)scene + kScene_ControlsPrevented) = prevent ? 1 : 0;
+}
+
 bool choice_on_level_select(void* screen, void* opt) {
     if (!g.on || !screen || !opt) return true;
     if (g.injecting) return true;
@@ -465,10 +521,9 @@ bool choice_on_level_select(void* screen, void* opt) {
     Guard guard;
     g.level_screen = screen;
 
-    if (g.is_client) {
+    if (!levelup_is_local_owner(screen)) {
         ++g.swallowed;
-        log_line("CHOICE", "suppressed a local level-up click -- the host owns this"
-                           " run's choices");
+        log_line("CHOICE", "suppressed a local level-up click -- another player owns this cat");
         return false;
     }
 
@@ -521,7 +576,9 @@ void choice_on_level_update(void* level_screen) {
     if (!g.on || !level_screen) return;
     Guard guard;
     g.level_screen = level_screen;
-    if (!g.is_client) return;
+    const bool local_owner = levelup_is_local_owner(level_screen);
+    set_levelup_controls_prevented(level_screen, !local_owner);
+    if (local_owner) return;
 
     // select_option no-ops once LevelUpScreen+792 is set, so injecting into a
     // screen that already committed would be swallowed by the GAME rather than
@@ -544,14 +601,19 @@ void choice_on_message(const ChoiceMsg& m) {
     if (!g.on) return;
     Guard guard;
 
-    if (!g.is_client) {
-        // Same asymmetry mgmp_follow reports: the message is host -> client, so
-        // a host receiving one is talking to a peer that also believes it hosts.
+    const uint8_t kind = (m.kind == kChoiceLevelUp) ? kChoiceLevelUp : kChoiceEvent;
+
+    if (!g.is_client && kind != kChoiceLevelUp) {
+        // Same asymmetry mgmp_follow reports: event choices are host -> client,
+        // so a host receiving one is talking to a peer that also believes it hosts.
         log_line("CHOICE", "!! received a %s choice while hosting -- both peers believe"
                            " they own the run", kind_name(m.kind));
         return;
     }
-    const uint8_t kind = (m.kind == kChoiceLevelUp) ? kChoiceLevelUp : kChoiceEvent;
+    if (kind == kChoiceLevelUp && g.level_screen && levelup_is_local_owner(g.level_screen)) {
+        log_line("CHOICE", "!! received a level-up choice for a cat owned locally -- ignoring");
+        return;
+    }
 
     // A choice for a node mgmp_follow already gave up on. Refusing it here is
     // the other half of choice_on_node_skipped: that one catches the choice

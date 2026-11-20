@@ -231,6 +231,7 @@ bool relayed(uint8_t type) {
         // like the per-turn HASH above it.
         case MSG_NODEHASH:
         case MSG_HOUSE_CURSOR:
+        case MSG_CHOICE:
             return true;
         default:
             return false;
