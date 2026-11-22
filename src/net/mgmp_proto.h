@@ -52,7 +52,7 @@ namespace mgmp {
 // So: if the value a peer puts in a message changes meaning, that is a protocol
 // change even when every byte stays where it was. Refusing at connect is free;
 // diagnosing it from a turn-0 halt is not.
-constexpr uint32_t kProtoVersion = 30;  // 30 House co-op + prep scene replication
+constexpr uint32_t kProtoVersion = 34;  // House bidirectional furniture layout sync
 
 // A frame's payload may not exceed this. RUNSTATE (phase 5) is the only message
 // that will ever approach it; everything in phase 4 is under 128 bytes.
@@ -134,6 +134,8 @@ enum MsgType : uint8_t {
     MSG_HOUSE_PREP     = 29, // host -> client: adventure prep party/class/equipment
     MSG_HOUSE_PHASE    = 30, // both: phase transitions and client map-ready ack
     MSG_HOUSE_INTERSTITIALS = 31, // host -> client: serialized night/breeding InterstitialQueue
+    MSG_HOUSE_POOP_POP      = 32, // both: sync FurniturePiece::PoopPop by piece_uid
+    MSG_HOUSE_FURNITURE     = 33, // both: sync House furniture placement layout
 };
 
 // A save file is a plain sqlite3 database (the shipped ones start with the
@@ -354,6 +356,7 @@ struct CatDataMsg {
     uint32_t size  = 0;
     uint64_t hash  = 0;    // FNV-1a over the bytes; also the host's change check
     uint8_t* data  = nullptr;  // encode: borrowed. decode: owned by the receiver.
+    uint32_t house_generation = 0;  // zero identifies adventure cat data
 };
 
 // A serialized cat is well under a kilobyte in practice. The cap is generous but
@@ -746,6 +749,7 @@ struct HouseCatPose {
     float    vx          = 0.0f;
     float    vy          = 0.0f;
     int32_t  depth       = 0;
+    int32_t  render_layer = 16;
     int8_t   flip        = 1;
     int32_t  anim_state  = 0;
     char     anim[48]    = {};
@@ -762,6 +766,7 @@ struct HouseBaselineMsg {
     uint32_t      host_tick_ms = 0;
     uint8_t       phase        = 0;
     uint8_t       night        = 0;
+    uint8_t       returning    = 0;
     uint16_t      count        = 0;
     HouseCatPose* cats         = nullptr;  // heap-allocated on decode
 };
@@ -810,6 +815,8 @@ struct HouseDropReqMsg {
     uint32_t seq        = 0;
     float    wx         = 0.0f;
     float    wy         = 0.0f;
+    float    vx         = 0.0f;
+    float    vy         = 0.0f;
 };
 
 struct HouseDropRespMsg {
@@ -836,7 +843,7 @@ struct HouseCursorMsg {
 struct HousePrepCat {
     int64_t cat_id         = 0;
     char    cat_class[48]  = {};
-    char    eq_summary[96] = {};
+    char    eq_summary[256] = {};
 };
 
 constexpr uint8_t  kMaxPrepCollars = 24;
@@ -868,6 +875,19 @@ struct HousePhaseMsg {
 constexpr uint32_t kMaxHouseInterstitialBytes = 4u << 20; // 4 MiB
 
 struct HouseInterstitialsMsg {
+    uint32_t generation = 0;
+    uint32_t size       = 0;
+    uint8_t* data       = nullptr; // encode: borrowed. decode: owned by receiver (free()).
+};
+
+struct HousePoopPopMsg {
+    uint32_t generation = 0;
+    int64_t  piece_uid  = 0;
+};
+
+constexpr uint32_t kMaxHouseFurnitureBytes = 1u << 20; // 1 MiB
+
+struct HouseFurnitureMsg {
     uint32_t generation = 0;
     uint32_t size       = 0;
     uint8_t* data       = nullptr; // encode: borrowed. decode: owned by receiver (free()).
@@ -1080,6 +1100,7 @@ inline uint32_t enc_catdata(uint8_t* p, uint32_t cap, const CatDataMsg& m) {
     if (!m.data || m.size == 0 || m.size > kMaxCatBytes) return 0;
     Writer w(p, cap);
     w.u8v(MSG_CATDATA);
+    w.u32v(m.house_generation);
     w.u64v(m.id);
     w.u32v(m.size);
     w.u64v(m.hash);
@@ -1268,6 +1289,7 @@ inline void enc_house_cat_pose(Writer& w, const HouseCatPose& c, bool with_captu
     w.f32v(c.x); w.f32v(c.y); w.f32v(c.z);
     w.f32v(c.vx); w.f32v(c.vy);
     w.i32v(c.depth);
+    w.i32v(c.render_layer);
     w.u8v((uint8_t)c.flip);
     w.i32v(c.anim_state);
     w.str(c.anim);
@@ -1288,6 +1310,7 @@ inline uint32_t enc_house_baseline(uint8_t* p, uint32_t cap, const HouseBaseline
     w.u32v(m.host_tick_ms);
     w.u8v(m.phase);
     w.u8v(m.night);
+    w.u8v(m.returning);
     uint16_t n = m.count > kMaxHouseCats ? kMaxHouseCats : m.count;
     w.u8v((uint8_t)(n & 0xFF));
     w.u8v((uint8_t)((n >> 8) & 0xFF));
@@ -1353,6 +1376,7 @@ inline uint32_t enc_house_drop_req(uint8_t* p, uint32_t cap, const HouseDropReqM
     w.u32v(m.capture_id);
     w.u32v(m.seq);
     w.f32v(m.wx); w.f32v(m.wy);
+    w.f32v(m.vx); w.f32v(m.vy);
     return w.ok ? w.len : 0;
 }
 
@@ -1422,6 +1446,26 @@ inline uint32_t enc_house_interstitials(uint8_t* p, uint32_t cap, const HouseInt
     return w.ok ? w.len : 0;
 }
 
+inline uint32_t enc_house_poop_pop(uint8_t* p, uint32_t cap, const HousePoopPopMsg& m) {
+    Writer w(p, cap);
+    w.u8v(MSG_HOUSE_POOP_POP);
+    w.u32v(m.generation);
+    w.u64v((uint64_t)m.piece_uid);
+    return w.ok ? w.len : 0;
+}
+
+inline uint32_t house_furniture_frame_size(const HouseFurnitureMsg& m) { return m.size + 32; }
+
+inline uint32_t enc_house_furniture(uint8_t* p, uint32_t cap, const HouseFurnitureMsg& m) {
+    if (!m.data || m.size == 0 || m.size > kMaxHouseFurnitureBytes) return 0;
+    Writer w(p, cap);
+    w.u8v(MSG_HOUSE_FURNITURE);
+    w.u32v(m.generation);
+    w.u32v(m.size);
+    w.raw(m.data, m.size);
+    return w.ok ? w.len : 0;
+}
+
 inline uint32_t enc_halt(uint8_t* p, uint32_t cap, const HaltMsg& h) {
     Writer w(p, cap);
     w.u8v(MSG_HALT);
@@ -1477,6 +1521,7 @@ inline bool dec_hash(Reader& r, HashMsg& h) {
 // leak. Same contract as dec_savefile.
 inline bool dec_catdata(Reader& r, CatDataMsg& m) {
     m.data = nullptr;
+    m.house_generation = r.u32v();
     m.id   = r.u64v();
     m.size = r.u32v();
     m.hash = r.u64v();
@@ -1633,6 +1678,7 @@ inline bool dec_house_cat_pose(Reader& r, HouseCatPose& c, bool with_capture) {
     c.x          = r.f32v(); c.y = r.f32v(); c.z = r.f32v();
     c.vx         = r.f32v(); c.vy = r.f32v();
     c.depth      = r.i32v();
+    c.render_layer = r.i32v();
     c.flip       = (int8_t)r.u8v();
     c.anim_state = r.i32v();
     r.str(c.anim, sizeof(c.anim));
@@ -1660,6 +1706,7 @@ inline bool dec_house_baseline(Reader& r, HouseBaselineMsg& m) {
     m.host_tick_ms = r.u32v();
     m.phase        = r.u8v();
     m.night        = r.u8v();
+    m.returning    = r.u8v();
     uint16_t lo    = r.u8v();
     uint16_t hi    = r.u8v();
     m.count        = (uint16_t)(lo | (hi << 8));
@@ -1736,9 +1783,12 @@ inline bool dec_house_drop_req(Reader& r, HouseDropReqMsg& m) {
     m.seq        = r.u32v();
     m.wx         = r.f32v();
     m.wy         = r.f32v();
-    return r.ok && std::isfinite(m.wx) && std::isfinite(m.wy);
+    m.vx         = r.f32v();
+    m.vy         = r.f32v();
+    return r.ok && std::isfinite(m.wx) && std::isfinite(m.wy) &&
+           std::isfinite(m.vx) && std::isfinite(m.vy);
 }
-
+\
 inline bool dec_house_drop_resp(Reader& r, HouseDropRespMsg& m) {
     m.generation  = r.u32v();
     m.cat_id      = (int64_t)r.u64v();
@@ -1804,6 +1854,26 @@ inline bool dec_house_interstitials(Reader& r, HouseInterstitialsMsg& m) {
     return true;
 }
 
+inline bool dec_house_poop_pop(Reader& r, HousePoopPopMsg& m) {
+    m.generation = r.u32v();
+    m.piece_uid  = (int64_t)r.u64v();
+    return r.ok;
+}
+
+inline bool dec_house_furniture(Reader& r, HouseFurnitureMsg& m) {
+    m.data = nullptr;
+    m.generation = r.u32v();
+    m.size       = r.u32v();
+    if (!r.ok || m.size == 0 || m.size > kMaxHouseFurnitureBytes) return false;
+    if (r.pos + m.size > r.len) return false;
+    uint8_t* buf = (uint8_t*)malloc(m.size);
+    if (!buf) return false;
+    memcpy(buf, r.buf + r.pos, m.size);
+    r.pos += m.size;
+    m.data = buf;
+    return true;
+}
+
 inline bool dec_halt(Reader& r, HaltMsg& h) {
     h.turn = r.u32v();
     r.str(h.reason, sizeof(h.reason));
@@ -1843,6 +1913,8 @@ inline const char* msg_name(uint8_t t) {
         case MSG_HOUSE_PREP:     return "HOUSE_PREP";
         case MSG_HOUSE_PHASE:    return "HOUSE_PHASE";
         case MSG_HOUSE_INTERSTITIALS: return "HOUSE_INTER";
+        case MSG_HOUSE_POOP_POP: return "HOUSE_POOP";
+        case MSG_HOUSE_FURNITURE: return "HOUSE_FURN";
         default:          return "?";
     }
 }

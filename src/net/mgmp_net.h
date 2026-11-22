@@ -38,6 +38,9 @@ enum class NetState {
 // One decoded inbound message. The union is flat rather than tagged-pointer so
 // the receive thread can copy it into the queue without allocating -- an
 // allocation on the receive path is a stall waiting to happen.
+// Internal event. No wire decoder accepts this tag.
+constexpr uint8_t kNetPeerDisconnected = 0xFF;
+
 struct NetMsg {
     uint8_t   type = 0;
     // Which peer AUTHORED this, from the frame envelope -- not which socket it
@@ -45,6 +48,7 @@ struct NetMsg {
     // and the difference is the whole point: with four players, "an action
     // arrived" is not enough, you need to know whose.
     uint8_t   from = kNoPeer;
+    uint64_t  received_ms = 0;
     Hello     hello;
     PeersMsg  peers;
     Welcome   welcome;
@@ -78,6 +82,8 @@ struct NetMsg {
     HousePrepMsg     house_prep;
     HousePhaseMsg    house_phase;
     HouseInterstitialsMsg house_interstitials;
+    HousePoopPopMsg  house_poop_pop;
+    HouseFurnitureMsg house_furniture;
     HaltMsg   halt;
     char      refuse[192] = {};
 };
@@ -89,7 +95,7 @@ void net_msg_release(NetMsg& m);
 // --- lifecycle (game thread) ------------------------------------------------
 
 // port is the TCP port; host binds it, client dials <addr>:<port>.
-bool net_host(uint16_t port);
+bool net_host(uint16_t port, bool loopback_only = false);
 bool net_join(const char* addr, uint16_t port);
 void net_shutdown();
 
@@ -151,7 +157,8 @@ bool net_send_savefile(const SaveFileMsg& m);
 bool net_send_savefile_to(uint8_t peer, const SaveFileMsg& m);
 // Same contract as net_send_savefile, but small: a serialized cat is well under
 // a kilobyte, so this one is cheap enough to send several of in a row.
-bool net_send_catdata(const CatDataMsg& m);
+bool net_send_catdata(const CatDataMsg& m, uint8_t peer = kNoPeer);
+void net_disconnect_peer(uint8_t peer);
 // The run inventory, whole. Same contract again; sent alongside the cats at
 // each map node, and skipped entirely when nothing in it changed.
 bool net_send_inventory(const InventoryMsg& m);
@@ -197,6 +204,9 @@ bool net_send_house_phase(const HousePhaseMsg& m);
 bool net_send_house_phase_to(uint8_t peer, const HousePhaseMsg& m);
 bool net_send_house_interstitials(const HouseInterstitialsMsg& m);
 bool net_send_house_interstitials_to(uint8_t peer, const HouseInterstitialsMsg& m);
+bool net_send_house_poop_pop(const HousePoopPopMsg& m);
+bool net_send_house_furniture(const HouseFurnitureMsg& m);
+bool net_send_house_furniture_to(uint8_t peer, const HouseFurnitureMsg& m);
 
 // Pops one decoded message, or returns false if the queue is empty. Call it
 // from the game thread; drain in a loop until it returns false.
@@ -206,6 +216,8 @@ bool net_poll(NetMsg& out);
 struct NetStats {
     uint32_t sent = 0, received = 0, dropped = 0;
     uint64_t bytes_sent = 0, bytes_received = 0;
+    uint32_t house_samples_coalesced = 0;
+    uint64_t house_sample_max_queue_ms = 0;
 };
 NetStats net_stats();
 

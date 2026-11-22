@@ -74,6 +74,12 @@ static const SigTargetDesc kTargetSigs[] = {
       "48 8B C4 48 89 58 18 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 38 FF FF FF" },
     { 0x001FF140, "HCATDROP",
       "40 53 48 83 EC 30 48 8B 41 38 48 8B D9 48 85 C0" },
+    { 0x001AC4F0, "HLAYOUT",
+      "48 89 5C 24 10 48 89 6C 24 18 56 57 41 56 48 83 EC 20 33 F6" },
+    { 0x002E89C0, "HROOMREMOVE",
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B 01 48 8B FA 48 8B D9 FF 90 00 01 00 00" },
+    { 0x001EF470, "HPASSDAY",
+      "48 83 EC 28 80 B9 B0 00 00 00 00 75 4C" },
     { 0x001EF4D0, "PASSDAY",
       "48 89 4C 24 08 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 88 FE FF FF 48 81 EC 78 02 00 00 0F 29 B4 24 60 02 00 00" },
     { 0x003B0550, "GOADV",
@@ -98,6 +104,14 @@ static const SigTargetDesc kTargetSigs[] = {
       "4C 8B DC 49 89 5B 10 49 89 73 18 49 89 7B 20 41 56 48 81 EC A0 00 00 00" },
     { 0x0011D110, "BACKSTAB",
       "48 89 5C 24 18 48 89 74 24 20 48 89 54 24 10 57 48 83 EC 60 80 B9 80 0C 00 00 00" },
+    { 0x00208C40, "HPIPEPLACE",
+      "48 8B C4 48 89 58 18 48 89 50 10 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 00 01 00 00" },
+    { 0x000AED00, "HBOXPLACE",
+      "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 54 41 55 41 56 41 57 48 8B EC 48 81 EC 80 00 00 00 4C 8B FA" },
+    { 0x002EF9D0, "HPOOPPOP",
+      "40 53 48 83 EC 50 48 8B D9 48 8B 89 D8 02 00 00" },
+    { 0x003BDCF0, "HAUTOSAVE",
+      "48 89 5C 24 18 48 89 74 24 20 55 57 41 56 48 8D AC 24 60 FF FF FF" },
 };
 
 // INDEXED BY enum Call -- order is load-bearing.
@@ -126,6 +140,8 @@ static const SigTargetDesc kCallSigs[] = {
       "4C 8B DC 49 89 5B 08 49 89 6B 18 4D 89 4B 20" },
     { 0x003873E0, "LevelUpScreen button click",
       "40 53 48 81 EC 10 01 00 00 48 63 41 10" },
+    { 0x00B46B00, "sqlite3_wal_checkpoint_v2",
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 30 4D 8B F1" },
     { 0x003BABB0, "MewDirector::save_adventure",
       "48 8B C4 48 89 58 20 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 68 FE FF FF" },
     { 0x008E0F40, "RunHistory::serialize",
@@ -162,6 +178,8 @@ static const SigTargetDesc kCallSigs[] = {
       "48 89 5C 24 10 48 89 6C 24 18 56 57 41 56 48 83 EC 40 4D 8B F0 48 8B EA 48 8B D9 80 B9 B0 04 00 00 00 74 07 33 C0 E9 ? ? ? ? 48 8D 0D ? ? ? ? E8 ? ? ? ? 48 8B F8 48 89 44 24 60 48 85 C0 74 1D 33 D2 41 B8 90 07 00 00" },
     { 0x003AEFD0, "glaiel::MewDirector::ContinueSave",
       "48 89 5C 24 18 48 89 74 24 20 55 57 41 56 48 8D AC 24 50 FF FF FF" },
+    { 0x0073BFE0, "glaiel::CatParts::regen()",
+      "48 89 5C 24 18 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC E0 00 00 00 0F 29 B4 24 D0 00 00 00 48 8B F1" },
     { 0x0005D6B0, "glaiel::CatData::CatData()",
       "48 89 4C 24 08 48 83 EC 28 4C 8B C1 45 33 C9" },
     { 0x0005D630, "glaiel::CatData::~CatData()",
@@ -188,6 +206,12 @@ static const SigTargetDesc kCallSigs[] = {
       "48 89 5C 24 18 48 89 74 24 20 48 89 54 24 10 57 48 83 EC 20" },
     { 0x003C47E0, "glaiel::Scene::CreateComponent<ActSelectionScreen>",
       "48 89 6C 24 20 57 48 83 EC 20 80 B9 B0 04 00 00 00 48 8B EA 48 8B F9 74 0D 33 C0 48 8B 6C 24 48 48 83 C4 20 5F C3 48 89 5C 24 38 48 8D 0D ? ? ? ? 48 89 74 24 40 E8 ? ? ? ? 48 89 44 24 30 48 8B D8 48 85 C0 0F 84 ? ? ? ? 8B 0D ? ? ? ? 33 C0 0F 57 C0 0F 11 03 0F 11 43 10 0F 11 43 20 0F 11 43 30 48 89 43 40 8D 41 01 89 05 ? ? ? ? 0F B6 43 0C 24 FE 89 4B 08 24 FD C7 43 0E 00 00 01 00 24 FB C6 43 40 00" },
+    { 0x009AA360, "glaiel::Animator::SetState(int,std::string)",
+      "48 89 5C 24 08 48 89 74 24 20 4C 89 44 24 18 89 54 24 10" },
+    { 0x002EEEF0, "glaiel::FurniturePiece::remove",
+      "40 55 57 48 83 EC 28 48 8B 79 48 48 8B E9" },
+    { 0x001F1E60, "glaiel::Component::Create<FurniturePiece,int64_t&>",
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B 41 18 48 8B FA 48 8B 58 08 80 BB B0 04 00 00 00 74 0D 33 C0 48 8B 5C 24 30 48 83 C4 20 5F C3 48 8B CB E8 ? ? ? ? 4C 8B C7 48 8B D0 48 8B CB 48 8B 5C 24 30 48 83 C4 20 5F E9 ? ? ? ? CC CC CC CC CC 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57" },
 };
 
 // Globals, recovered from a referencing instruction's own
@@ -202,7 +226,13 @@ static const SigDataDesc kSigData[] = {
     { 0x013C4A30, "ApplicationBase",
       "48 83 EC 28 B9 50 0F 00 00 E8 ? ? ? ? 48 89 44 24 30 48 8B C8 E8 ? ? ? ? 90 48 89 05 ? ? ? ? 48 83 C4 28",
       31, 35 },  // via 0x1400256EC in glaiel::`dynamic initializer for 'Application''
+    { 0x013C18F0, "SceneCurrent",
+      "48 8B 15 ? ? ? ? 48 85 D2 74 0D 80 BA DC 04 00 00 00 0F 85 ? ? ? ? 44 8B 0D ? ? ? ? B8 48 00 00 00",
+      3, 7 },  // via 0x140193500 in ?WasPressBuffered@Action@glaiel@@QEAA_NN_N0@Z
+    { 0x013DA9A0, "HouseInventoryPtr",
+      "40 57 48 83 EC 40 80 79 58 00 48 8B F9 0F 84 ? ? ? ? C6 41 58 00 C7 41 4C 00 00 00 00 48 8B 05 ? ? ? ? 48 89 6C 24 58",
+      33, 37 },  // via 0x1401A5EAE in ?check_furnlist_changed@FurnitureBuildingUI@glaiel@@QEAAXXZ
 };
-static const int kSigDataCount = 3;
+static const int kSigDataCount = 5;
 
 } // namespace mgmp

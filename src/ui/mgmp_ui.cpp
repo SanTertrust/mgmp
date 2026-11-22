@@ -752,7 +752,8 @@ void ui_on_swap(void* window) {
     }
 
     const bool halted = lockstep_halted();
-    if (!g.visible && !halted) return;
+    const auto* prep = house_spectator_prep();
+    if (!g.visible && !halted && !prep) return;
 
     if (!g.ready) {
         if (!bring_up()) { g.failed = true; return; }
@@ -789,6 +790,31 @@ void ui_on_swap(void* window) {
         ImGui::End();
     }
 
+    if (prep && prep->count) {
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 16.0f,
+                                       vp->WorkPos.y + vp->WorkSize.y - 16.0f),
+                                ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+        ImGui::SetNextWindowBgAlpha(0.88f);
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoDecoration |
+            ImGuiWindowFlags_NoSavedSettings;
+        if (ImGui::Begin("##mgmp_adventure_party", nullptr, flags)) {
+            ImGui::SeparatorText("Host's party");
+            for (uint8_t i = 0; i < prep->count; ++i) {
+                const auto& cat = prep->cats[i];
+                ImGui::Text("Cat %u   %s", static_cast<unsigned>(i + 1),
+                            cat.cat_class[0] ? cat.cat_class : "-");
+                if (cat.eq_summary[0]) {
+                    ImGui::SameLine();
+                    ImGui::PushTextWrapPos(vp->WorkSize.x * 0.45f);
+                    ImGui::TextDisabled("%s", cat.eq_summary);
+                    ImGui::PopTextWrapPos();
+                }
+            }
+        }
+        ImGui::End();
+    }
     ImGui::Render();
     // RenderDrawData backs up and restores the GL state it touches, which is
     // the same discipline mgmp_overlay follows by hand -- the game's next frame

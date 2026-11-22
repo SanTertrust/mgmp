@@ -77,6 +77,9 @@ enum Target : int {
     T_HouseCatPhysUpdate,// glaiel::HouseCatPhysics::update()
     T_HouseCatClickUpd,  // glaiel::HouseCatClickManager::update()
     T_HouseCatClickDrop, // glaiel::HouseCatClickManager::drop()
+    T_HouseLayoutSaved,  // FurnitureBuildingUI close callback
+    T_HouseRoomRemove,   // CatPlacementArea::remove_cat
+    T_HousePassDay,      // House::PassDay()
     T_HousePassDayCb,    // House::PassDay::<lambda_1>::operator()
     T_GoOnAdventureCb,   // MewDirector::GoOnAnAdventure::<lambda_1>::operator()
     T_StartAdventureCb,  // MewDirector::StartAdventure::<lambda_1>::operator()
@@ -89,6 +92,10 @@ enum Target : int {
     T_ReceiveDamagePassives,
     T_OnElementInfluence,
     T_IsBackstab,
+    T_HousePipePlace,
+    T_ButchBoxPlace,
+    T_FurniturePoopPop,  // glaiel::FurniturePiece::PoopPop()
+    T_MewDirAutoSaveHouse,// glaiel::MewDirector::AutoSaveHouse()
     T_COUNT
 };
 
@@ -457,6 +464,9 @@ static const TargetDesc kTargets[T_COUNT] = {
     { 0x001FF3F0, "HCATPHYS",    "glaiel::HouseCatPhysics::update" },
     { 0x001FE940, "HCATCLK",     "glaiel::HouseCatClickManager::update" },
     { 0x001FF140, "HCATDROP",    "glaiel::HouseCatClickManager::drop" },
+    { 0x001AC4F0, "HLAYOUT",  "glaiel::FurnitureBuildingUI close callback" },
+    { 0x002E89C0, "HROOMREMOVE", "glaiel::CatPlacementArea::remove_cat" },
+    { 0x001EF470, "HPASSDAY", "glaiel::House::PassDay" },
     { 0x001EF4D0, "PASSDAY",     "glaiel::House::PassDay::<lambda_1>::operator()" },
     { 0x003B0550, "GOADV",       "glaiel::MewDirector::GoOnAnAdventure::<lambda_1>::operator()" },
     { 0x003B10B0, "STARTADV",    "glaiel::MewDirector::StartAdventure::<lambda_1>::operator()" },
@@ -469,6 +479,10 @@ static const TargetDesc kTargets[T_COUNT] = {
     { 0x0010F010, "DMGPASSIVES", "glaiel::Character::receive_damage_passives" },
     { 0x0011B4B0, "DMGELEMENT",  "glaiel::Character::OnElementInfluence" },
     { 0x0011D110, "BACKSTAB",    "glaiel::Character::IsBackstab(iVec2D,iVec2D)" },
+    { 0x00208C40, "HPIPEPLACE",  "glaiel::HousePipe::try_place_cat" },
+    { 0x000AED00, "HBOXPLACE",   "glaiel::ButchBox::try_place_cat" },
+    { 0x002EF9D0, "HPOOPPOP",    "glaiel::FurniturePiece::PoopPop" },
+    { 0x003BDCF0, "HAUTOSAVE",   "glaiel::MewDirector::AutoSaveHouse" },
 };
 
 // Coarse module guard, checked before the per-target signatures.
@@ -529,6 +543,7 @@ enum Call : int {
     C_LevelUpClick,          // sub_140386810(capture{_, LevelUpScreen*, int idx})
 
     // --- flushing the host's live run to disk (mgmp_savefile.cpp) --------
+    C_SQLiteWalCheckpoint,  // sqlite3_wal_checkpoint_v2
     C_SaveAdventure,         // void(MewDirector*) -- sub_1403B9CE0
 
     // --- the run history (mgmp_runhist.cpp) ------------------------------
@@ -563,6 +578,7 @@ enum Call : int {
     C_SceneCreateEntity,       // Entity*(Scene*)
     C_SceneCreateMewDirector,  // MewDirector*(Scene*, Entity*, std::string&)
     C_MewDirectorContinueSave, // void(MewDirector*)
+    C_CatPartsRegen,           // CatParts::regen()
     C_CatDataCtor,             // CatData*(CatData*)
     C_CatDataDtor,             // void(CatData*)
     C_VecCatDataPushBack,      // void(std::vector<CatData>*, const CatData&)
@@ -576,6 +592,9 @@ enum Call : int {
     C_InterstitialQueueDtor,   // void(InterstitialQueue*)
     C_DirectorAddScene,        // Scene*(Director*, std::string)
     C_CreateActSelection,      // ActSelectionScreen*(Scene*, Entity*)
+    C_AnimatorSetState,         // void(Animator*, int state, std::string substate)
+    C_FurniturePieceRemove,    // void(FurniturePiece*)
+    C_CreateFurniturePiece,    // FurniturePiece*(Component* house, int64_t* uid)
     C_COUNT
 };
 
@@ -701,6 +720,8 @@ static const CallDesc kCalls[C_COUNT] = {
     // directly by the game, so there is no risk of colliding with a live caller.
     { 0x003873E0, "LevelUpScreen button click" },
 
+    { 0x00B46B00, "sqlite3_wal_checkpoint_v2" },
+
     // sub_1403B9CE0 -- "save the adventure", void(MewDirector*).
     //
     // One argument in rcx; three of its four representative call sites pass
@@ -817,6 +838,7 @@ static const CallDesc kCalls[C_COUNT] = {
     { 0x0096B3E0, "glaiel::Scene::CreateEntity" },
     { 0x001BE1A0, "glaiel::Scene::CreateComponent<MewDirector>" },
     { 0x003AEFD0, "glaiel::MewDirector::ContinueSave" },
+    { 0x0073BFE0, "glaiel::CatParts::regen()" },
     { 0x0005D6B0, "glaiel::CatData::CatData()" },
     { 0x0005D630, "glaiel::CatData::~CatData()" },
     { 0x00141300, "std::vector<CatData>::push_back" },
@@ -830,6 +852,9 @@ static const CallDesc kCalls[C_COUNT] = {
     { 0x0020E330, "glaiel::InterstitialQueue::~InterstitialQueue()" },
     { 0x009D4950, "glaiel::Director::AddScene" },
     { 0x003C47E0, "glaiel::Scene::CreateComponent<ActSelectionScreen>" },
+    { 0x009AA360, "glaiel::Animator::SetState(int,std::string)" },
+    { 0x002EEEF0, "glaiel::FurniturePiece::remove" },
+    { 0x001F1E60, "glaiel::Component::Create<FurniturePiece,int64_t&>" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only
@@ -922,6 +947,12 @@ static const CallDesc kCalls[C_COUNT] = {
 // prologue to check -- mgmp_catsync validates it by reading through it and
 // refusing on anything implausible.
 constexpr uint32_t kRva_MewDirectorPtr = 0x013DAC30;
+
+// glaiel::Scene::current (Scene*). Read by glaiel::DoInterstitialsInternal to
+// reach current->director when adding the "Interstitial" scene; null during
+// FrameBegin, so client interstitial replay sets and restores it around the call.
+constexpr uint32_t kRva_SceneCurrent   = 0x013C18F0;
+constexpr uint32_t kRva_HouseInventoryPtr = 0x013DA9A0;
 
 // Offsets into the MewDirector, all read off sub_1403B2060 and sub_140231180.
 constexpr uintptr_t kDir_CatRegistry = 1432;   // ptr, the id -> CatData* map
@@ -1222,6 +1253,8 @@ constexpr uintptr_t kHCat_Renderer           = 72;   // MaskedRenderer* (+81 = v
 constexpr uintptr_t kHCat_NameTag            = 80;   // Renderer* (+81 = visible)
 constexpr uintptr_t kHCat_IconTag            = 88;   // Renderer* (+81 = visible)
 constexpr uintptr_t kHCat_Animator           = 104;  // Animator*
+constexpr uintptr_t kHCat_CatArt             = 112;  // CatParts*
+constexpr uintptr_t kHCat_Ragdoll            = 120;  // CatRagdoll*
 constexpr uintptr_t kHCat_CatId              = 128;  // int64_t
 constexpr uintptr_t kHCat_Exists             = 136;  // bool
 constexpr uintptr_t kHCat_CheckOverlaps      = 217;  // bool
@@ -1229,6 +1262,7 @@ constexpr uintptr_t kHCat_Ragdolling         = 219;  // bool
 constexpr uintptr_t kHCat_Departed           = 220;  // bool
 constexpr uintptr_t kHCat_CurrentLocation    = 232;  // CatPlacementArea*
 constexpr uintptr_t kHCat_Depth              = 248;  // int32_t
+constexpr uintptr_t kCollider_DragCenter   = 200;  // Vec2D in local space
 constexpr uintptr_t kHCat_ClickBounds        = 256;  // CircleCollider*
 
 constexpr uintptr_t kHCatPhys_Transform      = 56;   // Transform*
@@ -1241,11 +1275,21 @@ constexpr uintptr_t kHCatPhys_Grounded       = 105;  // bool
 constexpr uintptr_t kHCatClick_HeldCat       = 56;   // HouseCat*
 
 constexpr uintptr_t kCPA_Transform           = 56;   // Transform*
+constexpr uintptr_t kCPA_OwnedCats         = 104;  // PodBuffer<8> of HouseCat*
 constexpr uintptr_t kCPA_RoomName            = 64;   // std::string
+constexpr size_t    kCPA_TryPlaceSlot       = 31;   // virtual try_place_cat
 
 constexpr uintptr_t kTransform_Pos           = 128;  // Vec3D (3 doubles)
 constexpr uintptr_t kTransform_Scale         = 152;  // Vec2D (2 doubles)
+constexpr uintptr_t kTransform_SortDepth     = 176;  // double
+constexpr uintptr_t kTransform_PrevSortDepth = 104;  // previous_state.sortdepth
 constexpr uintptr_t kTransform_Flip          = 184;  // Vec2D (2 doubles)
+constexpr uintptr_t kRenderer_RenderCore     = 56;   // RenderCore*
+constexpr uintptr_t kRenderer_RenderLayer    = 84;   // int32_t
+constexpr size_t    kRenderer_RefreshLayerSlot = 6;   // virtual render list refresh
+constexpr uintptr_t kCatRagdoll_Physics      = 56;   // ragdoll simulation component*
+constexpr uintptr_t kRagdoll_ConstrainBounds = 128;  // AABB (4 doubles)
+constexpr uintptr_t kRagdoll_ExtraPlaneCount = 164;  // PodBuffer<32>.count
 
 constexpr uintptr_t kAnim_Transform          = 112;  // Transform*
 constexpr uintptr_t kAnim_CurrentState       = 256;  // AnimatorState (0x48)
@@ -1257,6 +1301,23 @@ constexpr uintptr_t kAnimState_Substate      = 40;   // std::string
 
 constexpr uintptr_t kRenderer_Visible        = 81;   // bool
 
+constexpr uintptr_t kCatData_Equipment       = 2480; // CatEquipment, five inline slots
+constexpr size_t    kEquipment_Size          = 96;
+constexpr uintptr_t kEquipment_Name          = 8;   // std::string
+constexpr int       kCompId_ClassTagBox       = 523;
+constexpr int       kCompId_FurniturePiece    = 1008;
+constexpr uintptr_t kFPiece_PlacedGrid        = 0x48;  // FurnitureGrid*
+constexpr uintptr_t kFPiece_Entry             = 0x2D8; // FurniturePieceEntry* (nullptr once popped)
+constexpr uintptr_t kFPiece_Uid               = 0x2E0; // int64_t piece_uid
+constexpr uintptr_t kHInv_FurnitureCount      = 0x3C;  // uint32_t
+constexpr uintptr_t kHInv_FurnitureData       = 0x40;  // FurniturePieceEntry**
+constexpr uintptr_t kFPE_Uid                  = 0x00;  // int64_t
+constexpr uintptr_t kFPE_PlacedRoom           = 0x30;  // std::string
+constexpr uintptr_t kFPE_PlacedPos            = 0x50;  // iVec2D (int32_t x, y)
+constexpr uintptr_t kFPE_PlacedFlip           = 0x58;  // iVec2D (int32_t fx, fy)
+constexpr uintptr_t kFPE_PlacedDepth          = 0x60;  // int32_t
+constexpr uintptr_t kClassTagBox_Class       = 88;   // std::string
+constexpr uintptr_t kClassTagBox_CatId       = 144;  // i64, -1 if unassigned
 constexpr uintptr_t kCatData_Class           = 3088; // std::string
 constexpr size_t    kCatData_Size            = 3160; // sizeof(glaiel::CatData)
 

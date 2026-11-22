@@ -17,11 +17,12 @@ namespace {
 // 256 messages is far more than a turn can produce -- run E's whole 15-turn
 // battle was 49 actions -- so overflow means the game thread has stopped
 // draining, which is a bug worth counting rather than growing a buffer for.
-constexpr uint32_t kQueueCap = 256;
+// A House checkpoint can be followed by one record per live cat before
+// the game thread finishes reloading.
+constexpr uint32_t kQueueCap = kMaxHouseCats + 256;
 
-// The largest frame this build will accept. Everything except MSG_SAVEFILE is
-// under 128 bytes; a save is ~45 KB, and the slack is for saves that grow.
-constexpr uint32_t kMaxFrame = 1u << 20;
+// A save can use the entire SAVEFILE limit plus its header and envelope.
+constexpr uint32_t kMaxFrame = kMaxSaveBytes + 256;
 static_assert(kMaxFrame <= kMaxPayload, "frame cap must fit the protocol cap");
 
 // One connection. On the host there is one per client and `id` is that client's
@@ -89,8 +90,37 @@ bool wsa_init() {
     return true;
 }
 
+bool replaceable_house_sample(uint8_t type) {
+    return type == MSG_HOUSE_CURSOR || type == MSG_HOUSE_DRAG_MOVE;
+}
+
+bool same_house_stream(const NetMsg& queued, const NetMsg& incoming) {
+    if (queued.type != incoming.type || queued.from != incoming.from) return false;
+    if (incoming.type == MSG_HOUSE_CURSOR)
+        return queued.house_cursor.generation == incoming.house_cursor.generation;
+    const auto& a = queued.house_drag_move;
+    const auto& b = incoming.house_drag_move;
+    return a.generation == b.generation && a.cat_id == b.cat_id &&
+           a.capture_id == b.capture_id;
+}
+
 void queue_push(const NetMsg& m) {
     EnterCriticalSection(&g.cs);
+    if (replaceable_house_sample(m.type)) {
+        // Keep motion on its original side of reliable control messages.
+        for (uint32_t i = g.count; i > 0; --i) {
+            auto& queued = g.queue[(g.head + i - 1) % kQueueCap];
+            if (!replaceable_house_sample(queued.type)) break;
+            if (!same_house_stream(queued, m)) continue;
+            if (m.type == MSG_HOUSE_CURSOR ||
+                m.house_drag_move.seq > queued.house_drag_move.seq)
+                queued = m;
+            ++g.stats.received;
+            ++g.stats.house_samples_coalesced;
+            LeaveCriticalSection(&g.cs);
+            return;
+        }
+    }
     if (g.count >= kQueueCap) {
         // Drop the newest rather than the oldest. Losing the oldest would
         // reorder the action stream, and an out-of-order ACTION is a desync;
@@ -178,6 +208,8 @@ bool decode_into(const uint8_t* buf, uint32_t len, NetMsg& m) {
         case MSG_HOUSE_PREP:     return dec_house_prep(r, m.house_prep);
         case MSG_HOUSE_PHASE:    return dec_house_phase(r, m.house_phase);
         case MSG_HOUSE_INTERSTITIALS: return dec_house_interstitials(r, m.house_interstitials);
+        case MSG_HOUSE_POOP_POP: return dec_house_poop_pop(r, m.house_poop_pop);
+        case MSG_HOUSE_FURNITURE: return dec_house_furniture(r, m.house_furniture);
         case MSG_PEERS:   return dec_peers(r, m.peers);
         case MSG_HALT:    return dec_halt(r, m.halt);
         case MSG_REFUSE:  r.str(m.refuse, sizeof(m.refuse)); return r.ok;
@@ -206,6 +238,7 @@ bool send_framed(SOCKET s, uint8_t from, const uint8_t* payload, uint32_t len) {
         }
     }
     if (ok) { ++g.stats.sent; g.stats.bytes_sent += n + 4; }
+    else shutdown(s, SD_BOTH); // A partial frame cannot be retried on this stream.
     LeaveCriticalSection(&g.send_cs);
     return ok;
 }
@@ -333,17 +366,25 @@ void recv_loop(Link& link) {
             break;
         }
         m.from = from;
+        if (replaceable_house_sample(m.type)) m.received_ms = GetTickCount64();
         g.stats.bytes_received += len + 4;
         queue_push(m);
     }
 
     free(buf);
 
-    InterlockedExchange(&link.live, 0);
+    const uint8_t departed = link.id;
+    if (g.role == NetRole::Host && !InterlockedCompareExchange(&g.stop, 0, 0)) {
+        NetMsg event{};
+        event.type = kNetPeerDisconnected;
+        event.from = departed;
+        queue_push(event);
+    }
     if (link.sock != INVALID_SOCKET) { closesocket(link.sock); link.sock = INVALID_SOCKET; }
+    InterlockedExchange(&link.live, 0);
 
     if (!InterlockedCompareExchange(&g.stop, 0, 0)) {
-        log_line("NET", "peer %u disconnected", (unsigned)link.id);
+        log_line("NET", "peer %u disconnected", (unsigned)departed);
         if (g.role == NetRole::Host) {
             // One client leaving is not the end of the session for the others.
             // Whether the RUN can continue is the session layer's call; the
@@ -367,6 +408,9 @@ void nodelay_on(SOCKET s) {
     // for no throughput gain.
     BOOL nodelay = TRUE;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
+    const DWORD send_timeout_ms = 2000;
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&send_timeout_ms),
+               sizeof(send_timeout_ms));
 }
 
 bool start_link(int slot, SOCKET s, uint8_t id) {
@@ -442,7 +486,7 @@ void ensure_cs() {
 
 // ---------------------------------------------------------------------------
 
-bool net_host(uint16_t port) {
+bool net_host(uint16_t port, bool loopback_only) {
     if (g.role != NetRole::None) return false;
     ensure_cs();
     if (!wsa_init()) return false;
@@ -457,7 +501,7 @@ bool net_host(uint16_t port) {
 
     sockaddr_in a{};
     a.sin_family      = AF_INET;
-    a.sin_addr.s_addr = INADDR_ANY;
+    a.sin_addr.s_addr = htonl(loopback_only ? INADDR_LOOPBACK : INADDR_ANY);
     a.sin_port        = htons(port);
     if (bind(g.listener, (sockaddr*)&a, sizeof(a)) == SOCKET_ERROR) {
         fail("bind", WSAGetLastError()); closesocket(g.listener);
@@ -631,6 +675,12 @@ bool net_send(const uint8_t* payload, uint32_t len) {
     return any;
 }
 
+void net_disconnect_peer(uint8_t peer) {
+    if (g.role != NetRole::Host) return;
+    const int slot = link_slot_of(peer);
+    if (slot >= 0) shutdown(g.links[slot].sock, SD_BOTH);
+}
+
 bool net_send_peer(uint8_t peer, const uint8_t* payload, uint32_t len) {
     int slot = link_slot_of(peer);
     if (slot < 0) return false;
@@ -774,13 +824,13 @@ bool net_send_house_cursor(const HouseCursorMsg& m) {
 }
 
 bool net_send_house_prep(const HousePrepMsg& m) {
-    uint8_t p[2048];
+    uint8_t p[4096];
     uint32_t n = enc_house_prep(p, sizeof(p), m);
     return n && net_send(p, n);
 }
 
 bool net_send_house_prep_to(uint8_t peer, const HousePrepMsg& m) {
-    uint8_t p[2048];
+    uint8_t p[4096];
     uint32_t n = enc_house_prep(p, sizeof(p), m);
     return n && net_send_peer(peer, p, n);
 }
@@ -822,6 +872,37 @@ bool net_send_house_interstitials_to(uint8_t peer, const HouseInterstitialsMsg& 
     return send_house_interstitials_frame(m, false, peer);
 }
 
+bool net_send_house_poop_pop(const HousePoopPopMsg& m) {
+    uint8_t p[64];
+    uint32_t n = enc_house_poop_pop(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+namespace {
+bool send_house_furniture_frame(const HouseFurnitureMsg& m, bool broadcast, uint8_t peer) {
+    uint32_t need = house_furniture_frame_size(m);
+    if (need > kMaxFrame) {
+        log_line("NET", "!! house furniture payload is %u bytes, over the %u-byte frame cap",
+                 m.size, kMaxFrame);
+        return false;
+    }
+    uint8_t* p = (uint8_t*)malloc(need);
+    if (!p) return false;
+    uint32_t n = enc_house_furniture(p, need, m);
+    bool ok = n && (broadcast ? net_send(p, n) : net_send_peer(peer, p, n));
+    free(p);
+    return ok;
+}
+} // namespace
+
+bool net_send_house_furniture(const HouseFurnitureMsg& m) {
+    return send_house_furniture_frame(m, true, kNoPeer);
+}
+
+bool net_send_house_furniture_to(uint8_t peer, const HouseFurnitureMsg& m) {
+    return send_house_furniture_frame(m, false, peer);
+}
+
 namespace {
 // Shared by the broadcast and the point-to-point form so the frame cap check
 // and the malloc live in exactly one place.
@@ -852,7 +933,7 @@ bool net_send_savefile_to(uint8_t peer, const SaveFileMsg& m) {
     return send_savefile_frame(m, false, peer);
 }
 
-bool net_send_catdata(const CatDataMsg& m) {
+bool net_send_catdata(const CatDataMsg& m, uint8_t peer) {
     uint32_t need = catdata_frame_size(m);
     if (need > kMaxFrame) {
         log_line("NET", "!! serialized cat is %u bytes, over the %u-byte frame cap",
@@ -862,7 +943,7 @@ bool net_send_catdata(const CatDataMsg& m) {
     uint8_t* p = (uint8_t*)malloc(need);
     if (!p) return false;
     uint32_t n = enc_catdata(p, need, m);
-    bool ok = n && net_send(p, n);
+    bool ok = n && (peer == kNoPeer ? net_send(p, n) : net_send_peer(peer, p, n));
     free(p);
     return ok;
 }
@@ -920,6 +1001,7 @@ void net_msg_release(NetMsg& m) {
     if (m.house_baseline.cats) { free(m.house_baseline.cats); m.house_baseline.cats = nullptr; }
     if (m.house_pose.cats)     { free(m.house_pose.cats);     m.house_pose.cats     = nullptr; }
     if (m.house_interstitials.data) { free(m.house_interstitials.data); m.house_interstitials.data = nullptr; }
+    if (m.house_furniture.data)     { free(m.house_furniture.data);     m.house_furniture.data     = nullptr; }
     for (uint32_t i = 0; i < kInvBuckets; ++i)
         if (m.inventory.data[i]) { free(m.inventory.data[i]); m.inventory.data[i] = nullptr; }
 }
@@ -930,6 +1012,11 @@ bool net_poll(NetMsg& out) {
     bool got = g.count > 0;
     if (got) {
         out = g.queue[g.head];
+        if (out.received_ms) {
+            const uint64_t age = GetTickCount64() - out.received_ms;
+            if (age > g.stats.house_sample_max_queue_ms)
+                g.stats.house_sample_max_queue_ms = age;
+        }
         // Hand the allocation over rather than sharing it: the queue slot is
         // reused, and two owners of one pointer is a double free waiting for a
         // busy session.
@@ -940,6 +1027,7 @@ bool net_poll(NetMsg& out) {
         g.queue[g.head].house_baseline.cats = nullptr;
         g.queue[g.head].house_pose.cats = nullptr;
         g.queue[g.head].house_interstitials.data = nullptr;
+        g.queue[g.head].house_furniture.data = nullptr;
         for (uint32_t i = 0; i < kInvBuckets; ++i)
             g.queue[g.head].inventory.data[i] = nullptr;
         g.head = (g.head + 1) % kQueueCap;

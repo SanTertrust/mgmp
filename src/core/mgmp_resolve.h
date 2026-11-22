@@ -50,6 +50,8 @@ enum DataSym : int {
     D_MewDirectorPtr = 0,
     D_MouseCache,
     D_ApplicationBase,
+    D_SceneCurrent,
+    D_HouseInventoryPtr,
     D_COUNT
 };
 uintptr_t addr_of_data(DataSym d);

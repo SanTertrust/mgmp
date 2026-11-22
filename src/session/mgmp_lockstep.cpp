@@ -2536,6 +2536,10 @@ void lockstep_pump() {
                 leave_on_message(m.hostleft);
                 break;
 
+            case kNetPeerDisconnected:
+                house_on_peer_disconnect(m.from);
+                break;
+
             case MSG_HOUSE_BASELINE:
             case MSG_HOUSE_POSE:
             case MSG_HOUSE_GRAB_REQ:
@@ -2546,6 +2550,9 @@ void lockstep_pump() {
             case MSG_HOUSE_CURSOR:
             case MSG_HOUSE_PREP:
             case MSG_HOUSE_PHASE:
+            case MSG_HOUSE_INTERSTITIALS:
+            case MSG_HOUSE_POOP_POP:
+            case MSG_HOUSE_FURNITURE:
                 house_on_message(m.from, m);
                 break;
 
@@ -2554,7 +2561,10 @@ void lockstep_pump() {
             // one is still correct -- unlike an ACTION, which means nothing
             // outside the battle it was taken in.
             case MSG_CATDATA:
-                catsync_on_message(m.catdata);
+                if (m.catdata.house_generation)
+                    house_on_message(m.from, m);
+                else
+                    catsync_on_message(m.catdata);
                 break;
 
             // Run state as well, and not epoch-gated for the same reason.
@@ -3124,6 +3134,25 @@ bool lockstep_peer_owns_character(const void* character) {
 // battle-less "battle" as far as identity goes, and giving it an id is what
 // makes a CURSOR or a stray ACTION from the previous fight droppable while
 // standing in a shop.
+void lockstep_leave_run() {
+    Guard guard;
+    g.battles.leave();
+    g.snapped = false;
+    g.snapped_list = nullptr;
+    g.halted = false;
+    g.turn = 0;
+    g.outstanding = false;
+    g.local_actor = false;
+    g.state_hash_on = false;
+    g.control_checked = false;
+    g.cat_count = 0;
+    g.pend_head = g.pend_count = 0;
+    g.sent_log_n = 0;
+    g.sent_log_full = false;
+    g.my_hash.clear();
+    for (auto& hash : g.peer_hash) hash.clear();
+}
+
 void lockstep_enter_battle(uint64_t seed0) {
     Guard guard;
     if (seed0 == kNoBattle) return;

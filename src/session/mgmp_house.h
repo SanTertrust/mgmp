@@ -18,6 +18,7 @@
 namespace mgmp {
 
 struct NetMsg;
+struct HousePrepMsg;
 
 enum class HostPhase : uint8_t {
     Outside   = 0,
@@ -50,7 +51,10 @@ HostPhase   house_phase();
 uint32_t    house_generation();
 bool        house_in_house_or_prep();
 bool        house_clients_map_ready();
+void        house_on_map_ready();
+void        house_on_first_node();
 void        house_status(char* out, size_t out_size);
+const HousePrepMsg* house_spectator_prep();
 
 // Peer cursor projection for mgmp_overlay.cpp when in House.
 bool house_get_peer_cursor(uint8_t peer,
@@ -70,6 +74,14 @@ void house_on_housecat_physics_update_post(void* physics);
 bool house_on_click_manager_update(void* click_mgr);
 void house_on_click_manager_update_post(void* click_mgr);
 bool house_on_click_manager_drop(void* click_mgr);
+void house_on_click_manager_drop_post();
+bool house_allows_local_mutations();
+bool house_on_room_remove(void* area, void* cat);
+bool house_allows_special_placement(void* cat);
+void house_on_layout_saved_pre();
+void house_on_layout_saved();
+void house_set_autosave_orig(void* fn);
+void house_on_autosave_house();
 void house_on_pass_day_cb_pre();
 void house_on_pass_day_cb_post();
 void house_on_go_on_adventure_cb_pre();
@@ -84,5 +96,8 @@ void house_on_do_interstitials(void* queue);
 
 void house_set_go_on_adventure_orig(void* fn);
 void house_on_go_on_adventure_pre(void* md, void* map_str, void* collars_vec, void* cat_ids_buf);
+
+void house_set_poop_pop_orig(void* fn);
+void house_on_poop_pop(void* piece);
 
 } // namespace mgmp

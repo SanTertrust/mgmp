@@ -72,6 +72,11 @@ void catsync_set_base(uintptr_t base);
 void catsync_init();
 void catsync_shutdown();
 
+// Game-thread serialization for a resolved native CatData. The caller owns
+// the packed buffer and supplies the identity fields in the message.
+bool catsync_pack_cat(void* cat, CatDataMsg& m);
+bool catsync_unpack_cat(void* cat, const CatDataMsg& m);
+
 // HOST: serialize every cat in the run, send the ones whose bytes changed since
 // the last push. Called where the host enters a map node -- the point both peers
 // already synchronize on, and the last moment before a battle can be built out

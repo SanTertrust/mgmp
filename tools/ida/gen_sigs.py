@@ -262,7 +262,7 @@ def read_targets():
 # generator was still emitting the previous build's three globals, reporting
 # them as failures against addresses nothing used any more. Read them from the
 # one place that owns them.
-DATA_CONSTS = ["kRva_MewDirectorPtr", "kRva_MouseCache", "kRva_ApplicationBase"]
+DATA_CONSTS = ["kRva_MewDirectorPtr", "kRva_MouseCache", "kRva_ApplicationBase", "kRva_SceneCurrent", "kRva_HouseInventoryPtr"]
 
 
 def read_data_targets():

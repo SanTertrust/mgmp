@@ -166,10 +166,9 @@ constexpr float    kCursorInkRefH  = 106.0f;
 constexpr int      kContentAspectW = 16;
 constexpr int      kContentAspectH = 9;
 
-// Exponential smoothing time constant. CURSOR is throttled to ~20 messages a
-// second, so drawn raw the arrow reads as a peer with an unsteady hand. 60 ms
-// is roughly one throttle interval.
-constexpr uint32_t kCursorSmoothMs = 60;
+// Exponential smoothing time constant. CURSOR is throttled to ~60 messages a
+// second, so 25 ms keeps the pointer responsive without raw-sample jitter.
+constexpr uint32_t kCursorSmoothMs = 25;
 
 // --- the combat menu lock ---------------------------------------------------
 
@@ -209,7 +208,8 @@ constexpr uint32_t kUiLogLines = 2000;
 constexpr bool     kHouseCoop          = true;
 constexpr uint32_t kHouseFullPoseMs    = 500;   // 2 Hz full pose baseline
 constexpr uint32_t kHouseMovePoseMs    = 80;    // ~12.5 Hz moving/changed cats
-constexpr uint32_t kHouseCursorMs      = 33;    // ~30 Hz cursor/drag motion
+constexpr uint32_t kHouseMapReadyMs    = 30000; // time to load a checkpoint before reconnect
+constexpr uint32_t kHouseCursorMs      = 16;    // ~60 Hz cursor/drag motion
 constexpr uint32_t kHouseInterpDelayMs = 50;    // remote pose/cursor buffer
 constexpr uint32_t kHouseMaxExtrapMs   = 120;   // bounded extrapolation cap
 

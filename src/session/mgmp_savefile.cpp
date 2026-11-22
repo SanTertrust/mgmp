@@ -191,8 +191,10 @@ bool write_whole_file(const wchar_t* path, const uint8_t* data, uint32_t n) {
     if (h == INVALID_HANDLE_VALUE) return false;
     DWORD put = 0;
     bool ok = WriteFile(h, data, n, &put, nullptr) && put == n;
-    FlushFileBuffers(h);
+    if (ok) ok = FlushFileBuffers(h) != FALSE;
+    const DWORD error = ok ? ERROR_SUCCESS : GetLastError();
     CloseHandle(h);
+    SetLastError(error);
     return ok;
 }
 
@@ -200,6 +202,18 @@ bool write_whole_file(const wchar_t* path, const uint8_t* data, uint32_t n) {
 // It is only ever a mirror of the host's save, so losing it costs nothing --
 // but a timestamped copy is free, and the one time it matters is the time you
 // wanted it.
+bool replace_mirror(const wchar_t* path, const uint8_t* bytes, uint32_t size) {
+    wchar_t temp[MAX_PATH];
+    if (_snwprintf_s(temp, _TRUNCATE, L"%s.tmp", path) < 0) return false;
+    if (write_whole_file(temp, bytes, size) &&
+        MoveFileExW(temp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return true;
+    const DWORD error = GetLastError();
+    DeleteFileW(temp);
+    SetLastError(error);
+    return false;
+}
+
 bool back_up(const wchar_t* dir, const wchar_t* name) {
     wchar_t src[MAX_PATH];
     _snwprintf_s(src, _TRUNCATE, L"%s\\%s", dir, name);
@@ -232,8 +246,11 @@ bool back_up(const wchar_t* dir, const wchar_t* name) {
 // inline text, no heap pointer, nothing for the game's allocator to own or
 // free. A longer name would need a heap buffer, and a callee that move-assigned
 // from it would then try to free our memory with its allocator.
-const char kCoopSaveName[] = "mgmp_coop.sav";
-static_assert(sizeof(kCoopSaveName) <= 16, "must fit std::string's SSO buffer");
+const char* coop_save_name() {
+    static char name[16]{};
+    if (!name[0]) sprintf_s(name, "mg%08lx.sav", GetCurrentProcessId());
+    return name;
+}
 
 // MSVC std::string, the 32-byte layout already confirmed as the stride of
 // SaveSelection's name vector: { union { char buf[16]; char* ptr; }, size, cap }.
@@ -245,7 +262,10 @@ struct StdStringImage {
 
 // ---------------------------------------------------------------------------
 
+using WalCheckpoint = int(__fastcall*)(void*, const char*, int, int*, int*);
+
 struct State {
+    WalCheckpoint wal_checkpoint = nullptr;
     bool on        = false;
     bool is_client = false;
     bool inited    = false;   // ensure_state has run, NOT "the handshake finished"
@@ -494,7 +514,12 @@ bool publish(uint8_t to, bool fresh, bool flush_adventure = true) {
     strncpy_s(m.name, g.name, _TRUNCATE);
     m.data = data;
 
-    bool ok = (to == kNoPeer) ? net_send_savefile(m) : net_send_savefile_to(to, m);
+    const uint64_t started_ms = GetTickCount64();
+    const bool ok = (to == kNoPeer) ? net_send_savefile(m) : net_send_savefile_to(to, m);
+    const auto stats = net_stats();
+    log_line("SAVEFILE", "checkpoint send %u bytes took %llu ms; House samples coalesced=%u, max queue=%llu ms",
+             size, (unsigned long long)(GetTickCount64() - started_ms),
+             stats.house_samples_coalesced, (unsigned long long)stats.house_sample_max_queue_ms);
     free(data);
     if (!ok) {
         log_line("SAVEFILE", "!! failed to send %s (%u bytes)", g.name, size);
@@ -556,7 +581,7 @@ void savefile_init() {
         log_line_lvl(LogLevel::Trace, "SAVEFILE",
                              "armed -- waiting for the host's save; local save-file "
                              "input is suppressed and the run will load from '%s', "
-                             "leaving this machine's own saves alone", kCoopSaveName);
+                             "leaving this machine's own saves alone", coop_save_name());
     else
         log_line_lvl(LogLevel::Trace, "SAVEFILE",
                              "armed -- will publish this peer's save file to the client");
@@ -633,6 +658,7 @@ void savefile_set_base(uintptr_t base) {
     }
     g.save_adventure = (void(*)(void*))addr;
     g.director_slot  = (const void**)addr_of_data(D_MewDirectorPtr);
+    g.wal_checkpoint = reinterpret_cast<WalCheckpoint>(addr_of_call(C_SQLiteWalCheckpoint));
 
     // glaiel::Button::Click, for pressing Play on a client stuck on the menu.
     // Its own feature turns itself off by name if it does not resolve, which is
@@ -680,9 +706,8 @@ bool savefile_publish_active(uint8_t peer, bool fresh, bool flush_adventure) {
         backing_up)
         return false;
 
-    // If no SaveSelection click was observed (host was already in House),
-    // recover the active save filename from MewDirector's MewSaveFile::filename.
-    if (!g.have_slot || !g.name[0]) {
+    // Read the live slot even after SaveSelection has published a previous slot.
+    {
         char fname[128] = {};
         if (!mem_read_std_string((const uint8_t*)director + kDir_SaveFile_Filename, fname, sizeof(fname)) ||
             !fname[0])
@@ -697,11 +722,24 @@ bool savefile_publish_active(uint8_t peer, bool fresh, bool flush_adventure) {
         g.have_slot = true;
     }
 
+    void* sqlite = nullptr;
+    if (!g.wal_checkpoint ||
+        !mem_read(static_cast<const uint8_t*>(director) + kDir_SaveFile_Db,
+                  &sqlite, sizeof(sqlite)) || !sqlite)
+        return false;
+    // PASSIVE returns immediately if a reader pins the WAL. Copy the main
+    // file only after all committed pages are in it, and retry on a later tick.
+    int total = -1, copied = -1;
+    if (g.wal_checkpoint(sqlite, "main", 0, &total, &copied) != 0 || total != copied)
+        return false;
+
     if (!publish(peer, fresh, flush_adventure))
         return false;
     g.published = true;
     return true;
 }
+
+const char* savefile_coop_name() { return coop_save_name(); }
 
 bool savefile_has_pending() {
     ensure_state();
@@ -716,12 +754,12 @@ bool savefile_write_pending_coop() {
     if (!g.have_dir) { g.pending = false; return false; }
 
     wchar_t wcoop[64];
-    wide(kCoopSaveName, wcoop, 64);
+    wide(coop_save_name(), wcoop, 64);
     back_up(g.dir, wcoop);
 
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\%s", g.dir, wcoop);
-    if (!write_whole_file(path, g.blob, g.blob_size)) {
+    if (!replace_mirror(path, g.blob, g.blob_size)) {
         DWORD e = GetLastError();
         if (e == ERROR_SHARING_VIOLATION)
             log_line("SAVEFILE", "!! %ls is still open (win32 sharing violation)", path);
@@ -1023,16 +1061,15 @@ int savefile_autoselect(void* ss) {
     // playing. names[slot] is only used to pick which card on the screen gets
     // clicked; what actually gets opened is decided by the redirect below.
     wchar_t wcoop[64];
-    wide(kCoopSaveName, wcoop, 64);
+    wide(coop_save_name(), wcoop, 64);
     back_up(g.dir, wcoop);              // best effort; it is only ever a mirror
 
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\%s", g.dir, wcoop);
-    if (!write_whole_file(path, g.blob, g.blob_size)) {
+    if (!replace_mirror(path, g.blob, g.blob_size)) {
         DWORD e = GetLastError();
         if (e == ERROR_SHARING_VIOLATION)
-            log_line("SAVEFILE", "!! %ls is open in another process -- another "
-                                 "client on this machine is already using it", path);
+            log_line("SAVEFILE", "!! the mirror %ls is still open", path);
         else
             log_line("SAVEFILE", "!! could not write %ls (win32 %lu)", path, e);
         g.pending = false;
@@ -1043,15 +1080,15 @@ int savefile_autoselect(void* ss) {
     // names[slot], which is the player's real save and has nothing to do with
     // the host's run.
     memset(&g.redirect_name, 0, sizeof(g.redirect_name));
-    memcpy(g.redirect_name.buf, kCoopSaveName, sizeof(kCoopSaveName));
-    g.redirect_name.size = sizeof(kCoopSaveName) - 1;
+    strcpy_s(g.redirect_name.buf, coop_save_name());
+    g.redirect_name.size = strlen(g.redirect_name.buf);
     g.redirect_name.cap  = 15;                 // SSO: the text is inline, no heap
     g.redirect_armed     = true;
 
     log_line("SAVEFILE", "wrote the host's save to %ls (%u bytes) -- clicking slot "
                          "%d ('%s') and redirecting the load to '%s'; the local "
                          "save files are not touched",
-             path, g.blob_size, slot, names.v[slot], kCoopSaveName);
+             path, g.blob_size, slot, names.v[slot], coop_save_name());
 
     g.pending = false;
     g.applied = true;
@@ -1061,7 +1098,7 @@ int savefile_autoselect(void* ss) {
 const void* savefile_redirect_load() {
     if (!g.on || !g.redirect_armed) return nullptr;
     g.redirect_armed = false;
-    log_line("SAVEFILE", "redirecting MewDirector::init to '%s'", kCoopSaveName);
+    log_line("SAVEFILE", "redirecting MewDirector::init to '%s'", coop_save_name());
     return &g.redirect_name;
 }
 

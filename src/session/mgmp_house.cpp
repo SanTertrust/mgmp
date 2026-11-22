@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <new>
 #include <unordered_map>
 #include <vector>
@@ -37,8 +38,8 @@ struct Vec3D { double x = 0.0, y = 0.0, z = 0.0; };
 
 using FnSceneUpdateCachedList = void(__fastcall*)(void* scene, int comp_id);
 using FnHouseLocUnderPoint    = void*(__fastcall*)(void* house, Vec2D* pt);
-using FnPlaceCat              = void*(__fastcall*)(void* area, void* housecat);
-using FnRemoveCat             = int64_t(__fastcall*)(void* area, void* housecat);
+using FnPlaceCat              = void(__fastcall*)(void* area, void* housecat);
+using FnRemoveCat             = void(__fastcall*)(void* area, void* housecat);
 using FnCameraGetMouse        = Vec2D*(__fastcall*)(void* cam, Vec2D* out);
 using FnCameraMatrix          = float*(__fastcall*)(void* cam, float* out_mat);
 using FnGameStrAlloc          = void*(__fastcall*)(size_t);
@@ -47,6 +48,7 @@ using FnComponentDestroy      = void(__fastcall*)(void* comp);
 using FnSceneCreateEntity     = void*(__fastcall*)(void* scene);
 using FnSceneCreateMewDir     = void*(__fastcall*)(void* scene, void* entity, void* std_str);
 using FnMewDirContinueSave    = void(__fastcall*)(void* mew_dir);
+using FnCatById                = void*(__fastcall*)(const void*, int64_t);
 using FnSerializeCat          = void(__fastcall*)(void* catdata, void* bs, bool write);
 using FnBsDtor                = void(__fastcall*)(void* bs);
 using FnOfstreamCtor          = void(__fastcall*)(void* ofs);
@@ -60,10 +62,11 @@ using FnDoInterstitials       = void(__fastcall*)(void* iq);
 using FnGoOnAdventure         = void(__fastcall*)(void* md, void* map_str, void* collars_vec, void* cat_ids_buf);
 using FnDirectorAddScene      = void*(__fastcall*)(void* dir, void* std_str);
 using FnCreateActSel          = void*(__fastcall*)(void* scene, void* entity);
+using FnAnimatorSetState      = void(__fastcall*)(void* animator, int32_t state, void* substate);
+using FnCreateFurnPiece       = void*(__fastcall*)(void* house, int64_t* uid);
 
 struct InterpSample {
     uint32_t host_tick_ms = 0;
-    uint32_t recv_ms      = 0;
     HouseCatPose pose;
 };
 
@@ -80,6 +83,8 @@ struct ClientCatTrack {
     uint8_t      holder_peer = kNoPeer;
     float        pred_wx = 0.0f;
     float        pred_wy = 0.0f;
+    Vec2D        throw_velocity{};
+    uint32_t     last_motion_ms = 0;
 };
 
 struct HostCapture {
@@ -89,9 +94,6 @@ struct HostCapture {
     uint32_t last_seq     = 0;
     float    wx           = 0.0f;
     float    wy           = 0.0f;
-    float    vx           = 0.0f;
-    float    vy           = 0.0f;
-    uint32_t last_move_ms = 0;
     int32_t  orig_depth   = 0;
 };
 
@@ -102,8 +104,11 @@ struct PeerCursorState {
     float    wy       = 0.0f;
     float    nx       = 0.0f;
     float    ny       = 0.0f;
+    float    prev_wx  = 0.0f;
+    float    prev_wy  = 0.0f;
     uint8_t  mode     = 0;
     uint32_t recv_ms  = 0;
+    uint32_t prev_ms  = 0;
 };
 
 struct HouseState {
@@ -128,6 +133,9 @@ struct HouseState {
     FnSceneCreateMewDir     create_mew_dir  = nullptr;
     FnMewDirContinueSave    continue_save   = nullptr;
     FnSerializeCat          serialize_cat   = nullptr;
+    FnCatById               cat_by_id       = nullptr;
+    FnVoidPtr               regen_cat_parts = nullptr;
+    FnAnimatorSetState      animator_set_state = nullptr;
     FnBsDtor                bs_dtor         = nullptr;
     FnOfstreamCtor          ofstream_ctor   = nullptr;
     FnVoidPtr               cat_ctor        = nullptr;
@@ -142,6 +150,10 @@ struct HouseState {
     FnVecInterEmplace       vec_inter_empl  = nullptr;
     FnDoInterstitials       do_interstitials= nullptr;
     FnGoOnAdventure         go_on_adv       = nullptr;
+    FnVoidPtr               poop_pop_orig   = nullptr;
+    FnVoidPtr               autosave_house  = nullptr;
+    FnVoidPtr               furn_remove     = nullptr;
+    FnCreateFurnPiece       create_furn_piece = nullptr;
     FnDirectorAddScene      dir_add_scene   = nullptr;
     FnCreateActSel          create_act_sel  = nullptr;
 
@@ -151,12 +163,17 @@ struct HouseState {
     uint32_t  generation       = 0;
     uint32_t  roster_rev       = 1;
     bool      in_pass_day      = false;
+    bool      in_return        = false;
     bool      need_day_publish = false;
     bool      need_ret_publish = false;
     bool      need_adv_publish = false;
     bool      need_prep_publish= false;
     bool      need_baseline    = false;
+    bool      need_roster_publish = false;
     bool      suppress_local_drag = false;
+    bool      in_native_client_pickup = false;
+    bool      applying_remote_poop_pop = false;
+    bool      suppress_autosave_publish = false;
 
     // Current House scene/actor index (game thread only, cleared on gen change)
     void* current_house     = nullptr;
@@ -170,6 +187,7 @@ struct HouseState {
     uint32_t next_capture_id  = 1;
     uint32_t last_full_ms     = 0;
     uint32_t last_move_ms     = 0;
+    uint32_t last_drag_pose_ms = 0;
     uint32_t last_cursor_ms   = 0;
     int64_t  local_host_held  = 0;
     std::vector<int64_t> prev_actor_ids;
@@ -177,14 +195,29 @@ struct HouseState {
     bool                 has_pending_interstitial_blob = false;
     std::unordered_map<int64_t, HostCapture> host_captures;
     std::unordered_map<int64_t, HouseCatPose> last_sent_poses;
+    std::unordered_map<int64_t, HouseCatPose> returning_first_poses;
+    uint32_t return_first_tick = 0;
 
     // Preparation spectator state
     HousePrepMsg last_prep{};
     bool         have_prep = false;
     bool         peer_map_ready[kMaxPeers] = {};
+    bool         peer_needs_checkpoint[kMaxPeers] = {};
+    uint64_t     peer_map_deadline[kMaxPeers] = {};
+    bool         waiting_first_node = false;
+    uint32_t     client_map_generation = 0;
+    uint32_t     sent_map_generation = 0;
+    bool         pose_clock_valid = false;
+    uint32_t     pose_clock_offset = 0;
+    uint32_t     queued_baseline_tick = 0;
+    bool         queued_returning = false;
+    bool         playing_arrival = false;
+    uint32_t     arrival_started_ms = 0;
+    uint32_t     arrival_host_tick = 0;
 
     // Client state
     uint32_t client_gen           = 0;
+    uint32_t client_roster_rev    = 0;
     uint32_t client_req_seq       = 1;
     uint32_t client_move_seq      = 1;
     int64_t  client_held_cat      = 0;
@@ -194,13 +227,21 @@ struct HouseState {
     bool     client_waiting_house = false;
     uint32_t client_last_drag_ms  = 0;
     std::unordered_map<int64_t, ClientCatTrack> client_tracks;
+    struct CatRecord {
+        uint64_t hash = 0;
+        std::vector<uint8_t> bytes;
+    };
+    std::unordered_map<int64_t, CatRecord> queued_cat_records;
     std::vector<HouseCatPose> queued_baseline_cats;
     uint32_t                  queued_baseline_gen = 0;
     bool                      has_queued_baseline = false;
     std::vector<uint8_t>      queued_interstitial_blob;
     uint32_t                  queued_interstitial_gen = 0;
     bool                      has_queued_interstitial = false;
-    int                       reload_stage = 0; // 0 = idle, 1 = destroyed old MewDirector, waiting 1 frame
+    int                       reload_stage = 0; // 0 = idle, 1 = wait for old scenes
+    static constexpr const char* reload_scenes[] = {
+        kScene_House, "ClassChooser", "StorageItems", "ActSelection", "Map"
+    };
     void*                     cached_director = nullptr;
     HousePrepMsg              pending_class_chooser{};
     uint32_t                  pending_class_chooser_gen = 0;
@@ -285,6 +326,14 @@ bool get_cached_list(void* scene, int comp_id, void*** out_data, uint32_t* out_c
     return true;
 }
 
+const void* current_cat_registry() {
+    const uint8_t* director = nullptr;
+    const void* registry = nullptr;
+    if (g.director_slot && mem_read(g.director_slot, &director, sizeof(director)) && director)
+        mem_read(director + kDir_CatRegistry, &registry, sizeof(registry));
+    return registry;
+}
+
 void rebuild_actor_map() {
     g.cat_actors.clear();
     g.current_house = nullptr;
@@ -336,6 +385,37 @@ void* find_zone_by_name(const char* name) {
     return nullptr;
 }
 
+Vec2D cat_drag_anchor(const void* cat, bool flipped = true) {
+    const auto* hc = static_cast<const uint8_t*>(cat);
+    const uint8_t* transform = nullptr;
+    const uint8_t* bounds = nullptr;
+    Vec2D scale{}, flip{}, center{};
+    if (!mem_read(hc + kHCat_Transform, &transform, sizeof(transform)) || !transform ||
+        !mem_read(hc + kHCat_ClickBounds, &bounds, sizeof(bounds)) || !bounds ||
+        !mem_read(transform + kTransform_Scale, &scale, sizeof(scale)) ||
+        !mem_read(transform + kTransform_Flip, &flip, sizeof(flip)) ||
+        !mem_read(bounds + kCollider_DragCenter, &center, sizeof(center)))
+        return {};
+    return {center.x * scale.x * (flipped ? flip.x : 1.0),
+            center.y * scale.y * (flipped ? flip.y : 1.0)};
+}
+
+void move_held_cat(void* hc, float wx, float wy) {
+    void* transform = nullptr;
+    if (mem_read(static_cast<const uint8_t*>(hc) + kHCat_Transform,
+                 &transform, sizeof(transform)) && transform) {
+        const auto anchor = cat_drag_anchor(hc);
+        const Vec3D pos{wx - anchor.x, wy - anchor.y, 0.0};
+        memcpy(static_cast<uint8_t*>(transform) + kTransform_Pos, &pos, sizeof(pos));
+    }
+}
+
+bool is_house_pipe(const void* area) {
+    if (!area) return false;
+    const auto* vtable = *static_cast<const uintptr_t* const*>(area);
+    return vtable[kCPA_TryPlaceSlot] == addr_of(T_HousePipePlace);
+}
+
 bool read_housecat_pose(void* hc, HouseCatPose& out) {
     if (!hc) return false;
     int64_t id = 0;
@@ -372,6 +452,8 @@ bool read_housecat_pose(void* hc, HouseCatPose& out) {
         uint8_t vis = 1;
         mem_read((const uint8_t*)rend + kRenderer_Visible, &vis, 1);
         out.visible = vis ? 1 : 0;
+        mem_read((const uint8_t*)rend + kRenderer_RenderLayer,
+                 &out.render_layer, sizeof(out.render_layer));
     }
 
     void* anim = nullptr;
@@ -387,8 +469,12 @@ bool read_housecat_pose(void* hc, HouseCatPose& out) {
 
     void* loc = nullptr;
     out.zone[0] = 0;
-    if (mem_read((const uint8_t*)hc + kHCat_CurrentLocation, &loc, sizeof(loc)) && loc)
-        mem_read_std_string((const uint8_t*)loc + kCPA_RoomName, out.zone, sizeof(out.zone));
+    if (mem_read((const uint8_t*)hc + kHCat_CurrentLocation, &loc, sizeof(loc)) && loc) {
+        if (is_house_pipe(loc))
+            out.visible = 0; // The host masks this cat with the actual pipe renderer.
+        else
+            mem_read_std_string((const uint8_t*)loc + kCPA_RoomName, out.zone, sizeof(out.zone));
+    }
 
     auto it = g.host_captures.find(id);
     if (it != g.host_captures.end()) {
@@ -401,6 +487,54 @@ bool read_housecat_pose(void* hc, HouseCatPose& out) {
     return true;
 }
 
+struct RoomCats { uint32_t capacity, count; void** data; };
+
+RoomCats* room_cats(void* area) {
+    return reinterpret_cast<RoomCats*>(static_cast<uint8_t*>(area) + kCPA_OwnedCats);
+}
+
+void remove_client_room_member(void* area, void* hc) {
+    auto* cats = room_cats(area);
+    if (!cats->data) return;
+    for (uint32_t i = 0; i < cats->count; ++i) {
+        if (cats->data[i] == hc) {
+            cats->data[i] = cats->data[--cats->count];
+            break;
+        }
+    }
+}
+
+void apply_client_room(void* hc, void* target) {
+    auto** current = reinterpret_cast<void**>(static_cast<uint8_t*>(hc) + kHCat_CurrentLocation);
+    if (*current == target) return;
+
+    RoomCats* next = nullptr;
+    if (target) {
+        next = room_cats(target);
+        if (next->count >= kMaxHouseCats) return;
+        if (next->count == next->capacity) {
+            if (!g.podbuf_resize) return;
+            g.podbuf_resize(next, next->count + 1);
+        }
+        if (!next->data) return;
+    }
+    // Native placement callbacks can mutate CatData or trigger ButchBox effects.
+    if (*current) remove_client_room_member(*current, hc);
+    if (next) next->data[next->count++] = hc;
+    *current = target;
+}
+
+void prepare_held_ragdoll(void* cat) {
+    const auto* ragdoll = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(cat) + kHCat_Ragdoll);
+    if (!ragdoll) return;
+    auto* physics = *reinterpret_cast<uint8_t* const*>(ragdoll + kCatRagdoll_Physics);
+    if (!physics) return;
+    constexpr double infinity = std::numeric_limits<double>::infinity();
+    const double bounds[] = { -infinity, infinity, -infinity, infinity };
+    memcpy(physics + kRagdoll_ConstrainBounds, bounds, sizeof(bounds));
+    *reinterpret_cast<uint32_t*>(physics + kRagdoll_ExtraPlaneCount) = 0;
+}
+
 void apply_pose_to_client_actor(void* hc, const HouseCatPose& p, bool snap_zone) {
     if (!hc) return;
 
@@ -410,6 +544,9 @@ void apply_pose_to_client_actor(void* hc, const HouseCatPose& p, bool snap_zone)
         memcpy((uint8_t*)tr + kTransform_Pos, &pos, sizeof(pos));
         Vec2D flip{ (double)(p.flip < 0 ? -1.0 : 1.0), 1.0 };
         memcpy((uint8_t*)tr + kTransform_Flip, &flip, sizeof(flip));
+        const double sort_depth = -static_cast<double>(p.depth);
+        memcpy((uint8_t*)tr + kTransform_SortDepth, &sort_depth, sizeof(sort_depth));
+        memcpy((uint8_t*)tr + kTransform_PrevSortDepth, &sort_depth, sizeof(sort_depth));
     }
 
     int32_t depth = p.depth;
@@ -418,42 +555,50 @@ void apply_pose_to_client_actor(void* hc, const HouseCatPose& p, bool snap_zone)
     uint8_t no_overlap = 0;
     memcpy((uint8_t*)hc + kHCat_CheckOverlaps, &no_overlap, 1);
 
-    uint8_t rag = (p.holder_peer != kNoPeer || p.anim_state == 9) ? 1 : 0;
+    const bool held = p.holder_peer != kNoPeer;
+    if (held) prepare_held_ragdoll(hc);
+    uint8_t rag = (held || p.anim_state == 8 || p.anim_state == 9) ? 1 : 0;
     memcpy((uint8_t*)hc + kHCat_Ragdolling, &rag, 1);
 
     void* rend = nullptr;
     if (mem_read((const uint8_t*)hc + kHCat_Renderer, &rend, sizeof(rend)) && rend) {
         uint8_t vis = p.visible ? 1 : 0;
         memcpy((uint8_t*)rend + kRenderer_Visible, &vis, 1);
+        auto* bytes = static_cast<uint8_t*>(rend);
+        auto& layer = *reinterpret_cast<int32_t*>(bytes + kRenderer_RenderLayer);
+        if (layer != p.render_layer) {
+            layer = p.render_layer;
+            if (*reinterpret_cast<void**>(bytes + kRenderer_RenderCore)) {
+                const auto* vtable = *static_cast<FnVoidPtr**>(rend);
+                vtable[kRenderer_RefreshLayerSlot](rend);
+            }
+        }
     }
 
     void* anim = nullptr;
     if (mem_read((const uint8_t*)hc + kHCat_Animator, &anim, sizeof(anim)) && anim) {
         uint8_t* req = (uint8_t*)anim + kAnim_RequestedState;
         int32_t aflip = p.flip < 0 ? -1 : 1;
-        memcpy(req + kAnimState_State, &p.anim_state, sizeof(p.anim_state));
-        memcpy(req + kAnimState_Flip, &aflip, sizeof(aflip));
-        if (p.anim[0])
-            write_game_std_string(req + kAnimState_Anim, p.anim);
-        if (p.substate[0])
+        if (snap_zone) {
+            memcpy(req + kAnimState_State, &p.anim_state, sizeof(p.anim_state));
+            if (p.anim[0]) write_game_std_string(req + kAnimState_Anim, p.anim);
             write_game_std_string(req + kAnimState_Substate, p.substate);
+        } else if (g.animator_set_state &&
+                   *reinterpret_cast<int32_t*>(req + kAnimState_State) != p.anim_state) {
+            // SetState resolves the actual ragdoll clip from the cat's definition.
+            // It consumes the by-value string using the game's allocator.
+            struct {
+                char text[16] = "_DEFAULT";
+                uint64_t size = 8;
+                uint64_t capacity = 15;
+            } substate;
+            g.animator_set_state(anim, p.anim_state, &substate);
+        }
+        memcpy(req + kAnimState_Flip, &aflip, sizeof(aflip));
     }
 
-    if (snap_zone) {
-        void* cur_loc = nullptr;
-        mem_read((const uint8_t*)hc + kHCat_CurrentLocation, &cur_loc, sizeof(cur_loc));
-        void* target_loc = p.zone[0] ? find_zone_by_name(p.zone) : nullptr;
-        if (target_loc != cur_loc) {
-            if (cur_loc && g.remove_cat)
-                g.remove_cat(cur_loc, hc);
-            if (target_loc && g.place_cat)
-                g.place_cat(target_loc, hc);
-            else if (!target_loc) {
-                void* null_ptr = nullptr;
-                memcpy((uint8_t*)hc + kHCat_CurrentLocation, &null_ptr, sizeof(null_ptr));
-            }
-        }
-    }
+    if (snap_zone)
+        apply_client_room(hc, p.zone[0] ? find_zone_by_name(p.zone) : nullptr);
 }
 
 void clear_generation_state() {
@@ -466,12 +611,24 @@ void clear_generation_state() {
     g.spoof_active      = false;
     g.host_captures.clear();
     g.last_sent_poses.clear();
+    g.returning_first_poses.clear();
+    g.return_first_tick = 0;
+    g.need_roster_publish = false;
+    g.pose_clock_valid = false;
+    g.playing_arrival = false;
     g.local_host_held    = 0;
     g.client_held_cat    = 0;
     g.client_held_cap_id = 0;
     g.client_pending_req = 0;
     g.client_pending_cat = 0;
     g.client_tracks.clear();
+    g.queued_cat_records.clear();
+    g.client_roster_rev = 0;
+    g.client_map_generation = 0;
+    g.sent_map_generation = 0;
+    g.has_pending_class_chooser = false;
+    g.queued_interstitial_blob.clear();
+    g.has_queued_interstitial = false;
     g.queued_baseline_cats.clear();
     g.has_queued_baseline = false;
     g.have_prep = false;
@@ -517,7 +674,7 @@ bool project_world_to_norm(float wx, float wy, float* out_nx, float* out_ny) {
     void* cam = nullptr;
     if (!mem_read((const uint8_t*)g.current_house + kHouse_MainCam, &cam, sizeof(cam)) || !cam)
         return false;
-    float m[16] = {};
+    alignas(16) float m[16] = {};
     g.cam_matrix(cam, m);
     float sx = m[0] * wx + m[4] * wy + m[12];
     float sy = m[1] * wx + m[5] * wy + m[13];
@@ -533,7 +690,27 @@ bool project_world_to_norm(float wx, float wy, float* out_nx, float* out_ny) {
     return std::isfinite(*out_nx) && std::isfinite(*out_ny);
 }
 
-void send_baseline(uint8_t target_peer) {
+void send_cat_records(const std::vector<HouseCatPose>& poses, uint16_t count, uint8_t peer) {
+    const void* registry = current_cat_registry();
+    if (!registry || !g.cat_by_id) return;
+    unsigned sent = 0;
+    for (uint16_t i = 0; i < count; ++i) {
+        const int64_t id = poses[i].cat_id;
+        void* cat = g.cat_by_id(registry, id);
+        if (!cat) continue;
+        CatDataMsg record{};
+        record.id = static_cast<uint64_t>(id);
+        record.house_generation = g.generation;
+        if (catsync_pack_cat(cat, record)) {
+            if (net_send_catdata(record, peer)) ++sent;
+            free(record.data);
+        }
+    }
+    log_line("HOUSE", "-> %u of %u live cat records (gen=%u)", sent,
+             (unsigned)count, g.generation);
+}
+
+void send_baseline(uint8_t target_peer, bool with_cat_records = false, bool returning = false) {
     if (g.is_client || !net_active()) return;
     rebuild_actor_map();
 
@@ -541,8 +718,9 @@ void send_baseline(uint8_t target_peer) {
     list.reserve(g.cat_actors.size());
     for (auto& kv : g.cat_actors) {
         HouseCatPose p{};
-        if (read_housecat_pose(kv.second, p))
-            list.push_back(p);
+        if (!read_housecat_pose(kv.second, p)) continue;
+        const auto first = g.returning_first_poses.find(p.cat_id);
+        list.push_back(returning && first != g.returning_first_poses.end() ? first->second : p);
     }
 
     uint8_t night = 0;
@@ -552,33 +730,40 @@ void send_baseline(uint8_t target_peer) {
     HouseBaselineMsg msg{};
     msg.generation   = g.generation;
     msg.roster_rev   = g.roster_rev;
-    msg.host_tick_ms = now_ms();
+    msg.host_tick_ms = returning && g.return_first_tick ? g.return_first_tick : now_ms();
     msg.phase        = (uint8_t)g.phase;
     msg.night        = night ? 1 : 0;
+    msg.returning    = returning && !g.returning_first_poses.empty();
     msg.count        = (uint16_t)(list.size() > kMaxHouseCats ? kMaxHouseCats : list.size());
     msg.cats         = list.empty() ? nullptr : list.data();
 
-    if (target_peer == kNoPeer)
-        net_send_house_baseline(msg);
-    else
-        net_send_house_baseline_to(target_peer, msg);
+    const bool sent = target_peer == kNoPeer ? net_send_house_baseline(msg)
+                                             : net_send_house_baseline_to(target_peer, msg);
+    if (sent && with_cat_records)
+        send_cat_records(list, msg.count, target_peer);
 
     log_line("HOUSE", "-> BASELINE gen=%u cats=%u phase=%u (%s)",
              msg.generation, (unsigned)msg.count, (unsigned)msg.phase,
              target_peer == kNoPeer ? "broadcast" : "peer");
 }
 
-bool pose_changed(const HouseCatPose& a, const HouseCatPose& b) {
-    if (fabsf(a.x - b.x) > 0.005f || fabsf(a.y - b.y) > 0.005f || fabsf(a.z - b.z) > 0.005f)
-        return true;
+bool discrete_pose_changed(const HouseCatPose& a, const HouseCatPose& b) {
+    if (a.holder_peer != b.holder_peer || a.capture_id != b.capture_id) return true;
     if (a.flip != b.flip || a.depth != b.depth || a.visible != b.visible ||
-        a.anim_state != b.anim_state)
+        a.render_layer != b.render_layer || a.anim_state != b.anim_state)
         return true;
     if (strcmp(a.anim, b.anim) != 0 || strcmp(a.substate, b.substate) != 0 ||
         strcmp(a.zone, b.zone) != 0)
         return true;
     return false;
 }
+
+bool pose_moved(const HouseCatPose& a, const HouseCatPose& b) {
+    return fabsf(a.x - b.x) > 0.005f || fabsf(a.y - b.y) > 0.005f ||
+           fabsf(a.z - b.z) > 0.005f;
+}
+
+void host_release_capture(int64_t cat_id, float wx, float wy, bool apply_drop, Vec2D velocity = {});
 
 void host_sample_and_send_poses() {
     if (g.phase != HostPhase::House || !net_active()) return;
@@ -588,7 +773,7 @@ void host_sample_and_send_poses() {
     uint32_t t = now_ms();
     bool do_full = (t - g.last_full_ms >= tune::kHouseFullPoseMs);
     bool do_move = (t - g.last_move_ms >= tune::kHouseMovePoseMs);
-    if (!do_full && !do_move) return;
+    const bool do_drag = t - g.last_drag_pose_ms >= tune::kHouseCursorMs;
 
     // Detect mid-day cat additions or removals (e.g. flushing a retiree down
     // the NPC pipe) and broadcast a fresh BASELINE so the client removes them.
@@ -597,9 +782,27 @@ void host_sample_and_send_poses() {
     for (const auto& kv : g.cat_actors) cur_ids.push_back(kv.first);
     std::sort(cur_ids.begin(), cur_ids.end());
     if (cur_ids != g.prev_actor_ids) {
+        const bool added_cat = !g.prev_actor_ids.empty() &&
+            !std::includes(g.prev_actor_ids.begin(), g.prev_actor_ids.end(),
+                           cur_ids.begin(), cur_ids.end());
+        std::vector<int64_t> removed_captures;
+        for (const auto& item : g.host_captures)
+            if (!g.cat_actors.count(item.first)) removed_captures.push_back(item.first);
+        for (int64_t id : removed_captures) {
+            if (g.local_host_held == id && g.current_click_mgr) {
+                void* empty = nullptr;
+                memcpy(static_cast<uint8_t*>(g.current_click_mgr) + kHCatClick_HeldCat,
+                       &empty, sizeof(empty));
+            }
+            host_release_capture(id, 0.0f, 0.0f, false);
+            g.last_sent_poses.erase(id);
+        }
+        ++g.roster_rev;
         g.prev_actor_ids = cur_ids;
-        if (!g.need_day_publish && !g.need_ret_publish)
-            send_baseline(kNoPeer);
+        if (!g.need_day_publish && !g.need_ret_publish) {
+            g.need_roster_publish |= added_cat;
+            if (!g.need_roster_publish) send_baseline(kNoPeer);
+        }
     }
 
     std::vector<HouseCatPose> out;
@@ -613,7 +816,8 @@ void host_sample_and_send_poses() {
             g.last_sent_poses[p.cat_id] = p;
         } else {
             auto it = g.last_sent_poses.find(p.cat_id);
-            if (it == g.last_sent_poses.end() || pose_changed(it->second, p)) {
+            if (it == g.last_sent_poses.end() || discrete_pose_changed(it->second, p) ||
+                ((p.capture_id ? do_drag : do_move) && pose_moved(it->second, p))) {
                 out.push_back(p);
                 g.last_sent_poses[p.cat_id] = p;
             }
@@ -622,6 +826,7 @@ void host_sample_and_send_poses() {
 
     if (do_full) g.last_full_ms = t;
     if (do_move) g.last_move_ms = t;
+    if (do_drag) g.last_drag_pose_ms = t;
     if (out.empty()) return;
 
     HousePoseMsg msg{};
@@ -633,30 +838,39 @@ void host_sample_and_send_poses() {
     net_send_house_pose(msg);
 }
 
-void update_capture_velocity(HostCapture& cap, float wx, float wy, uint32_t now) {
-    uint32_t dt_ms = now - cap.last_move_ms;
-    if (cap.last_move_ms != 0 && dt_ms > 0 && dt_ms < 200) {
-        double dt = (double)dt_ms * 0.001;
-        double vx = ((double)wx - (double)cap.wx) / dt * 0.5;
-        double vy = ((double)wy - (double)cap.wy) / dt * 0.5;
-        double len2 = vx * vx + vy * vy;
-        if (len2 > 400.0) {
-            double s = 20.0 / std::sqrt(len2);
-            vx *= s;
-            vy *= s;
-        }
-        cap.vx = (float)vx;
-        cap.vy = (float)vy;
-    } else if (dt_ms >= 200) {
-        cap.vx = 0.0f;
-        cap.vy = 0.0f;
-    }
-    cap.wx = wx;
-    cap.wy = wy;
-    cap.last_move_ms = now;
+Vec2D clamp_throw_velocity(Vec2D velocity) {
+    constexpr double max_speed = 20.0; // HouseCatPhysics::update
+    const double speed = std::hypot(velocity.x, velocity.y);
+    if (speed <= max_speed) return velocity;
+    const double scale = max_speed / speed;
+    return {velocity.x * scale, velocity.y * scale};
 }
 
-void host_release_capture(int64_t cat_id, float wx, float wy, bool apply_drop) {
+void sample_client_drag(ClientCatTrack& track, uint32_t now) {
+    float wx = track.pred_wx, wy = track.pred_wy;
+    if (!house_mouse_world(&wx, &wy)) {
+        track.throw_velocity = {};
+        track.last_motion_ms = now;
+        return;
+    }
+    const double dx = double(wx) - track.pred_wx;
+    const double dy = double(wy) - track.pred_wy;
+    const uint32_t elapsed = now - track.last_motion_ms;
+    // Keep the final moving sample across a stationary tick at button-up.
+    if (elapsed == 0) return;
+    if (dx != 0 || dy != 0) {
+        const double scale = 500.0 / elapsed; // native half-speed, from ms to seconds
+        track.throw_velocity = clamp_throw_velocity({dx * scale, dy * scale});
+        track.last_motion_ms = now;
+    } else if (elapsed >= 50) {
+        track.throw_velocity = {};
+        track.last_motion_ms = now;
+    }
+    track.pred_wx = wx;
+    track.pred_wy = wy;
+}
+
+void host_release_capture(int64_t cat_id, float wx, float wy, bool apply_drop, Vec2D velocity) {
     auto it = g.host_captures.find(cat_id);
     if (it == g.host_captures.end()) return;
     HostCapture cap = it->second;
@@ -666,29 +880,22 @@ void host_release_capture(int64_t cat_id, float wx, float wy, bool apply_drop) {
 
     char zone[48] = {};
     bool accepted = false;
+    bool in_pipe = false;
+    HouseCatPose pose{};
+    bool have_pose = false;
     auto ait = g.cat_actors.find(cat_id);
     if (ait != g.cat_actors.end() && ait->second) {
         void* hc = ait->second;
         memcpy((uint8_t*)hc + kHCat_Depth, &cap.orig_depth, sizeof(cap.orig_depth));
 
         if (apply_drop) {
-            void* tr = nullptr;
-            if (mem_read((const uint8_t*)hc + kHCat_Transform, &tr, sizeof(tr)) && tr) {
-                Vec3D pos{ (double)wx, (double)wy, 0.0 };
-                memcpy((uint8_t*)tr + kTransform_Pos, &pos, sizeof(pos));
-            }
+            move_held_cat(hc, wx, wy);
             if (cap.holder_peer != kHostPeer) {
-                uint32_t now = now_ms();
-                if (now - cap.last_move_ms >= 120) {
-                    cap.vx = 0.0f;
-                    cap.vy = 0.0f;
-                } else if (wx != cap.wx || wy != cap.wy) {
-                    update_capture_velocity(cap, wx, wy, now);
-                }
                 void* phys = nullptr;
                 if (mem_read((const uint8_t*)hc + kHCat_Physics, &phys, sizeof(phys)) && phys) {
-                    Vec2D vel{ (double)cap.vx, (double)cap.vy };
-                    Vec2D ppos{ (double)wx, (double)wy };
+                    const Vec2D vel = clamp_throw_velocity(velocity);
+                    const auto anchor = cat_drag_anchor(hc);
+                    const Vec2D ppos{wx - anchor.x, wy - anchor.y};
                     uint8_t zero = 0;
                     memcpy((uint8_t*)phys + kHCatPhys_Velocity, &vel, sizeof(vel));
                     memcpy((uint8_t*)phys + kHCatPhys_PrevPos, &ppos, sizeof(ppos));
@@ -698,18 +905,33 @@ void host_release_capture(int64_t cat_id, float wx, float wy, bool apply_drop) {
                 memcpy((uint8_t*)hc + kHCat_Ragdolling, &rag, 1);
             }
             if (g.current_house && g.loc_under_point) {
-                Vec2D pt{ (double)wx, (double)wy };
+                // Native drop measures the click bounds without visual mirroring.
+                const auto held_anchor = cat_drag_anchor(hc);
+                const auto drop_anchor = cat_drag_anchor(hc, false);
+                Vec2D pt{wx - held_anchor.x + drop_anchor.x, wy - held_anchor.y + drop_anchor.y};
                 void* area = g.loc_under_point(g.current_house, &pt);
                 if (area && g.place_cat) {
                     g.place_cat(area, hc);
-                    mem_read_std_string((const uint8_t*)area + kCPA_RoomName, zone, sizeof(zone));
-                    accepted = true;
                 }
             }
+        }
+        have_pose = read_housecat_pose(hc, pose);
+        if (have_pose) {
+            wx = pose.x;
+            wy = pose.y;
+            strcpy_s(zone, pose.zone);
+            void* location = nullptr;
+            mem_read(static_cast<uint8_t*>(hc) + kHCat_CurrentLocation, &location, sizeof(location));
+            in_pipe = is_house_pipe(location);
+            accepted = location != nullptr;
         }
     }
 
     ++g.stat_drops;
+    log_line("HOUSE", "released cat %lld (peer=%u capture=%u move=%u zone='%s' velocity=%.2f,%.2f)",
+             (long long)cat_id, (unsigned)cap.holder_peer, cap.capture_id, cap.last_seq,
+             in_pipe ? "HousePipe" : zone,
+             pose.vx, pose.vy);
     HouseDropRespMsg resp{};
     resp.generation  = g.generation;
     resp.cat_id      = cat_id;
@@ -720,6 +942,10 @@ void host_release_capture(int64_t cat_id, float wx, float wy, bool apply_drop) {
     strncpy_s(resp.zone, zone, _TRUNCATE);
     resp.accepted    = accepted ? 1 : 0;
     net_send_house_drop_resp(resp);
+    if (have_pose) {
+        HousePoseMsg snapshot{g.generation, now_ms(), 0, 1, &pose};
+        net_send_house_pose(snapshot);
+    }
 }
 
 void host_release_all_captures() {
@@ -729,7 +955,12 @@ void host_release_all_captures() {
     for (int64_t id : ids) {
         auto it = g.host_captures.find(id);
         if (it != g.host_captures.end())
-            host_release_capture(id, it->second.wx, it->second.wy, false);
+            host_release_capture(id, it->second.wx, it->second.wy, true);
+    }
+    if (g.current_click_mgr) {
+        void* empty = nullptr;
+        memcpy(static_cast<uint8_t*>(g.current_click_mgr) + kHCatClick_HeldCat,
+               &empty, sizeof(empty));
     }
 }
 
@@ -772,6 +1003,15 @@ bool host_try_grant_grab(uint8_t peer, int64_t cat_id, uint32_t req_seq, float w
     }
 
     void* hc = ait->second;
+    // A peer may still be looking at a pose from before the host placed the cat.
+    void* location = nullptr;
+    mem_read(static_cast<uint8_t*>(hc) + kHCat_CurrentLocation, &location, sizeof(location));
+    if (peer != kHostPeer && is_house_pipe(location)) {
+        ++g.stat_grabs_rejected;
+        HouseGrabRespMsg resp{g.generation, cat_id, kNoPeer, 0, 0, req_seq, wx, wy};
+        net_send_house_grab_resp_to(peer, resp);
+        return false;
+    }
     HostCapture cap{};
     cap.cat_id      = cat_id;
     cap.holder_peer = peer;
@@ -779,23 +1019,28 @@ bool host_try_grant_grab(uint8_t peer, int64_t cat_id, uint32_t req_seq, float w
     cap.last_seq    = 0;
     cap.wx           = wx;
     cap.wy           = wy;
-    cap.last_move_ms = now_ms();
     mem_read((const uint8_t*)hc + kHCat_Depth, &cap.orig_depth, sizeof(cap.orig_depth));
 
     // Preserve native pickup semantics: remove from room and raise depth.
-    void* cur_loc = nullptr;
-    if (mem_read((const uint8_t*)hc + kHCat_CurrentLocation, &cur_loc, sizeof(cur_loc)) &&
-        cur_loc && g.remove_cat) {
-        g.remove_cat(cur_loc, hc);
+    if (location && g.remove_cat) {
+        g.remove_cat(location, hc);
         void* null_ptr = nullptr;
         memcpy((uint8_t*)hc + kHCat_CurrentLocation, &null_ptr, sizeof(null_ptr));
     }
-    int32_t raised_depth = cap.orig_depth + 100000;
-    memcpy((uint8_t*)hc + kHCat_Depth, &raised_depth, sizeof(raised_depth));
+    if (peer == kHostPeer) {
+        // The native click manager has already raised depth.
+        cap.orig_depth -= 100000;
+    } else {
+        const int32_t raised_depth = cap.orig_depth + 100000;
+        memcpy(static_cast<uint8_t*>(hc) + kHCat_Depth, &raised_depth, sizeof(raised_depth));
+        move_held_cat(hc, wx, wy);
+    }
 
     g.host_captures[cat_id] = cap;
     if (peer == kHostPeer) g.local_host_held = cat_id;
     ++g.stat_grabs_granted;
+    log_line("HOUSE", "granted cat %lld to peer %u (capture=%u)",
+             (long long)cat_id, (unsigned)peer, cap.capture_id);
 
     HouseGrabRespMsg resp{};
     resp.generation  = g.generation;
@@ -808,6 +1053,42 @@ bool host_try_grant_grab(uint8_t peer, int64_t cat_id, uint32_t req_seq, float w
     resp.wy          = wy;
     net_send_house_grab_resp(resp);
     return true;
+}
+
+void read_prep_equipment(const uint8_t* cat, HousePrepCat& summary) {
+    size_t used = 0;
+    for (size_t slot = 0; slot < 5; ++slot) {
+        char item[48]{};
+        const auto* name = cat + kCatData_Equipment + slot * kEquipment_Size + kEquipment_Name;
+        if (!mem_read_std_string(name, item, sizeof(item)) || !item[0]) continue;
+        const int written = sprintf_s(summary.eq_summary + used,
+                                      sizeof(summary.eq_summary) - used,
+                                      "%s%s", used ? ", " : "", item);
+        if (written > 0) used += written;
+    }
+}
+
+void read_prep_class_tags(HousePrepMsg& summary) {
+    const void* scene = nullptr;
+    bool suspended = false;
+    if (!leave_find_scene("ClassChooser", &scene, &suspended) || suspended) return;
+    void** boxes = nullptr;
+    uint32_t count = 0;
+    if (!get_cached_list(const_cast<void*>(scene), kCompId_ClassTagBox, &boxes, &count) || !boxes)
+        return;
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto* box = static_cast<const uint8_t*>(boxes[i]);
+        int64_t id = -1;
+        if (!box || !mem_read(box + kClassTagBox_CatId, &id, sizeof(id)) || id == -1) continue;
+        for (uint8_t cat = 0; cat < summary.count; ++cat) {
+            auto& entry = summary.cats[cat];
+            if (entry.cat_id == id) {
+                mem_read_std_string(box + kClassTagBox_Class, entry.cat_class,
+                                    sizeof(entry.cat_class));
+                break;
+            }
+        }
+    }
 }
 
 void host_poll_prep_state() {
@@ -837,20 +1118,17 @@ void host_poll_prep_state() {
         int64_t cid = 0;
         if (ids) mem_read(ids + i, &cid, sizeof(cid));
         msg.cats[i].cat_id = cid;
-        // Cat class is at CatData + kCatData_Class (std::string)
-        // We keep eq_summary concise; full CatData syncs on StartAdventure.
-        if (reg && cid != 0) {
-            using FnById = void*(__fastcall*)(const void*, int64_t);
-            FnById by_id = (FnById)addr_of_call(C_CatDataById);
-            if (by_id) {
-                void* cd = by_id(reg, cid);
-                if (cd)
-                    mem_read_std_string((const uint8_t*)cd + kCatData_Class,
-                                        msg.cats[i].cat_class, sizeof(msg.cats[i].cat_class));
+        if (reg && cid != 0 && g.cat_by_id) {
+            const auto* cat = static_cast<const uint8_t*>(g.cat_by_id(reg, cid));
+            if (cat) {
+                mem_read_std_string(cat + kCatData_Class, msg.cats[i].cat_class,
+                                    sizeof(msg.cats[i].cat_class));
+                read_prep_equipment(cat, msg.cats[i]);
             }
         }
     }
 
+    if (g.prep_stage == PrepStage::ClassChooser) read_prep_class_tags(msg);
     if (!g.have_prep || memcmp(&msg, &g.last_prep, sizeof(msg)) != 0) {
         g.last_prep = msg;
         g.have_prep = true;
@@ -858,13 +1136,59 @@ void host_poll_prep_state() {
     }
 }
 
+void apply_client_cat_records() {
+    if (g.queued_cat_records.empty() || !g.cat_by_id || !g.current_house) return;
+    const void* registry = current_cat_registry();
+    if (!registry) return;
+    for (auto it = g.queued_cat_records.begin(); it != g.queued_cat_records.end();) {
+        auto found = g.cat_actors.find(it->first);
+        if (found == g.cat_actors.end()) {
+            ++it;
+            continue;
+        }
+        void* cat = g.cat_by_id(registry, it->first);
+        auto& bytes = it->second.bytes;
+        const CatDataMsg record{ static_cast<uint64_t>(it->first),
+                                 static_cast<uint32_t>(bytes.size()), it->second.hash,
+                                 bytes.data(), g.client_gen };
+        CatDataMsg local{};
+        const bool unchanged = cat && catsync_pack_cat(cat, local) && local.hash == record.hash;
+        free(local.data);
+        if (!unchanged && cat && catsync_unpack_cat(cat, record)) {
+            void* art = nullptr;
+            if (g.regen_cat_parts && mem_read(static_cast<const uint8_t*>(found->second)
+                                            + kHCat_CatArt, &art, sizeof(art)) && art)
+                g.regen_cat_parts(art);
+        } else if (!unchanged) {
+            log_line("HOUSE", "!! could not apply live cat record %lld", (long long)it->first);
+        }
+        it = g.queued_cat_records.erase(it);
+    }
+}
+
+void observe_pose_clock(uint32_t host_tick, uint32_t received_at) {
+    const uint32_t offset = received_at - host_tick;
+    if (!g.pose_clock_valid || static_cast<int32_t>(offset - g.pose_clock_offset) < 0) {
+        g.pose_clock_offset = offset;
+        g.pose_clock_valid = true;
+    }
+}
+
 void client_interpolate_cats() {
-    if (!g.is_client || g.phase != HostPhase::House) return;
-    uint32_t now = now_ms();
+    if (!g.is_client || g.phase != HostPhase::House || g.reload_stage || savefile_has_pending())
+        return;
+    const uint32_t now = now_ms();
     rebuild_actor_map();
+    if (!live_house_scene_valid()) return;
+    apply_client_cat_records();
 
     // Apply any queued baseline once House actors exist.
-    if (g.has_queued_baseline && g.queued_baseline_gen == g.client_gen && !g.cat_actors.empty()) {
+    if (g.has_queued_baseline && g.queued_baseline_gen == g.client_gen) {
+        if (g.queued_returning) {
+            g.playing_arrival = true;
+            g.arrival_started_ms = now;
+            g.arrival_host_tick = g.queued_baseline_tick;
+        }
         std::vector<int64_t> keep_ids;
         keep_ids.reserve(g.queued_baseline_cats.size());
         for (const auto& p : g.queued_baseline_cats) {
@@ -877,12 +1201,16 @@ void client_interpolate_cats() {
             tr.capture_id  = p.capture_id;
             tr.last_applied = p;
             tr.has_last = true;
+            if (tr.samples.empty() ||
+                static_cast<int32_t>(tr.samples.front().host_tick_ms - g.queued_baseline_tick) > 0)
+                tr.samples.insert(tr.samples.begin(), {g.queued_baseline_tick, p});
         }
         std::sort(keep_ids.begin(), keep_ids.end());
         for (auto it = g.cat_actors.begin(); it != g.cat_actors.end(); ) {
             if (!std::binary_search(keep_ids.begin(), keep_ids.end(), it->first)) {
                 void* hc = it->second;
                 if (hc) {
+                    apply_client_room(hc, nullptr);
                     *(uint8_t*)((uintptr_t)hc + kHCat_Exists)   = 0;
                     *(uint8_t*)((uintptr_t)hc + kHCat_Departed) = 1;
                     if (g.comp_destroy) g.comp_destroy(hc);
@@ -897,6 +1225,18 @@ void client_interpolate_cats() {
         g.queued_baseline_cats.clear();
     }
 
+    const uint32_t live_target = now - g.pose_clock_offset - tune::kHouseInterpDelayMs;
+    uint32_t target_ms = live_target;
+    if (g.playing_arrival) {
+        const uint32_t elapsed = now - g.arrival_started_ms;
+        target_ms = g.arrival_host_tick + elapsed;
+        // Catch up to the live clock after showing the beginning of the walk.
+        if (elapsed >= 750 || static_cast<int32_t>(target_ms - live_target) >= 0) {
+            g.playing_arrival = false;
+            target_ms = live_target;
+        }
+    }
+
     for (auto& kv : g.cat_actors) {
         int64_t id = kv.first;
         void*   hc = kv.second;
@@ -907,17 +1247,16 @@ void client_interpolate_cats() {
         // Local predicted/granted drag follows local mouse every frame.
         if (tr.predicted_held || (g.client_held_cat == id && g.client_held_cap_id != 0)) {
             float wx = tr.pred_wx, wy = tr.pred_wy;
-            if (house_mouse_world(&wx, &wy)) {
-                tr.pred_wx = wx;
-                tr.pred_wy = wy;
-            }
+            house_mouse_world(&wx, &wy);
             HouseCatPose p = tr.has_last ? tr.last_applied : HouseCatPose{};
+            if (p.holder_peer == kNoPeer) p.depth += 100000;
             p.cat_id      = id;
             p.holder_peer = net_self();
-            p.anim_state  = 9; // ragdoll state while held
-            strcpy_s(p.anim, "_DEFAULT");
-            p.x           = tr.pred_wx;
-            p.y           = tr.pred_wy;
+            p.render_layer = 20; // native held-cat layer
+            p.anim_state  = 8; // native held ragdoll
+            const auto anchor = cat_drag_anchor(hc);
+            p.x           = static_cast<float>(wx - anchor.x);
+            p.y           = static_cast<float>(wy - anchor.y);
             p.z           = 0.0f;
             apply_pose_to_client_actor(hc, p, false);
             continue;
@@ -925,17 +1264,18 @@ void client_interpolate_cats() {
 
         if (tr.samples.empty()) continue;
 
-        // Interpolate using local receive-time offset by kHouseInterpDelayMs.
-        uint32_t target_ms = now > tune::kHouseInterpDelayMs ? (now - tune::kHouseInterpDelayMs) : 0;
+        const auto reached = [target_ms](uint32_t tick) {
+            return static_cast<int32_t>(target_ms - tick) >= 0;
+        };
         const InterpSample* s0 = &tr.samples.front();
         const InterpSample* s1 = &tr.samples.back();
 
-        if (tr.samples.size() == 1 || target_ms <= s0->recv_ms) {
+        if (tr.samples.size() == 1 || !reached(s0->host_tick_ms)) {
             apply_pose_to_client_actor(hc, s0->pose, true);
             tr.last_applied = s0->pose;
             tr.has_last = true;
-        } else if (target_ms >= s1->recv_ms) {
-            uint32_t dt_ms = target_ms - s1->recv_ms;
+        } else if (reached(s1->host_tick_ms)) {
+            uint32_t dt_ms = target_ms - s1->host_tick_ms;
             if (dt_ms > tune::kHouseMaxExtrapMs) dt_ms = tune::kHouseMaxExtrapMs;
             float dt = (float)dt_ms * 0.001f;
             HouseCatPose p = s1->pose;
@@ -946,14 +1286,14 @@ void client_interpolate_cats() {
             tr.has_last = true;
         } else {
             for (size_t i = 0; i + 1 < tr.samples.size(); ++i) {
-                if (tr.samples[i].recv_ms <= target_ms && target_ms <= tr.samples[i + 1].recv_ms) {
+                if (reached(tr.samples[i].host_tick_ms) && !reached(tr.samples[i + 1].host_tick_ms)) {
                     s0 = &tr.samples[i];
                     s1 = &tr.samples[i + 1];
                     break;
                 }
             }
-            uint32_t span = s1->recv_ms - s0->recv_ms;
-            float alpha = span > 0 ? (float)(target_ms - s0->recv_ms) / (float)span : 1.0f;
+            uint32_t span = s1->host_tick_ms - s0->host_tick_ms;
+            float alpha = span > 0 ? (float)(target_ms - s0->host_tick_ms) / (float)span : 1.0f;
             HouseCatPose p = s1->pose;
             // Snap if large authoritative correction.
             float dx = s1->pose.x - s0->pose.x;
@@ -969,7 +1309,7 @@ void client_interpolate_cats() {
         }
 
         // Trim old samples beyond interpolation window.
-        while (tr.samples.size() > 2 && tr.samples[1].recv_ms <= target_ms)
+        while (tr.samples.size() > 2 && reached(tr.samples[1].host_tick_ms))
             tr.samples.erase(tr.samples.begin());
     }
 }
@@ -982,7 +1322,9 @@ void send_cursor_sample() {
 
     float wx = 0.0f, wy = 0.0f;
     if (!house_mouse_world(&wx, &wy)) return;
-    float nx = 0.0f, ny = 0.0f;
+    float nx = 0.5f, ny = 0.5f;
+    uint8_t mode = 0;
+    overlay_local_pointer(nx, ny, mode);
     project_world_to_norm(wx, wy, &nx, &ny);
 
     HouseCursorMsg m{};
@@ -991,7 +1333,7 @@ void send_cursor_sample() {
     m.wy         = wy;
     m.nx         = nx;
     m.ny         = ny;
-    m.mode       = 0;
+    m.mode       = mode;
     m.in_house   = 1;
     net_send_house_cursor(m);
 }
@@ -1154,12 +1496,17 @@ struct IqReader {
     }
 };
 
-bool deserialize_and_run_interstitials(const uint8_t* data, uint32_t size) {
-    if (!data || !size || !g.do_interstitials || !g.inter_ctor || !g.inter_dtor ||
+bool deserialize_and_run_interstitials(const uint8_t* data, uint32_t size,
+                                       const void* house_scene) {
+    auto* scene_current = (void**)addr_of_data(D_SceneCurrent);
+    if (!data || !size || !house_scene || !scene_current ||
+        !g.do_interstitials || !g.inter_ctor || !g.inter_dtor ||
         !g.vec_inter_empl || !g.vec_str_push || !g.str_assign || !g.wstr_assign ||
         !g.podbuf_resize || !g.cat_ctor || !g.cat_dtor || !g.vec_cat_push ||
-        !g.serialize_cat || !g.bs_dtor || !g.ofstream_ctor || !g.str_dtor)
+        !g.serialize_cat || !g.bs_dtor || !g.ofstream_ctor || !g.str_dtor) {
+        log_line("HOUSE", "!! cannot start client interstitials (missing scene/resolver)");
         return false;
+    }
 
     IqReader r{ data, size, 0, true };
     uint8_t iq[kInterstitialQueue_Size];
@@ -1269,7 +1616,181 @@ bool deserialize_and_run_interstitials(const uint8_t* data, uint32_t size) {
     });
 
     log_line("HOUSE", "starting %u night/breeding interstitial(s) on client", icount);
+    void* prev_scene = *scene_current;
+    *scene_current = const_cast<void*>(house_scene);
     g.do_interstitials(iq);
+    *scene_current = prev_scene;
+    return true;
+}
+
+struct FurnitureRec {
+    int64_t uid   = 0;
+    int32_t x     = 0;
+    int32_t y     = 0;
+    int32_t fx    = 1;
+    int32_t fy    = 1;
+    int32_t depth = 0;
+    uint8_t room_len = 0;
+    char    room[64] = {};
+};
+
+void* current_house_inventory() {
+    auto* slot = (void**)addr_of_data(D_HouseInventoryPtr);
+    if (!slot) return nullptr;
+    void* inv = nullptr;
+    if (!mem_read(slot, &inv, sizeof(inv))) return nullptr;
+    return inv;
+}
+
+bool serialize_furniture_layout(std::vector<uint8_t>& out) {
+    out.clear();
+    void* hinv = current_house_inventory();
+    if (!hinv) return false;
+
+    uint32_t count = 0;
+    void** entries = nullptr;
+    if (!mem_read((const uint8_t*)hinv + kHInv_FurnitureCount, &count, sizeof(count))) return false;
+    if (count > 2048) return false;
+    if (count > 0 && !mem_read((const uint8_t*)hinv + kHInv_FurnitureData, &entries, sizeof(entries)))
+        return false;
+    if (count > 0 && !entries) return false;
+
+    auto push_bytes = [&](const void* p, size_t n) {
+        const auto* b = (const uint8_t*)p;
+        out.insert(out.end(), b, b + n);
+    };
+
+    uint16_t n16 = (uint16_t)count;
+    push_bytes(&n16, sizeof(n16));
+    uint16_t written = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        void* e = nullptr;
+        if (!mem_read(entries + i, &e, sizeof(e)) || !e) continue;
+        int64_t uid = 0;
+        int32_t pos[2] = {};
+        int32_t flip[2] = { 1, 1 };
+        int32_t depth = 0;
+        char room[64] = {};
+        if (!mem_read((const uint8_t*)e + kFPE_Uid, &uid, sizeof(uid))) continue;
+        mem_read((const uint8_t*)e + kFPE_PlacedPos, pos, sizeof(pos));
+        mem_read((const uint8_t*)e + kFPE_PlacedFlip, flip, sizeof(flip));
+        mem_read((const uint8_t*)e + kFPE_PlacedDepth, &depth, sizeof(depth));
+        mem_read_std_string((const uint8_t*)e + kFPE_PlacedRoom, room, sizeof(room));
+        uint8_t rlen = (uint8_t)strnlen(room, sizeof(room) - 1);
+
+        push_bytes(&uid, sizeof(uid));
+        push_bytes(pos, sizeof(pos));
+        push_bytes(flip, sizeof(flip));
+        push_bytes(&depth, sizeof(depth));
+        push_bytes(&rlen, 1);
+        if (rlen) push_bytes(room, rlen);
+        ++written;
+    }
+    memcpy(out.data(), &written, sizeof(written));
+    return true;
+}
+
+bool apply_furniture_layout(const uint8_t* data, uint32_t size, void* house_scene, void* house) {
+    if (!data || size < 2 || !house_scene || !house) return false;
+    if (!g.furn_remove || !g.create_furn_piece || !g.comp_destroy || !g.str_assign) return false;
+    void* hinv = current_house_inventory();
+    if (!hinv) return false;
+
+    size_t off = 0;
+    auto take = [&](void* dst, size_t n) -> bool {
+        if (off + n > size) return false;
+        memcpy(dst, data + off, n);
+        off += n;
+        return true;
+    };
+
+    uint16_t rec_count = 0;
+    if (!take(&rec_count, sizeof(rec_count)) || rec_count > 2048) return false;
+
+    std::vector<FurnitureRec> recs;
+    recs.reserve(rec_count);
+    for (uint16_t i = 0; i < rec_count; ++i) {
+        FurnitureRec r{};
+        if (!take(&r.uid, sizeof(r.uid))) return false;
+        if (!take(&r.x, sizeof(r.x)) || !take(&r.y, sizeof(r.y))) return false;
+        if (!take(&r.fx, sizeof(r.fx)) || !take(&r.fy, sizeof(r.fy))) return false;
+        if (!take(&r.depth, sizeof(r.depth))) return false;
+        if (!take(&r.room_len, 1)) return false;
+        if (r.room_len >= sizeof(r.room)) return false;
+        if (r.room_len && !take(r.room, r.room_len)) return false;
+        r.room[r.room_len] = '\0';
+        recs.push_back(r);
+    }
+
+    // Index local HouseInventory entries by uid so unknown uids are ignored.
+    uint32_t local_count = 0;
+    void** local_entries = nullptr;
+    if (!mem_read((const uint8_t*)hinv + kHInv_FurnitureCount, &local_count, sizeof(local_count)) ||
+        local_count > 2048)
+        return false;
+    if (local_count > 0 &&
+        (!mem_read((const uint8_t*)hinv + kHInv_FurnitureData, &local_entries, sizeof(local_entries)) ||
+         !local_entries))
+        return false;
+
+    std::unordered_map<int64_t, void*> by_uid;
+    by_uid.reserve(local_count);
+    for (uint32_t i = 0; i < local_count; ++i) {
+        void* e = nullptr;
+        int64_t uid = 0;
+        if (mem_read(local_entries + i, &e, sizeof(e)) && e &&
+            mem_read((const uint8_t*)e + kFPE_Uid, &uid, sizeof(uid)))
+            by_uid[uid] = e;
+    }
+
+    auto* scene_current = (void**)addr_of_data(D_SceneCurrent);
+    void* prev_scene = scene_current ? *scene_current : nullptr;
+    if (scene_current) *scene_current = house_scene;
+
+    // Remove and destroy currently placed FurniturePiece components.
+    void** pieces = nullptr;
+    uint32_t piece_count = 0;
+    if (get_cached_list(house_scene, kCompId_FurniturePiece, &pieces, &piece_count) && pieces && piece_count > 0) {
+        std::vector<void*> to_remove;
+        to_remove.reserve(piece_count);
+        for (uint32_t i = 0; i < piece_count; ++i) {
+            void* p = pieces[i];
+            if (!p) continue;
+            void* entry = nullptr;
+            void* grid  = nullptr;
+            if (mem_read((const uint8_t*)p + kFPiece_Entry, &entry, sizeof(entry)) && entry &&
+                mem_read((const uint8_t*)p + kFPiece_PlacedGrid, &grid, sizeof(grid)) && grid)
+                to_remove.push_back(p);
+        }
+        for (void* p : to_remove) {
+            g.furn_remove(p);
+            g.comp_destroy(p);
+        }
+    }
+
+    // Apply incoming layout to matching HouseInventory entries and re-spawn placed pieces.
+    uint32_t applied = 0, spawned = 0;
+    for (const auto& r : recs) {
+        auto it = by_uid.find(r.uid);
+        if (it == by_uid.end()) continue;
+        uint8_t* entry = (uint8_t*)it->second;
+        g.str_assign(entry + kFPE_PlacedRoom, r.room, r.room_len);
+        int32_t pos[2]  = { r.x, r.y };
+        int32_t flip[2] = { r.fx, r.fy };
+        memcpy(entry + kFPE_PlacedPos,   pos,      sizeof(pos));
+        memcpy(entry + kFPE_PlacedFlip,  flip,     sizeof(flip));
+        memcpy(entry + kFPE_PlacedDepth, &r.depth, sizeof(r.depth));
+        ++applied;
+        if (r.room_len > 0) {
+            int64_t uid_arg = r.uid;
+            g.create_furn_piece(house, &uid_arg);
+            ++spawned;
+        }
+    }
+
+    if (scene_current) *scene_current = prev_scene;
+    log_line("HOUSE", "applied furniture layout: %u/%u entries updated, %u placed",
+             applied, (unsigned)recs.size(), spawned);
     return true;
 }
 
@@ -1284,7 +1805,22 @@ void house_init() {
     g.is_client = (net_role() == NetRole::Client);
     g.phase     = HostPhase::Outside;
     g.generation = 0;
+    g.client_gen = 0;
     g.roster_rev = 1;
+    g.waiting_first_node = false;
+    g.need_adv_publish = false;
+    g.need_day_publish = false;
+    g.need_ret_publish = false;
+    g.need_prep_publish = false;
+    g.need_baseline = false;
+    g.in_pass_day = false;
+    g.in_return = false;
+    g.pending_interstitial_blob.clear();
+    g.has_pending_interstitial_blob = false;
+    g.reload_stage = 0;
+    g.cached_director = nullptr;
+    memset(g.peer_needs_checkpoint, 0, sizeof(g.peer_needs_checkpoint));
+    memset(g.peer_map_deadline, 0, sizeof(g.peer_map_deadline));
     clear_generation_state();
     memset(g.peer_map_ready, 0, sizeof(g.peer_map_ready));
     g.known_peer_count = 0;
@@ -1316,6 +1852,9 @@ void house_set_base(uintptr_t base) {
     g.create_mew_dir  = (FnSceneCreateMewDir)addr_of_call(C_SceneCreateMewDirector);
     g.continue_save   = (FnMewDirContinueSave)addr_of_call(C_MewDirectorContinueSave);
     g.serialize_cat   = (FnSerializeCat)addr_of_call(C_SerializeCatData);
+    g.cat_by_id       = (FnCatById)addr_of_call(C_CatDataById);
+    g.regen_cat_parts = (FnVoidPtr)addr_of_call(C_CatPartsRegen);
+    g.animator_set_state = (FnAnimatorSetState)addr_of_call(C_AnimatorSetState);
     g.bs_dtor         = (FnBsDtor)addr_of_call(C_ByteStreamDtor);
     g.ofstream_ctor   = (FnOfstreamCtor)addr_of_call(C_OfstreamCtor);
     g.cat_ctor        = (FnVoidPtr)addr_of_call(C_CatDataCtor);
@@ -1330,6 +1869,8 @@ void house_set_base(uintptr_t base) {
     g.vec_inter_empl  = (FnVecInterEmplace)addr_of_call(C_VecInterstitialEmplace);
     g.dir_add_scene   = (FnDirectorAddScene)addr_of_call(C_DirectorAddScene);
     g.create_act_sel  = (FnCreateActSel)addr_of_call(C_CreateActSelection);
+    g.furn_remove     = (FnVoidPtr)addr_of_call(C_FurniturePieceRemove);
+    g.create_furn_piece = (FnCreateFurnPiece)addr_of_call(C_CreateFurniturePiece);
 }
 
 void house_pump() {
@@ -1348,7 +1889,7 @@ void house_pump() {
             rebuild_actor_map();
             log_line("HOUSE", "host detected live House scene (gen=%u, cats=%zu)",
                      g.generation, g.cat_actors.size());
-            send_baseline(kNoPeer);
+            send_baseline(kNoPeer, true);
         }
         if (g.phase == HostPhase::Outside) {
             const void* psc = nullptr;
@@ -1380,9 +1921,10 @@ void house_pump() {
                 log_line("HOUSE", "host entered ActSelection (gen=%u)", g.generation);
             }
         }
-        if (g.need_baseline && has_house && !suspended && !g.in_pass_day) {
+        if (g.need_baseline && has_house && !suspended && !g.in_pass_day &&
+            !g.need_day_publish && !g.need_ret_publish && !g.in_return) {
             g.need_baseline = false;
-            send_baseline(kNoPeer);
+            send_baseline(kNoPeer, true);
         }
 
         // Deferred checkpoint publishes once SQLite transaction commits.
@@ -1391,6 +1933,7 @@ void house_pump() {
         if (g.need_day_publish && has_house && !g.in_pass_day) {
             if (savefile_publish_active(kNoPeer, /*fresh=*/true, /*flush_adventure=*/false)) {
                 g.need_day_publish = false;
+                send_baseline(kNoPeer, true);
                 if (g.has_pending_interstitial_blob) {
                     HouseInterstitialsMsg im{};
                     im.generation = g.generation;
@@ -1400,18 +1943,20 @@ void house_pump() {
                     g.has_pending_interstitial_blob = false;
                     g.pending_interstitial_blob.clear();
                 }
-                catsync_forget();
-                catsync_publish("house day change");
-                send_baseline(kNoPeer);
             }
         }
         if (g.need_ret_publish && has_house && !suspended) {
             if (savefile_publish_active(kNoPeer, /*fresh=*/true, /*flush_adventure=*/false)) {
                 g.need_ret_publish = false;
-                catsync_forget();
-                catsync_publish("return to house");
-                send_baseline(kNoPeer);
+                send_baseline(kNoPeer, true, true);
+                g.returning_first_poses.clear();
+                g.return_first_tick = 0;
             }
+        }
+        if (g.need_roster_publish && g.phase == HostPhase::House && has_house && !suspended &&
+            savefile_publish_active(kNoPeer, /*fresh=*/true, /*flush_adventure=*/false)) {
+            g.need_roster_publish = false;
+            send_baseline(kNoPeer, true);
         }
         if (g.need_prep_publish) {
             if (savefile_publish_active(kNoPeer, /*fresh=*/true, /*flush_adventure=*/false)) {
@@ -1419,11 +1964,34 @@ void house_pump() {
                 host_poll_prep_state();
             }
         }
-        if (g.need_adv_publish) {
-            if (savefile_publish_active(kNoPeer, /*fresh=*/true, /*flush_adventure=*/true)) {
+        bool map_suspended = false;
+        if (g.need_adv_publish && follow_on_map() && follow_node_count() > 0 &&
+            leave_find_scene("Map", nullptr, &map_suspended) && !map_suspended) {
+            if (savefile_publish_active(kNoPeer, /*fresh=*/true, /*flush_adventure=*/false)) {
                 g.need_adv_publish = false;
                 HousePhaseMsg pm{ g.generation, (uint8_t)HostPhase::Adventure, 0 };
                 net_send_house_phase(pm);
+                uint8_t ids[kMaxPeers]{};
+                if (net_peer_ids(ids, kMaxPeers)) {
+                    const uint64_t deadline = GetTickCount64() + tune::kHouseMapReadyMs;
+                    for (uint8_t i = 0; i < net_peer_count(); ++i) {
+                        const uint8_t peer = ids[i];
+                        if (peer == kHostPeer || peer >= kMaxPeers) continue;
+                        g.peer_needs_checkpoint[peer] = false;
+                        g.peer_map_deadline[peer] = deadline;
+                    }
+                }
+            }
+        }
+        if (!g.need_adv_publish) {
+            for (uint8_t peer = 1; peer < kMaxPeers; ++peer) {
+                if (g.peer_needs_checkpoint[peer]) house_catchup(peer);
+                if (g.waiting_first_node && !g.peer_map_ready[peer] &&
+                    g.peer_map_deadline[peer] && GetTickCount64() >= g.peer_map_deadline[peer]) {
+                    g.peer_map_deadline[peer] = 0;
+                    log_line("HOUSE", "peer %u timed out loading the map; it can reconnect", peer);
+                    net_disconnect_peer(peer);
+                }
             }
         }
 
@@ -1450,7 +2018,7 @@ void house_pump() {
             bool hs_susp = false;
             const void* cc = nullptr;
             bool cc_susp = false;
-            if (!leave_find_scene("SaveSelection", &ss, &ss_susp) &&
+            if (!leave_find_scene(kScene_SaveSelect, &ss, &ss_susp) &&
                 leave_find_scene(kScene_House, &hs, &hs_susp) && hs &&
                 !leave_find_scene("ClassChooser", &cc, &cc_susp)) {
                 void* client_md = nullptr;
@@ -1534,17 +2102,16 @@ void house_pump() {
             }
         }
 
-        // Client: reload mgmp_coop.sav in-place when a fresh House/Prep/Adventure
+        // Client: reload the mirror in-place when a fresh House/Prep/Adventure
         // save arrives while in House or any Prep scene.
         if (g.reload_stage == 0 && savefile_has_pending()) {
             const void* ss = nullptr;
             bool ss_susp = false;
-            if (!leave_find_scene("SaveSelection", &ss, &ss_susp)) {
-                static const char* const kReloadable[] = {
-                    kScene_House, "ClassChooser", "StorageItems", "ActSelection"
-                };
+            if (!leave_find_scene(kScene_SaveSelect, &ss, &ss_susp)) {
                 bool in_reloadable = false;
-                for (const char* sname : kReloadable) {
+                for (const char* sname : HouseState::reload_scenes) {
+                    if (g.phase == HostPhase::Adventure && strcmp(sname, "Map") == 0)
+                        continue;
                     const void* sc = nullptr;
                     bool susp = false;
                     if (leave_find_scene(sname, &sc, &susp) && sc) {
@@ -1561,10 +2128,7 @@ void house_pump() {
                         mem_read((const uint8_t*)old_md + kComp_Director, &dir, sizeof(dir));
                         if (dir) {
                             g.cached_director = dir;
-                            static const char* const kTearDown[] = {
-                                kScene_House, "ClassChooser", "StorageItems", "ActSelection", "Map"
-                            };
-                            for (const char* sname : kTearDown) {
+                            for (const char* sname : HouseState::reload_scenes) {
                                 const void* sc = nullptr;
                                 bool susp = false;
                                 if (leave_find_scene(sname, &sc, &susp) && sc)
@@ -1572,7 +2136,6 @@ void house_pump() {
                             }
                             g.comp_destroy(old_md);
                             g.cat_actors.clear();
-                            g.client_tracks.clear();
                             g.current_house = nullptr;
                             g.current_scene = nullptr;
                             g.current_click_mgr = nullptr;
@@ -1584,17 +2147,19 @@ void house_pump() {
                 }
             }
         } else if (g.reload_stage == 1) {
-            if (savefile_write_pending_coop() && g.cached_director &&
-                g.create_entity && g.create_mew_dir && g.continue_save) {
+            for (const char* name : HouseState::reload_scenes)
+                if (leave_scene_attached(name)) return;
+            if (g.cached_director && g.create_entity && g.create_mew_dir && g.continue_save) {
                 void* shared = nullptr;
                 mem_read((const uint8_t*)g.cached_director + kDirector_Shared, &shared, sizeof(shared));
-                if (shared && !*(uint8_t*)((uintptr_t)shared + kScene_DoingDestruction)) {
+                if (shared && !*(uint8_t*)((uintptr_t)shared + kScene_DoingDestruction) &&
+                    savefile_write_pending_coop()) {
                     void* ent = g.create_entity(shared);
                     uint8_t s_name[32];
                     memset(s_name, 0, sizeof(s_name));
-                    const char* kName = "mgmp_coop.sav";
-                    uint64_t len = 13, cap = 15;
-                    memcpy(s_name, kName, len + 1);
+                    const char* name = savefile_coop_name();
+                    const uint64_t len = strlen(name), cap = 15;
+                    memcpy(s_name, name, len + 1);
                     memcpy(s_name + 16, &len, 8);
                     memcpy(s_name + 24, &cap, 8);
                     void* new_md = g.create_mew_dir(shared, ent, s_name);
@@ -1603,37 +2168,27 @@ void house_pump() {
                     log_line("HOUSE", "House checkpoint reloaded via MewDirector::ContinueSave");
                 }
             }
-            return;
+            if (g.reload_stage != 0) return;
         }
 
         // Client: once the new House scene is loaded, kick off any queued
-        // night/breeding interstitials for this generation.
+        // night/breeding interstitials for this generation before House ticks.
         if (g.has_queued_interstitial && g.queued_interstitial_gen == g.client_gen &&
             g.reload_stage == 0 && !savefile_has_pending()) {
             const void* hs = nullptr;
             bool hs_susp = false;
             if (leave_find_scene(kScene_House, &hs, &hs_susp) && hs) {
                 *(uint8_t*)((uintptr_t)hs + kScene_Suspended) = 1;
-                deserialize_and_run_interstitials(g.queued_interstitial_blob.data(),
-                                                  (uint32_t)g.queued_interstitial_blob.size());
+                if (!deserialize_and_run_interstitials(g.queued_interstitial_blob.data(),
+                                                       (uint32_t)g.queued_interstitial_blob.size(),
+                                                       hs)) {
+                    *(uint8_t*)((uintptr_t)hs + kScene_Suspended) = 0;
+                }
                 g.has_queued_interstitial = false;
                 g.queued_interstitial_blob.clear();
             }
         }
 
-        // Client: notify host once Map scene is loaded after Prep -> Adventure.
-        if (g.phase == HostPhase::Adventure) {
-            const void* mscene = nullptr;
-            bool msusp = false;
-            if (leave_find_scene("Map", &mscene, &msusp) && !msusp) {
-                static uint32_t s_sent_ready_gen = 0;
-                if (s_sent_ready_gen != g.client_gen) {
-                    s_sent_ready_gen = g.client_gen;
-                    HousePhaseMsg pm{ g.client_gen, (uint8_t)HostPhase::Adventure, 1 };
-                    net_send_house_phase(pm);
-                }
-            }
-        }
         client_interpolate_cats();
         send_cursor_sample();
     }
@@ -1641,16 +2196,49 @@ void house_pump() {
 
 bool house_catchup(uint8_t peer) {
     if (!g.on || g.is_client) return false;
-    if (g.phase != HostPhase::House && g.phase != HostPhase::Prep) return false;
+    if (peer == kHostPeer || peer >= kMaxPeers) return false;
+    if (g.phase == HostPhase::Outside) {
+        const void* scene = nullptr;
+        bool suspended = false;
+        if (leave_find_scene("ActSelection", &scene, &suspended))
+            g.prep_stage = PrepStage::ActSelection;
+        else if (leave_find_scene("StorageItems", &scene, &suspended))
+            g.prep_stage = PrepStage::StorageItems;
+        else if (leave_find_scene("ClassChooser", &scene, &suspended))
+            g.prep_stage = PrepStage::ClassChooser;
+        if (g.prep_stage != PrepStage::None) {
+            g.phase = HostPhase::Prep;
+            if (g.generation == 0) g.generation = 1;
+            host_poll_prep_state();
+        } else if (leave_find_scene(kScene_House, &scene, &suspended) && !suspended) {
+            g.phase = HostPhase::House;
+            if (g.generation == 0) g.generation = 1;
+        }
+    }
 
-    if (!savefile_publish_active(peer, /*fresh=*/false, /*flush_adventure=*/false))
-        log_line_lvl(LogLevel::Warn, "HOUSE",
-                     "!! could not publish active House save to peer %u (tx in flight?)",
-                     (unsigned)peer);
+    const bool starting = g.phase == HostPhase::Adventure && g.waiting_first_node;
+    if (!starting && g.phase != HostPhase::House && g.phase != HostPhase::Prep) {
+        g.peer_needs_checkpoint[peer] = false;
+        return false;
+    }
+    g.peer_map_ready[peer] = false;
+    g.peer_needs_checkpoint[peer] = true;
+    if (starting && !g.peer_map_deadline[peer])
+        g.peer_map_deadline[peer] = GetTickCount64() + tune::kHouseMapReadyMs;
+    if ((starting && g.need_adv_publish) || g.in_pass_day || g.need_day_publish ||
+        g.in_return || g.need_ret_publish)
+        return true;
+    if (!savefile_publish_active(peer, /*fresh=*/true, /*flush_adventure=*/false))
+        return true;
+    g.peer_needs_checkpoint[peer] = false;
 
-    catsync_forget();
-    catsync_publish("house join catchup");
-    send_baseline(peer);
+    if (starting) {
+        HousePhaseMsg pm{ g.generation, (uint8_t)HostPhase::Adventure, 0 };
+        net_send_house_phase_to(peer, pm);
+        g.peer_map_deadline[peer] = GetTickCount64() + tune::kHouseMapReadyMs;
+        return true;
+    }
+    send_baseline(peer, true);
     if (g.phase == HostPhase::Prep) {
         HousePhaseMsg pm{ g.generation, (uint8_t)HostPhase::Prep, 0 };
         net_send_house_phase_to(peer, pm);
@@ -1664,6 +2252,8 @@ void house_on_peer_disconnect(uint8_t peer) {
     if (peer < kMaxPeers) {
         g.peer_cursors[peer].valid = false;
         g.peer_map_ready[peer]     = false;
+        g.peer_needs_checkpoint[peer] = false;
+        g.peer_map_deadline[peer] = 0;
     }
     if (g.is_client) return;
     std::vector<int64_t> to_release;
@@ -1686,32 +2276,70 @@ void house_on_message(uint8_t from, const NetMsg& m) {
 
     switch (m.type) {
         case MSG_HOUSE_BASELINE: {
-            if (!g.is_client) break;
+            if (!g.is_client || from != kHostPeer) break;
             const auto& b = m.house_baseline;
+            if (!b.generation || b.generation < g.client_gen ||
+                b.phase > static_cast<uint8_t>(HostPhase::Adventure) ||
+                (b.generation == g.client_gen &&
+                 (b.roster_rev < g.client_roster_rev ||
+                  (g.phase == HostPhase::Adventure &&
+                   b.phase == static_cast<uint8_t>(HostPhase::House)))))
+                break;
             if (b.generation != g.client_gen) {
                 g.client_gen = b.generation;
                 clear_generation_state();
             }
-            g.phase = (HostPhase)b.phase;
+            const auto phase = static_cast<HostPhase>(b.phase);
+            if (g.phase == HostPhase::Adventure && phase == HostPhase::House) {
+                follow_forget();
+                lockstep_leave_run();
+            }
+            g.phase = phase;
+            g.client_roster_rev = b.roster_rev;
             g.queued_baseline_cats.clear();
             for (uint16_t i = 0; i < b.count; ++i)
                 g.queued_baseline_cats.push_back(b.cats[i]);
             g.queued_baseline_gen = b.generation;
+            g.queued_baseline_tick = b.host_tick_ms;
+            g.queued_returning = b.returning != 0;
+            observe_pose_clock(b.host_tick_ms, now);
             g.has_queued_baseline = true;
             log_line("HOUSE", "<- BASELINE gen=%u cats=%u phase=%u",
                      b.generation, (unsigned)b.count, (unsigned)b.phase);
             break;
         }
+        case MSG_CATDATA: {
+            const auto& cat = m.catdata;
+            if (!g.is_client || from != kHostPeer || cat.house_generation != g.client_gen ||
+                !cat.id || !cat.data || !cat.size)
+                break;
+            const auto id = static_cast<int64_t>(cat.id);
+            if (g.queued_cat_records.size() >= kMaxHouseCats && !g.queued_cat_records.count(id))
+                break;
+            auto& record = g.queued_cat_records[id];
+            record.hash = cat.hash;
+            record.bytes.assign(cat.data, cat.data + cat.size);
+            break;
+        }
         case MSG_HOUSE_POSE: {
-            if (!g.is_client) break;
+            if (!g.is_client || from != kHostPeer) break;
             const auto& hp = m.house_pose;
-            if (hp.generation != g.client_gen) break;
+            if (hp.generation != g.client_gen || g.phase != HostPhase::House) break;
+            observe_pose_clock(hp.host_tick_ms, now);
             for (uint16_t i = 0; i < hp.count; ++i) {
                 const auto& p = hp.cats[i];
                 auto& tr = g.client_tracks[p.cat_id];
                 if (tr.samples.size() > 16)
                     tr.samples.erase(tr.samples.begin());
-                tr.samples.push_back(InterpSample{ hp.host_tick_ms, now, p });
+                if (!tr.samples.empty()) {
+                    const auto& prev = tr.samples.back().pose;
+                    const float dx = p.x - prev.x;
+                    const float dy = p.y - prev.y;
+                    if (p.capture_id != prev.capture_id || strcmp(p.zone, prev.zone) ||
+                        dx * dx + dy * dy > 9.0f)
+                        tr.samples.clear();
+                }
+                tr.samples.push_back(InterpSample{ hp.host_tick_ms, p });
             }
             break;
         }
@@ -1728,7 +2356,7 @@ void house_on_message(uint8_t from, const NetMsg& m) {
             break;
         }
         case MSG_HOUSE_GRAB_RESP: {
-            if (!g.is_client) break;
+            if (!g.is_client || from != kHostPeer) break;
             const auto& r = m.house_grab_resp;
             if (r.generation != g.client_gen) break;
             auto& tr = g.client_tracks[r.cat_id];
@@ -1745,7 +2373,9 @@ void house_on_message(uint8_t from, const NetMsg& m) {
                         tr.predicted_held = false;
                         HouseDropReqMsg drop{ g.client_gen, r.cat_id, r.capture_id,
                                               g.client_move_seq++,
-                                              tr.pending_release_wx, tr.pending_release_wy };
+                                              tr.pending_release_wx, tr.pending_release_wy,
+                                              static_cast<float>(tr.throw_velocity.x),
+                                              static_cast<float>(tr.throw_velocity.y) };
                         net_send_house_drop_req(drop);
                     } else {
                         g.client_held_cat    = r.cat_id;
@@ -1781,15 +2411,11 @@ void house_on_message(uint8_t from, const NetMsg& m) {
                     break;
                 if (mv.seq <= it->second.last_seq && it->second.last_seq != 0) break;
                 it->second.last_seq = mv.seq;
-                update_capture_velocity(it->second, mv.wx, mv.wy, now);
+                it->second.wx = mv.wx;
+                it->second.wy = mv.wy;
                 auto ait = g.cat_actors.find(mv.cat_id);
-                if (ait != g.cat_actors.end() && ait->second) {
-                    void* tr = nullptr;
-                    if (mem_read((const uint8_t*)ait->second + kHCat_Transform, &tr, sizeof(tr)) && tr) {
-                        Vec3D pos{ (double)mv.wx, (double)mv.wy, 0.0 };
-                        memcpy((uint8_t*)tr + kTransform_Pos, &pos, sizeof(pos));
-                    }
-                }
+                if (ait != g.cat_actors.end() && ait->second)
+                    move_held_cat(ait->second, mv.wx, mv.wy);
             }
             break;
         }
@@ -1799,16 +2425,18 @@ void house_on_message(uint8_t from, const NetMsg& m) {
             if (dr.generation != g.generation) break;
             auto it = g.host_captures.find(dr.cat_id);
             if (it == g.host_captures.end()) break;
-            if (it->second.holder_peer != from || it->second.capture_id != dr.capture_id)
+            if (it->second.holder_peer != from || it->second.capture_id != dr.capture_id ||
+                dr.seq <= it->second.last_seq)
                 break;
-            host_release_capture(dr.cat_id, dr.wx, dr.wy, true);
+            host_release_capture(dr.cat_id, dr.wx, dr.wy, true, {dr.vx, dr.vy});
             break;
         }
         case MSG_HOUSE_DROP_RESP: {
-            if (!g.is_client) break;
+            if (!g.is_client || from != kHostPeer) break;
             const auto& dr = m.house_drop_resp;
             if (dr.generation != g.client_gen) break;
             auto& tr = g.client_tracks[dr.cat_id];
+            if (tr.capture_id && tr.capture_id != dr.capture_id) break;
             tr.holder_peer = kNoPeer;
             tr.capture_id  = 0;
             tr.predicted_held = false;
@@ -1816,18 +2444,8 @@ void house_on_message(uint8_t from, const NetMsg& m) {
                 g.client_held_cat    = 0;
                 g.client_held_cap_id = 0;
             }
-            HouseCatPose p = tr.has_last ? tr.last_applied : HouseCatPose{};
-            p.cat_id = dr.cat_id;
-            p.x      = dr.wx;
-            p.y      = dr.wy;
-            p.z      = 0.0f;
-            strncpy_s(p.zone, dr.zone, _TRUNCATE);
-            auto ait = g.cat_actors.find(dr.cat_id);
-            if (ait != g.cat_actors.end())
-                apply_pose_to_client_actor(ait->second, p, true);
+            // The next pose carries the resolved layer, visibility and room.
             tr.samples.clear();
-            tr.last_applied = p;
-            tr.has_last     = true;
             break;
         }
         case MSG_HOUSE_CURSOR: {
@@ -1836,6 +2454,9 @@ void house_on_message(uint8_t from, const NetMsg& m) {
             uint32_t expected_gen = g.is_client ? g.client_gen : g.generation;
             if (c.generation != expected_gen) break;
             auto& pc = g.peer_cursors[from];
+            pc.prev_wx = pc.valid && pc.gen == c.generation ? pc.wx : c.wx;
+            pc.prev_wy = pc.valid && pc.gen == c.generation ? pc.wy : c.wy;
+            pc.prev_ms = pc.valid && pc.gen == c.generation ? pc.recv_ms : now;
             pc.valid   = (c.in_house != 0);
             pc.gen     = c.generation;
             pc.wx      = c.wx;
@@ -1847,10 +2468,12 @@ void house_on_message(uint8_t from, const NetMsg& m) {
             break;
         }
         case MSG_HOUSE_PREP: {
-            if (!g.is_client) break;
+            if (!g.is_client || from != kHostPeer || m.house_prep.generation != g.client_gen)
+                break;
             g.last_prep = m.house_prep;
             g.have_prep = (m.house_prep.active != 0);
-            if (m.house_prep.active && m.house_prep.stage == (uint8_t)PrepStage::ClassChooser) {
+            if (m.house_prep.active && m.house_prep.map_name[0] &&
+                m.house_prep.stage == (uint8_t)PrepStage::ClassChooser) {
                 g.pending_class_chooser     = m.house_prep;
                 g.pending_class_chooser_gen = m.house_prep.generation;
                 g.has_pending_class_chooser = true;
@@ -1860,11 +2483,17 @@ void house_on_message(uint8_t from, const NetMsg& m) {
         case MSG_HOUSE_PHASE: {
             const auto& pm = m.house_phase;
             if (!g.is_client) {
-                if (pm.phase == (uint8_t)HostPhase::Adventure && (pm.flags & 1) && from < kMaxPeers) {
+                if (g.waiting_first_node && pm.generation == g.generation &&
+                    pm.phase == (uint8_t)HostPhase::Adventure && (pm.flags & 1) &&
+                    from > kHostPeer && from < kMaxPeers && !g.peer_needs_checkpoint[from]) {
                     g.peer_map_ready[from] = true;
                     log_line("HOUSE", "peer %u map ready", (unsigned)from);
                 }
-            } else {
+            } else if (from == kHostPeer && pm.generation >= g.client_gen) {
+                if (pm.generation != g.client_gen) {
+                    clear_generation_state();
+                    g.client_gen = pm.generation;
+                }
                 g.phase = (HostPhase)pm.phase;
                 if (g.phase == HostPhase::Prep) {
                     g.client_held_cat    = 0;
@@ -1874,6 +2503,8 @@ void house_on_message(uint8_t from, const NetMsg& m) {
                     // Clear House actor references before adventure transition.
                     g.has_pending_class_chooser = false;
                     g.prep_stage = PrepStage::None;
+                    g.client_map_generation = pm.generation;
+                    g.sent_map_generation = 0;
                     g.cat_actors.clear();
                     g.current_house = nullptr;
                     g.current_scene = nullptr;
@@ -1882,14 +2513,95 @@ void house_on_message(uint8_t from, const NetMsg& m) {
             break;
         }
         case MSG_HOUSE_INTERSTITIALS: {
-            if (!g.is_client) break;
+            if (!g.is_client || from != kHostPeer) break;
             const auto& im = m.house_interstitials;
-            if (im.data && im.size > 0) {
+            if (im.generation == g.client_gen && im.data && im.size > 0) {
                 g.queued_interstitial_blob.assign(im.data, im.data + im.size);
                 g.queued_interstitial_gen = im.generation;
                 g.has_queued_interstitial = true;
                 log_line("HOUSE", "<- INTERSTITIALS gen=%u bytes=%u",
                          im.generation, im.size);
+            }
+            break;
+        }
+        case MSG_HOUSE_POOP_POP: {
+            const auto& pm = m.house_poop_pop;
+            const uint32_t expected_gen = g.is_client ? g.client_gen : g.generation;
+            if (pm.generation == 0 || pm.generation != expected_gen) break;
+            if (g.is_client && from != kHostPeer) break;
+            if (!g.poop_pop_orig) break;
+
+            const void* hs = nullptr;
+            bool hs_susp = false;
+            if (leave_find_scene(kScene_House, &hs, &hs_susp) && hs) {
+                void** pieces = nullptr;
+                uint32_t count = 0;
+                if (get_cached_list(const_cast<void*>(hs), kCompId_FurniturePiece, &pieces, &count) && pieces) {
+                    for (uint32_t i = 0; i < count; ++i) {
+                        void* piece = pieces[i];
+                        if (!piece) continue;
+                        void* entry = nullptr;
+                        int64_t uid = 0;
+                        if (!mem_read((const uint8_t*)piece + kFPiece_Entry, &entry, sizeof(entry)) || !entry)
+                            continue;
+                        if (!mem_read((const uint8_t*)piece + kFPiece_Uid, &uid, sizeof(uid)) || uid != pm.piece_uid)
+                            continue;
+                        auto* scene_current = (void**)addr_of_data(D_SceneCurrent);
+                        void* prev_scene = scene_current ? *scene_current : nullptr;
+                        if (scene_current) *scene_current = const_cast<void*>(hs);
+                        g.applying_remote_poop_pop = true;
+                        g.poop_pop_orig(piece);
+                        g.applying_remote_poop_pop = false;
+                        if (scene_current) *scene_current = prev_scene;
+                        log_line("HOUSE", "<- POOP_POP uid=%lld from peer %u",
+                                 (long long)pm.piece_uid, (unsigned)from);
+                        break;
+                    }
+                }
+            }
+            if (!g.is_client) {
+                // Relay to all clients (originating client already popped it locally, so its lookup is a no-op).
+                net_send_house_poop_pop(pm);
+            }
+            break;
+        }
+        case MSG_HOUSE_FURNITURE: {
+            const auto& fm = m.house_furniture;
+            const uint32_t expected_gen = g.is_client ? g.client_gen : g.generation;
+            if (fm.generation == 0 || fm.generation != expected_gen) break;
+            if (g.is_client && from != kHostPeer) break;
+            if (!fm.data || fm.size < 2) break;
+
+            const void* hs = nullptr;
+            bool hs_susp = false;
+            if (leave_find_scene(kScene_House, &hs, &hs_susp) && hs) {
+                void** hdata = nullptr;
+                uint32_t hcount = 0;
+                if (get_cached_list(const_cast<void*>(hs), kCompId_House, &hdata, &hcount) &&
+                    hcount > 0 && hdata && hdata[0]) {
+                    if (apply_furniture_layout(fm.data, fm.size, const_cast<void*>(hs), hdata[0])) {
+                        log_line("HOUSE", "<- FURNITURE (%u bytes) from peer %u", fm.size, (unsigned)from);
+                        if (!g.is_client) {
+                            // Persist client's layout into host save without triggering a full client reload.
+                            void* md = nullptr;
+                            if (g.autosave_house && g.director_slot &&
+                                mem_read(g.director_slot, &md, sizeof(md)) && md) {
+                                g.suppress_autosave_publish = true;
+                                g.autosave_house(md);
+                                g.suppress_autosave_publish = false;
+                            }
+                            // Relay to any other connected clients (3-4 player sessions).
+                            uint8_t ids[kMaxPeers]{};
+                            if (net_peer_ids(ids, kMaxPeers)) {
+                                for (uint8_t i = 0; i < net_peer_count(); ++i) {
+                                    const uint8_t peer = ids[i];
+                                    if (peer == kHostPeer || peer == from || peer >= kMaxPeers) continue;
+                                    net_send_house_furniture_to(peer, fm);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             break;
         }
@@ -1905,15 +2617,39 @@ bool      house_in_house_or_prep() {
 }
 
 bool house_clients_map_ready() {
-    if (!g.on || g.is_client) return true;
+    if (!g.on || g.is_client || !g.waiting_first_node) return true;
     uint8_t ids[kMaxPeers] = {};
     if (!net_peer_ids(ids, kMaxPeers)) return true;
-    uint8_t n = net_peer_count();
+    const uint8_t n = net_peer_count();
+    if (n <= 1) return true;
+    if (g.need_adv_publish) return false;
     for (uint8_t i = 0; i < n; ++i) {
         if (ids[i] == kHostPeer) continue;
         if (!g.peer_map_ready[ids[i]]) return false;
     }
     return true;
+}
+
+void house_on_map_ready() {
+    if (!g.on || !g.is_client || g.phase != HostPhase::Adventure ||
+        !g.client_map_generation || g.sent_map_generation == g.client_map_generation ||
+        g.reload_stage || savefile_has_pending() || !savefile_adventure_is_loaded())
+        return;
+
+    const void* scene = nullptr;
+    bool suspended = false;
+    if (!leave_find_scene("Map", &scene, &suspended) || suspended) return;
+
+    invsync_apply_pending("adventure map ready");
+    catsync_apply_pending("adventure map ready");
+    runhist_apply_pending("adventure map ready");
+    HousePhaseMsg pm{ g.client_map_generation, (uint8_t)HostPhase::Adventure, 1 };
+    if (net_send_house_phase(pm)) g.sent_map_generation = g.client_map_generation;
+}
+
+void house_on_first_node() {
+    g.waiting_first_node = false;
+    g.need_adv_publish = false;
 }
 
 void house_status(char* out, size_t out_size) {
@@ -1932,16 +2668,51 @@ void house_status(char* out, size_t out_size) {
                 g.stat_grabs_rejected, g.stat_drops);
 }
 
+const HousePrepMsg* house_spectator_prep() {
+    return g.on && g.is_client && g.phase == HostPhase::Prep && g.have_prep ? &g.last_prep : nullptr;
+}
+
 bool house_get_peer_cursor(uint8_t peer, float* out_nx, float* out_ny,
                            uint8_t* out_mode, bool* out_active) {
     if (out_active) *out_active = false;
     if (!g.on || peer >= kMaxPeers) return false;
     if (g.phase != HostPhase::House && g.phase != HostPhase::Prep) return false;
+    if (!live_house_scene_valid()) return false;
     const auto& pc = g.peer_cursors[peer];
     if (!pc.valid) return false;
     if (now_ms() - pc.recv_ms > 2000) return false;
+    const uint32_t span = pc.recv_ms - pc.prev_ms;
+    const uint32_t delay = std::min(span, tune::kHouseInterpDelayMs);
+    const uint32_t target = now_ms() - delay;
+    const int32_t elapsed = static_cast<int32_t>(target - pc.prev_ms);
+    const float alpha = span ? std::clamp(static_cast<float>(elapsed) / span, 0.0f, 1.0f) : 1.0f;
+    float wx = pc.prev_wx + alpha * (pc.wx - pc.prev_wx);
+    float wy = pc.prev_wy + alpha * (pc.wy - pc.prev_wy);
+    if (g.is_client) {
+        for (const auto& item : g.client_tracks) {
+            const auto& track = item.second;
+            if (track.holder_peer == peer && track.capture_id && track.has_last) {
+                const auto actor = g.cat_actors.find(item.first);
+                if (actor != g.cat_actors.end()) {
+                    const auto anchor = cat_drag_anchor(actor->second);
+                    wx = static_cast<float>(track.last_applied.x + anchor.x);
+                    wy = static_cast<float>(track.last_applied.y + anchor.y);
+                }
+                break;
+            }
+        }
+    } else {
+        for (const auto& item : g.host_captures) {
+            const auto& capture = item.second;
+            if (capture.holder_peer == peer) {
+                wx = capture.wx;
+                wy = capture.wy;
+                break;
+            }
+        }
+    }
     float nx = pc.nx, ny = pc.ny;
-    project_world_to_norm(pc.wx, pc.wy, &nx, &ny);
+    project_world_to_norm(wx, wy, &nx, &ny);
     if (out_nx) *out_nx = nx;
     if (out_ny) *out_ny = ny;
     if (out_mode) *out_mode = pc.mode;
@@ -1956,7 +2727,7 @@ bool house_get_peer_cursor(uint8_t peer, float* out_nx, float* out_ny,
 void house_on_house_test_init(void* /*house_test*/, bool /*arg1*/, bool /*arg2*/) {
     if (!g.on) return;
     if (!g.is_client) {
-        if (!g.in_pass_day) {
+        if (!g.in_pass_day && !g.in_return && !g.need_ret_publish) {
             advance_generation("HouseTest::init");
             g.need_baseline = true;
         }
@@ -1965,7 +2736,7 @@ void house_on_house_test_init(void* /*house_test*/, bool /*arg1*/, bool /*arg2*/
         g.cat_actors.clear();
         g.current_house = nullptr;
         g.current_scene = nullptr;
-        g.phase = HostPhase::House;
+        if (g.phase == HostPhase::Outside) g.phase = HostPhase::House;
     }
 }
 
@@ -1976,6 +2747,10 @@ bool is_remote_captured_cat(void* hc) {
         return false;
     auto it = g.host_captures.find(id);
     return it != g.host_captures.end() && it->second.holder_peer != kHostPeer;
+}
+
+bool house_allows_special_placement(void* cat) {
+    return !g.on || (!g.is_client && !is_remote_captured_cat(cat));
 }
 
 void spoof_remote_held_begin(void* hc) {
@@ -2007,14 +2782,9 @@ void house_on_housecat_update_post(void* /*housecat*/) {
     spoof_remote_held_end();
 }
 
-bool house_on_housecat_late_update(void* housecat) {
-    if (!g.on) return true;
-    if (g.is_client && housecat) {
-        // Ensure client never triggers local cat-to-cat swats/overlaps.
-        uint8_t zero = 0;
-        memcpy((uint8_t*)housecat + kHCat_CheckOverlaps, &zero, 1);
-    }
-    return true;
+bool house_on_housecat_late_update(void* /*housecat*/) {
+    // Native late_update re-enables renderer visibility and can trigger swats.
+    return !g.on || !g.is_client;
 }
 
 bool house_on_housecat_physics_update(void* physics) {
@@ -2051,52 +2821,61 @@ bool house_on_click_manager_update(void* click_mgr) {
         return false;
 
     if (g.is_client) {
+        const uint32_t t = now_ms();
+        const bool left_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         // Handle pending release-before-grant if LBUTTON was released while
         // waiting for the host's GRAB_RESP.
-        if (g.client_pending_cat != 0 && (GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0) {
+        if (g.client_pending_cat != 0) {
             auto& tr = g.client_tracks[g.client_pending_cat];
             if (tr.predicted_held) {
-                tr.predicted_held = false;
-                tr.pending_release_before_grant = true;
-                house_mouse_world(&tr.pending_release_wx, &tr.pending_release_wy);
+                sample_client_drag(tr, t);
+                if (!left_down) {
+                    tr.predicted_held = false;
+                    tr.pending_release_before_grant = true;
+                    tr.pending_release_wx = tr.pred_wx;
+                    tr.pending_release_wy = tr.pred_wy;
+                }
             }
         }
         // If client currently has an active granted capture, send coalesced drag moves.
         if (g.client_held_cat != 0 && g.client_held_cap_id != 0) {
-            uint32_t t = now_ms();
-            float wx = 0.0f, wy = 0.0f;
-            if (house_mouse_world(&wx, &wy) && (t - g.client_last_drag_ms >= tune::kHouseCursorMs)) {
+            auto& tr = g.client_tracks[g.client_held_cat];
+            sample_client_drag(tr, t);
+            if (left_down && t - g.client_last_drag_ms >= tune::kHouseCursorMs) {
                 g.client_last_drag_ms = t;
                 HouseDragMoveMsg mv{};
                 mv.generation = g.client_gen;
                 mv.cat_id     = g.client_held_cat;
                 mv.capture_id = g.client_held_cap_id;
                 mv.seq        = g.client_move_seq++;
-                mv.wx         = wx;
-                mv.wy         = wy;
+                mv.wx         = tr.pred_wx;
+                mv.wy         = tr.pred_wy;
                 mv.flip       = 1;
                 net_send_house_drag_move(mv);
             }
-            if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0) {
+            if (!left_down) {
                 HouseDropReqMsg dr{};
                 dr.generation = g.client_gen;
                 dr.cat_id     = g.client_held_cat;
                 dr.capture_id = g.client_held_cap_id;
                 dr.seq        = g.client_move_seq++;
-                dr.wx         = wx;
-                dr.wy         = wy;
+                dr.wx         = tr.pred_wx;
+                dr.wy         = tr.pred_wy;
+                dr.vx         = static_cast<float>(tr.throw_velocity.x);
+                dr.vy         = static_cast<float>(tr.throw_velocity.y);
                 net_send_house_drop_req(dr);
-                auto& tr = g.client_tracks[g.client_held_cat];
                 tr.predicted_held    = false;
                 g.client_held_cat    = 0;
                 g.client_held_cap_id = 0;
             }
         }
     }
+    g.in_native_client_pickup = g.is_client;
     return true;
 }
 
 void house_on_click_manager_update_post(void* click_mgr) {
+    g.in_native_client_pickup = false;
     if (!g.on || !click_mgr || g.phase != HostPhase::House) return;
     void* held = nullptr;
     mem_read((const uint8_t*)click_mgr + kHCatClick_HeldCat, &held, sizeof(held));
@@ -2108,10 +2887,21 @@ void house_on_click_manager_update_post(void* click_mgr) {
                 float wx = 0.0f, wy = 0.0f;
                 house_mouse_world(&wx, &wy);
                 if (!host_try_grant_grab(kHostPeer, id, 0, wx, wy)) {
-                    // Cat is already held by a remote peer: reject host's native grab.
+                    // Undo the native pickup on a cat already controlled by a peer.
+                    auto capture = g.host_captures.find(id);
+                    if (capture != g.host_captures.end()) {
+                        move_held_cat(held, capture->second.wx, capture->second.wy);
+                        const int32_t depth = capture->second.orig_depth + 100000;
+                        memcpy(static_cast<uint8_t*>(held) + kHCat_Depth, &depth, sizeof(depth));
+                    }
                     void* null_ptr = nullptr;
                     memcpy((uint8_t*)click_mgr + kHCatClick_HeldCat, &null_ptr, sizeof(null_ptr));
                 }
+            }
+        } else if (held && g.local_host_held != 0) {
+            auto capture = g.host_captures.find(g.local_host_held);
+            if (capture != g.host_captures.end()) {
+                house_mouse_world(&capture->second.wx, &capture->second.wy);
             }
         } else if (!held && g.local_host_held != 0) {
             float wx = 0.0f, wy = 0.0f;
@@ -2139,6 +2929,8 @@ void house_on_click_manager_update_post(void* click_mgr) {
                     tr.pending_release_before_grant = false;
                     tr.pred_wx                      = wx;
                     tr.pred_wy                      = wy;
+                    tr.throw_velocity               = {};
+                    tr.last_motion_ms               = now_ms();
                     g.client_pending_cat            = id;
                     g.client_pending_req            = req_seq;
 
@@ -2166,12 +2958,60 @@ bool house_on_click_manager_drop(void* click_mgr) {
         }
         return false;
     }
-    if (g.local_host_held != 0) {
-        float wx = 0.0f, wy = 0.0f;
-        house_mouse_world(&wx, &wy);
-        host_release_capture(g.local_host_held, wx, wy, false);
-    }
     return true;
+}
+
+void house_on_click_manager_drop_post() {
+    if (g.on && !g.is_client && g.local_host_held != 0)
+        host_release_capture(g.local_host_held, 0.0f, 0.0f, false);
+}
+
+bool house_on_room_remove(void* area, void* cat) {
+    if (!g.on || !g.is_client || !g.in_native_client_pickup) return true;
+    if (area && cat) remove_client_room_member(area, cat);
+    return false;
+}
+
+bool house_allows_local_mutations() {
+    return !g.on || !g.is_client;
+}
+
+void house_on_layout_saved_pre() {
+    if (g.on && !g.is_client && g.phase == HostPhase::House)
+        g.suppress_autosave_publish = true;
+}
+
+void house_on_layout_saved() {
+    g.suppress_autosave_publish = false;
+    if (!g.on || net_peer_count() == 0) return;
+    const uint32_t gen = g.is_client ? g.client_gen : g.generation;
+    if (gen == 0) return;
+
+    std::vector<uint8_t> blob;
+    if (serialize_furniture_layout(blob) && !blob.empty()) {
+        HouseFurnitureMsg msg{};
+        msg.generation = gen;
+        msg.size       = (uint32_t)blob.size();
+        msg.data       = blob.data();
+        net_send_house_furniture(msg);
+        log_line("HOUSE", "-> FURNITURE gen=%u (%u bytes)", gen, msg.size);
+    } else if (!g.is_client && g.phase == HostPhase::House) {
+        g.need_roster_publish = true;
+    }
+}
+
+void house_set_autosave_orig(void* fn) {
+    g.autosave_house = (FnVoidPtr)fn;
+}
+
+void house_on_autosave_house() {
+    if (!g.on || g.is_client) return;
+    if (g.phase != HostPhase::House) return;
+    if (g.in_pass_day || g.in_return || g.suppress_autosave_publish ||
+        g.need_day_publish || g.need_ret_publish || g.need_adv_publish || g.need_prep_publish)
+        return;
+    g.need_roster_publish = true;
+    log_line("HOUSE", "host AutoSaveHouse -> scheduling checkpoint publish");
 }
 
 void house_on_pass_day_cb_pre() {
@@ -2212,25 +3052,41 @@ void house_on_start_adventure_cb_post() {
     g.prep_stage       = PrepStage::None;
     g.need_prep_publish = false;
     memset(g.peer_map_ready, 0, sizeof(g.peer_map_ready));
+    memset(g.peer_map_deadline, 0, sizeof(g.peer_map_deadline));
+    if (g.generation == 0) g.generation = 1;
+    g.waiting_first_node = true;
     g.need_adv_publish = true;
     log_line("HOUSE", "host started adventure -- publishing map checkpoint");
 }
 
 void house_on_return_house_pre(bool success) {
     if (!g.on || g.is_client) return;
+    g.in_return = true;
     advance_generation(success ? "ReturnToHouseSuccess" : "ReturnToHouseFail");
     g.phase = HostPhase::House;
+    g.waiting_first_node = false;
+    g.need_adv_publish = false;
+    g.need_prep_publish = false;
     // Reset per-run follow state so the next adventure starts clean.
     follow_forget();
+    lockstep_leave_run();
 }
 
 void house_on_return_house_post(bool /*success*/) {
     if (!g.on || g.is_client) return;
+    g.in_return = false;
     g.need_ret_publish = true;
 }
 
 void house_on_return_cat_from_adv(void* /*house*/, int64_t cat_id) {
     if (!g.on || g.is_client) return;
+    rebuild_actor_map();
+    const auto found = g.cat_actors.find(cat_id);
+    HouseCatPose pose{};
+    if (found != g.cat_actors.end() && read_housecat_pose(found->second, pose)) {
+        if (!g.return_first_tick) g.return_first_tick = now_ms();
+        g.returning_first_poses.emplace(cat_id, pose);
+    }
     log_line("HOUSE", "returning cat %lld spawned in House", (long long)cat_id);
 }
 
@@ -2252,6 +3108,35 @@ void house_on_do_interstitials(void* queue) {
 
 void house_set_go_on_adventure_orig(void* fn) {
     g.go_on_adv = (FnGoOnAdventure)fn;
+}
+
+void house_set_poop_pop_orig(void* fn) {
+    g.poop_pop_orig = (FnVoidPtr)fn;
+}
+
+void house_on_poop_pop(void* piece) {
+    if (!g.poop_pop_orig) return;
+    if (!g.on || g.applying_remote_poop_pop || !piece) {
+        g.poop_pop_orig(piece);
+        return;
+    }
+    void* entry_before = nullptr;
+    int64_t uid = 0;
+    mem_read((const uint8_t*)piece + kFPiece_Entry, &entry_before, sizeof(entry_before));
+    mem_read((const uint8_t*)piece + kFPiece_Uid, &uid, sizeof(uid));
+
+    g.poop_pop_orig(piece);
+
+    void* entry_after = nullptr;
+    mem_read((const uint8_t*)piece + kFPiece_Entry, &entry_after, sizeof(entry_after));
+    const uint32_t gen = g.is_client ? g.client_gen : g.generation;
+    if (entry_before && !entry_after && gen > 0 && net_peer_count() > 0) {
+        HousePoopPopMsg msg{};
+        msg.generation = gen;
+        msg.piece_uid  = uid;
+        net_send_house_poop_pop(msg);
+        log_line("HOUSE", "-> POOP_POP gen=%u uid=%lld", gen, (long long)uid);
+    }
 }
 
 void house_on_go_on_adventure_pre(void* /*md*/, void* map_str, void* collars_vec, void* cat_ids_buf) {

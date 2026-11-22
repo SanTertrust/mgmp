@@ -145,13 +145,13 @@ bool frame_is_ours(void* addr) {
     return mod != nullptr && (uintptr_t)mod == g.self_base;
 }
 
-void dump_record(const char* why, const Record& r) {
+void dump_record(const char* why, const Record& r, const char* category = "CRASH") {
     char at[128];
     describe(r.addr, at, sizeof(at));
     if (r.type[0])
-        log_line("CRASH", "%s code %08lX '%s' at %s", why, r.code, r.type, at);
+        log_line(category, "%s code %08lX '%s' at %s", why, r.code, r.type, at);
     else
-        log_line("CRASH", "%s code %08lX at %s", why, r.code, at);
+        log_line(category, "%s code %08lX at %s", why, r.code, at);
 
     bool ours = false;
     for (USHORT i = 0; i < r.frame_count; ++i) {
@@ -159,10 +159,10 @@ void dump_record(const char* why, const Record& r) {
         describe(r.frames[i], f, sizeof(f));
         bool mine = frame_is_ours(r.frames[i]);
         if (mine) ours = true;
-        log_line("CRASH", "    #%-2u %s%s", (unsigned)i, f, mine ? "   <-- mgmp" : "");
+        log_line(category, "    #%-2u %s%s", (unsigned)i, f, mine ? "   <-- mgmp" : "");
     }
     if (r.frame_count)
-        log_line("CRASH", "  %s", ours
+        log_line(category, "  %s", ours
                  ? "mgmp.dll IS on this stack -- the mod is in the failing path"
                  : "no mgmp.dll frame on this stack");
 }
@@ -211,9 +211,9 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* ep) {
     } else {
         LONG n = InterlockedIncrement(&g.throws_logged);
         if (n <= kThrowsToLog) {
-            dump_record("first-chance throw", r);
+            dump_record("first-chance throw", r, "EXCEPT");
             if (n == kThrowsToLog)
-                log_line("CRASH", "  (throw log capped at %ld -- later ones are still"
+                log_line("EXCEPT", "  (throw log capped at %ld -- later ones are still"
                                   " ringed and dumped if the process dies)", kThrowsToLog);
         }
     }

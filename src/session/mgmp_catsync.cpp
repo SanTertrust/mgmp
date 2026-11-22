@@ -327,6 +327,25 @@ void catsync_publish(const char* why) {
 
 // --- applying, and holding until it is safe to apply ------------------------
 
+bool catsync_pack_cat(void* cat, CatDataMsg& m) {
+    m.size = serialize_cat(cat, &m.data);
+    if (!m.size) return false;
+    m.hash = fnv1a(m.data, m.size);
+    return true;
+}
+
+bool catsync_unpack_cat(void* cat, const CatDataMsg& m) {
+    if (!cat || !m.data || !m.size || fnv1a(m.data, m.size) != m.hash) return false;
+
+    uint8_t bs[kByteStreamSize];
+    if (!bs_construct(bs)) return false;
+    *(const void**)(bs + kBS_ReadBuf) = m.data;
+    *(uint32_t*)(bs + kBS_ReadLen) = m.size;
+    const bool ok = safe_serialize(cat, bs);
+    safe_bs_dtor(bs);
+    return ok;
+}
+
 static void apply_now(const CatDataMsg& m, const char* when) {
     if (fnv1a(m.data, m.size) != m.hash) {
         log_line("CATSYNC", "!! cat %016llx failed its hash -- not applied",
@@ -349,19 +368,7 @@ static void apply_now(const CatDataMsg& m, const char* when) {
         return;
     }
 
-    uint8_t bs[kByteStreamSize];
-    if (!bs_construct(bs)) return;
-
-    *(uint32_t*)(bs + kBS_Mode)    = 0;              // read
-    *(const void**)(bs + kBS_ReadBuf) = m.data;      // BORROWED, see kBS_ReadOwns
-    *(uint8_t*)(bs + kBS_ReadOwns) = 0;              // ...so the game must not free it
-    *(uint32_t*)(bs + kBS_ReadLen) = m.size;
-    *(uint32_t*)(bs + kBS_ReadPos) = 0;
-
-    bool ok = safe_serialize(cat, bs);
-    safe_bs_dtor(bs);
-
-    if (ok) {
+    if (catsync_unpack_cat(cat, m)) {
         ++g.applied;
         log_line("CATSYNC", "<- applied cat %016llx (%u bytes, %s)",
                  (unsigned long long)m.id, m.size, when);

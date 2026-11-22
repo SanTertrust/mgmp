@@ -90,6 +90,7 @@ uint64_t lockstep_battle_id();
 // identity without any negotiation -- both peers pass the same seed because
 // they entered the same node.
 void lockstep_enter_battle(uint64_t seed0);
+void lockstep_leave_run();
 
 // A peer joined or reconnected: replay this battle's decisions to it so it can
 // fast-forward into a fight already under way. To that peer only.

@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 
 using namespace mgmp;
 
@@ -734,7 +735,7 @@ int main() {
         uint8_t buf[2048];
         HouseCatPose poses[2] = {};
         poses[0].cat_id = 42; poses[0].x = 12.5f; poses[0].y = -3.25f; poses[0].z = 0.0f;
-        poses[0].depth = 100; poses[0].flip = -1; poses[0].anim_state = 2;
+        poses[0].depth = 100; poses[0].render_layer = 20; poses[0].flip = -1; poses[0].anim_state = 8;
         strncpy_s(poses[0].anim, "walk", _TRUNCATE);
         strncpy_s(poses[0].substate, "happy", _TRUNCATE);
         strncpy_s(poses[0].zone, "Attic", _TRUNCATE);
@@ -742,26 +743,62 @@ int main() {
 
         poses[1].cat_id = 99; poses[1].x = -4.0f; poses[1].y = 8.0f;
         poses[1].holder_peer = kNoPeer; poses[1].capture_id = 0;
+        poses[1].visible = 0;
 
         HouseBaselineMsg base{};
         base.generation = 3; base.roster_rev = 5; base.host_tick_ms = 123456;
-        base.phase = 1; base.night = 1; base.count = 2; base.cats = poses;
+        base.phase = 1; base.night = 1; base.returning = 1; base.count = 2; base.cats = poses;
         uint32_t n = enc_house_baseline(buf, sizeof(buf), base);
         check(n > 0, "enc_house_baseline");
         Reader r(buf, n); check(r.u8v() == MSG_HOUSE_BASELINE, "baseline tag");
         HouseBaselineMsg out{};
         check(dec_house_baseline(r, out) && r.pos == r.len, "dec_house_baseline");
-        check(out.generation == 3 && out.count == 2 && out.cats != nullptr, "baseline fields");
+        check(out.generation == 3 && out.returning == 1 && out.count == 2 && out.cats != nullptr, "baseline fields");
         check(out.cats[0].cat_id == 42 && out.cats[0].holder_peer == 1 && out.cats[0].capture_id == 7,
               "baseline cat0 capture");
         check(strcmp(out.cats[0].zone, "Attic") == 0 && out.cats[0].flip == -1, "baseline cat0 zone/flip");
+        check(out.cats[0].depth == 100 && out.cats[0].render_layer == 20 &&
+              out.cats[0].anim_state == 8 && out.cats[1].visible == 0, "house render state round-trips");
         free(out.cats);
+
+        uint8_t cat_bytes[] = { 0x10, 0x20, 0x30 };
+        CatDataMsg record{ 42, sizeof(cat_bytes), 0x1234, cat_bytes, 3 };
+        n = enc_catdata(buf, sizeof(buf), record);
+        Reader cat_reader(buf, n);
+        check(cat_reader.u8v() == MSG_CATDATA, "house cat record tag");
+        CatDataMsg decoded{};
+        check(dec_catdata(cat_reader, decoded) && cat_reader.pos == n, "house cat record decode");
+        check(decoded.house_generation == 3 && decoded.id == 42 && decoded.hash == 0x1234 &&
+              decoded.size == sizeof(cat_bytes) && decoded.data != nullptr &&
+              memcmp(decoded.data, cat_bytes, sizeof(cat_bytes)) == 0, "house cat record fields");
+        free(decoded.data);
+
+        record.house_generation = 0;
+        n = enc_catdata(buf, sizeof(buf), record);
+        Reader adventure_cat_reader(buf, n);
+        adventure_cat_reader.u8v();
+        check(dec_catdata(adventure_cat_reader, decoded) && decoded.house_generation == 0,
+              "adventure cat record stays outside House generations");
+        free(decoded.data);
 
         HouseGrabReqMsg greq{ 3, 42, 11, 1.5f, 2.5f };
         n = enc_house_grab_req(buf, sizeof(buf), greq);
         Reader rg(buf, n); check(rg.u8v() == MSG_HOUSE_GRAB_REQ, "grab req tag");
         HouseGrabReqMsg greq2{};
         check(dec_house_grab_req(rg, greq2) && greq2.cat_id == 42 && greq2.req_seq == 11, "dec_house_grab_req");
+
+        HouseDropReqMsg throw_req{3, 42, 7, 19, 1.5f, 2.5f, -12.0f, 7.0f};
+        n = enc_house_drop_req(buf, sizeof(buf), throw_req);
+        Reader release(buf, n);
+        check(release.u8v() == MSG_HOUSE_DROP_REQ, "drop req tag");
+        HouseDropReqMsg decoded_throw{};
+        check(dec_house_drop_req(release, decoded_throw) && release.pos == n &&
+              decoded_throw.vx == -12.0f && decoded_throw.vy == 7.0f, "throw velocity round-trips");
+        throw_req.vy = std::numeric_limits<float>::infinity();
+        n = enc_house_drop_req(buf, sizeof(buf), throw_req);
+        Reader invalid_throw(buf, n);
+        invalid_throw.u8v();
+        check(!dec_house_drop_req(invalid_throw, decoded_throw), "rejects non-finite throw velocity");
 
         HouseDropRespMsg dresp{ 3, 42, 7, 1, 10.0f, 20.0f, "Kitchen", 1 };
         n = enc_house_drop_resp(buf, sizeof(buf), dresp);
@@ -780,16 +817,35 @@ int main() {
         prep.generation = 3; prep.active = 1; prep.count = 1;
         prep.cats[0].cat_id = 42;
         strncpy_s(prep.cats[0].cat_class, "Hunter", _TRUNCATE);
+        memset(prep.cats[0].eq_summary, 'A', sizeof(prep.cats[0].eq_summary) - 1);
         n = enc_house_prep(buf, sizeof(buf), prep);
         Reader rp(buf, n); check(rp.u8v() == MSG_HOUSE_PREP, "house prep tag");
         HousePrepMsg prep2{};
         check(dec_house_prep(rp, prep2) && strcmp(prep2.cats[0].cat_class, "Hunter") == 0, "dec_house_prep");
+        check(strcmp(prep2.cats[0].eq_summary, prep.cats[0].eq_summary) == 0, "prep equipment summary");
 
         HousePhaseMsg ph{ 3, 2, 1 };
         n = enc_house_phase(buf, sizeof(buf), ph);
         Reader rph(buf, n); check(rph.u8v() == MSG_HOUSE_PHASE, "house phase tag");
         HousePhaseMsg ph2{};
         check(dec_house_phase(rph, ph2) && ph2.phase == 2 && ph2.flags == 1, "dec_house_phase");
+
+        HousePoopPopMsg pp{ 4, 0x123456789ABCDEF0LL };
+        n = enc_house_poop_pop(buf, sizeof(buf), pp);
+        Reader rpp(buf, n); check(rpp.u8v() == MSG_HOUSE_POOP_POP, "house poop pop tag");
+        HousePoopPopMsg pp2{};
+        check(dec_house_poop_pop(rpp, pp2) && pp2.generation == 4 && pp2.piece_uid == pp.piece_uid,
+              "dec_house_poop_pop");
+
+        uint8_t fblob[16] = { 1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+        HouseFurnitureMsg hf{ 5, sizeof(fblob), fblob };
+        n = enc_house_furniture(buf, sizeof(buf), hf);
+        Reader rhf(buf, n); check(rhf.u8v() == MSG_HOUSE_FURNITURE, "house furniture tag");
+        HouseFurnitureMsg hf2{};
+        check(dec_house_furniture(rhf, hf2) && hf2.generation == 5 && hf2.size == sizeof(fblob) &&
+              hf2.data && memcmp(hf2.data, fblob, sizeof(fblob)) == 0,
+              "dec_house_furniture");
+        free(hf2.data);
     }
 
     printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED",

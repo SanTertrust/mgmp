@@ -123,6 +123,9 @@ fn_three_ptr  o_SFStoreBlob   = nullptr;
 fn_three_ptr  o_SFLoadBlob    = nullptr;
 
 typedef void  (__fastcall* fn_this_bb)(void* self, bool a1, bool a2);
+typedef bool  (__fastcall* fn_this_cat)(void* self, void* cat);
+fn_this_cat o_HousePipePlace = nullptr;
+fn_this_cat o_ButchBoxPlace  = nullptr;
 typedef void* (__fastcall* fn_this_i64)(void* self, int64_t a1);
 fn_this_bb    o_HouseTestInit      = nullptr;
 fn_this       o_HouseCatUpdate     = nullptr;
@@ -137,6 +140,8 @@ fn_this       o_ReturnHouseSuccess = nullptr;
 fn_this       o_ReturnHouseFail    = nullptr;
 fn_this_i64   o_ReturnCatFromAdv   = nullptr;
 fn_this       o_DoInterstitials    = nullptr;
+fn_this       o_FurniturePoopPop   = nullptr;
+fn_this       o_MewDirAutoSaveHouse = nullptr;
 using fn_go_adv = void(__fastcall*)(void*, void*, void*, void*);
 fn_go_adv     o_GoOnAdventure      = nullptr;
 
@@ -497,6 +502,33 @@ void __fastcall h_HouseCatClickUpd(void* self) {
 void __fastcall h_HouseCatClickDrop(void* self) {
     if (!house_on_click_manager_drop(self)) return;
     o_HouseCatClickDrop(self);
+    house_on_click_manager_drop_post();
+}
+
+fn_this o_HouseLayoutSaved = nullptr;
+fn_this_ptr o_HouseRoomRemove = nullptr;
+fn_this o_HousePassDay = nullptr;
+
+void __fastcall h_HouseLayoutSaved(void* self) {
+    house_on_layout_saved_pre();
+    o_HouseLayoutSaved(self);
+    house_on_layout_saved();
+}
+
+void __fastcall h_HouseRoomRemove(void* self, void* cat) {
+    if (house_on_room_remove(self, cat)) o_HouseRoomRemove(self, cat);
+}
+
+bool __fastcall h_HousePipePlace(void* self, void* cat) {
+    return house_allows_special_placement(cat) && o_HousePipePlace(self, cat);
+}
+
+bool __fastcall h_ButchBoxPlace(void* self, void* cat) {
+    return house_allows_special_placement(cat) && o_ButchBoxPlace(self, cat);
+}
+
+void __fastcall h_HousePassDay(void* self) {
+    if (house_allows_local_mutations()) o_HousePassDay(self);
 }
 
 void __fastcall h_HousePassDayCb(void* self) {
@@ -539,7 +571,17 @@ void __fastcall h_DoInterstitials(void* queue) {
     o_DoInterstitials(queue);
 }
 
+void __fastcall h_FurniturePoopPop(void* piece) {
+    house_on_poop_pop(piece);
+}
+
+void __fastcall h_MewDirAutoSaveHouse(void* self) {
+    o_MewDirAutoSaveHouse(self);
+    house_on_autosave_house();
+}
+
 void __fastcall h_GoOnAdventure(void* self, void* map_str, void* collars_vec, void* cat_ids_buf) {
+    if (!house_allows_local_mutations()) return;
     house_on_go_on_adventure_pre(self, map_str, collars_vec, cat_ids_buf);
     o_GoOnAdventure(self, map_str, collars_vec, cat_ids_buf);
 }
@@ -705,6 +747,13 @@ const Binding kBindings[] = {
     { T_HouseCatPhysUpdate, (void*)&h_HouseCatPhysUpdate, (void**)&o_HouseCatPhysUpdate },
     { T_HouseCatClickUpd,   (void*)&h_HouseCatClickUpd,   (void**)&o_HouseCatClickUpd   },
     { T_HouseCatClickDrop,  (void*)&h_HouseCatClickDrop,  (void**)&o_HouseCatClickDrop  },
+    { T_HouseLayoutSaved,   (void*)&h_HouseLayoutSaved,   (void**)&o_HouseLayoutSaved   },
+    { T_HouseRoomRemove,    (void*)&h_HouseRoomRemove,    (void**)&o_HouseRoomRemove    },
+    { T_HousePipePlace,     (void*)&h_HousePipePlace,     (void**)&o_HousePipePlace     },
+    { T_ButchBoxPlace,      (void*)&h_ButchBoxPlace,      (void**)&o_ButchBoxPlace      },
+    { T_FurniturePoopPop,   (void*)&h_FurniturePoopPop,   (void**)&o_FurniturePoopPop   },
+    { T_MewDirAutoSaveHouse,(void*)&h_MewDirAutoSaveHouse,(void**)&o_MewDirAutoSaveHouse},
+    { T_HousePassDay,       (void*)&h_HousePassDay,       (void**)&o_HousePassDay       },
     { T_HousePassDayCb,     (void*)&h_HousePassDayCb,     (void**)&o_HousePassDayCb     },
     { T_GoOnAdventureCb,    (void*)&h_GoOnAdventureCb,    (void**)&o_GoOnAdventureCb    },
     { T_StartAdventureCb,   (void*)&h_StartAdventureCb,   (void**)&o_StartAdventureCb   },
@@ -825,6 +874,8 @@ int hooks_install() {
         if (install_one(b, /*announce_off=*/true)) ++installed;
     house_set_do_interstitials_orig((void*)o_DoInterstitials);
     house_set_go_on_adventure_orig((void*)o_GoOnAdventure);
+    house_set_poop_pop_orig((void*)o_FurniturePoopPop);
+    house_set_autosave_orig((void*)o_MewDirAutoSaveHouse);
 
     // After every hook is known, not before: a feature that is only safe while
     // another hook runs has to be told, and aim_set_base ran above -- before

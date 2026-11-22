@@ -86,17 +86,16 @@ void savefile_set_base(uintptr_t base);
 // the host has not published yet, or on a client.
 void savefile_catchup(uint8_t peer);
 
-// Publish the host's currently loaded save file (resolved from MewDirector's
-// active MewSaveFile::filename if no SaveSelection click was observed in this
-// session). Returns false if no save is loaded or a SQLite transaction/backup
-// is currently in flight.
+// Publish the host's active MewSaveFile after the current SQLite transaction,
+// backup and WAL checkpoint are complete.
 bool savefile_publish_active(uint8_t peer, bool fresh, bool flush_adventure);
 
 // Whether a fresh save checkpoint is currently queued on this client.
 bool savefile_has_pending();
+const char* savefile_coop_name();
 
-// Write a queued host save checkpoint to mgmp_coop.sav on disk and mark it
-// applied (used by House co-op when reloading in-place without SaveSelection).
+// Write a queued checkpoint to this client's mirror and mark it applied
+// after the scene reload has closed the old file.
 bool savefile_write_pending_coop();
 
 // From h_SaveSlotClick. Returns false if the caller must NOT run the original,

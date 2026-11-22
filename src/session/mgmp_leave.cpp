@@ -344,6 +344,15 @@ void leave_set_base(uintptr_t /*base*/) {
 // which is finer than the thing it describes changes.
 bool leave_in_run() { return g.where == Where::InRun; }
 
+bool leave_scene_attached(const char* name) {
+    ensure_state();
+    SceneList scenes{};
+    if (!name || !read_scenes(scenes)) return false;
+    for (uint32_t i = 0; i < scenes.count; ++i)
+        if (strcmp(scenes.name[i], name) == 0) return true;
+    return false;
+}
+
 bool leave_find_scene(const char* name,
                       const void** out_scene,
                       bool* out_suspended) {

@@ -6,6 +6,7 @@
 #include "mgmp_nodehash.h"
 #include "mgmp_runhist.h"
 #include "mgmp_follow.h"
+#include "mgmp_house.h"
 #include "mgmp_lockstep.h"
 #include "mgmp_net.h"
 #include "mgmp_config.h"
@@ -100,6 +101,8 @@ struct State {
 
     // A jump asked for by the debug panel, applied at the tail of the next
     // MapScreen::update -- the same site the follow path enters nodes from.
+    bool     first_node_pending = false;
+    uint32_t first_node_index = 0;
     bool     jump_pending   = false;
     uint32_t jump_index     = 0;
     uint32_t here_count     = 0;
@@ -277,6 +280,17 @@ bool follow_on_enter_node(void* map_screen, void* node, bool* sent) {
         return false;
     }
 
+    if (!house_clients_map_ready()) {
+        if (known && !g.first_node_pending) {
+            g.first_node_pending = true;
+            g.first_node_index = index;
+            log_line("FOLLOW", "holding first node %u until peers load the map", index);
+        }
+        return false;
+    }
+    house_on_first_node();
+    g.first_node_pending = false;
+
     // --- the host: publish it --------------------------------------------
     if (!known) {
         // Nothing to send that the client could resolve. Do not block the host
@@ -424,6 +438,9 @@ void follow_forget() {
     g.pending_head  = 0;
     g.pending_count = 0;
     g.have_here     = false;
+    g.first_node_pending = false;
+    g.jump_pending  = false;
+    g.map_tick      = 0;
     g.map           = nullptr;
 }
 
@@ -497,14 +514,26 @@ void follow_on_message(const EnterNodeMsg& m) {
 }
 
 void* follow_map_update(void* map_screen) {
-    if (!g.on || !map_screen) return nullptr;
+    if (!map_screen) return nullptr;
 
     Guard guard;
     g.map = map_screen;
 
     // The map is ticking, so the run is BETWEEN nodes. This is the stamp the
     // save flush reads -- see follow_on_map.
-    g.map_tick = GetTickCount64();
+    uint32_t map_count = 0;
+    void* map_nodes = nullptr;
+    if (read_nodes(map_screen, map_count, map_nodes)) {
+        g.map_tick = GetTickCount64();
+        house_on_map_ready();
+        if (g.first_node_pending && house_clients_map_ready()) {
+            g.first_node_pending = false;
+            void* node = node_at(map_screen, g.first_node_index);
+            return node && follow_on_enter_node(map_screen, node, nullptr) ? node : nullptr;
+        }
+    }
+
+    if (!g.on) return nullptr;
 
     // --- a jump asked for by the debug panel --------------------------------
     //

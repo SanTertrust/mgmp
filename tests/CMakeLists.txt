@@ -8,6 +8,13 @@ add_executable(test_proto test_proto.cpp)
 target_include_directories(test_proto PRIVATE ${CMAKE_SOURCE_DIR}/src/net)
 add_test(NAME test_proto COMMAND test_proto)
 
+add_executable(test_house_net test_house_net.cpp ${CMAKE_SOURCE_DIR}/src/net/mgmp_net.cpp)
+target_include_directories(test_house_net PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/net ${CMAKE_SOURCE_DIR}/src/core)
+target_compile_definitions(test_house_net PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(test_house_net PRIVATE ws2_32)
+add_test(NAME test_house_net COMMAND test_house_net)
+
 add_executable(test_hashring test_hashring.cpp)
 target_include_directories(test_hashring PRIVATE ${CMAKE_SOURCE_DIR}/src/net)
 add_test(NAME test_hashring COMMAND test_hashring)
