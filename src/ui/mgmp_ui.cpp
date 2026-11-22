@@ -751,7 +751,8 @@ void ui_on_swap(void* window) {
         }
     }
 
-    if (!g.visible) return;
+    const bool halted = lockstep_halted();
+    if (!g.visible && !halted) return;
 
     if (!g.ready) {
         if (!bring_up()) { g.failed = true; return; }
@@ -766,8 +767,27 @@ void ui_on_swap(void* window) {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    draw_session();
-    draw_log();
+    if (g.visible) {
+        draw_session();
+        draw_log();
+    } else if (halted) {
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                       vp->WorkPos.y + 18.0f),
+                                ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+        ImGui::SetNextWindowBgAlpha(0.85f);
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+                                       ImGuiWindowFlags_AlwaysAutoResize |
+                                       ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoFocusOnAppearing |
+                                       ImGuiWindowFlags_NoNav |
+                                       ImGuiWindowFlags_NoInputs;
+        if (ImGui::Begin("##mgmp_halt_banner", nullptr, flags)) {
+            ImGui::TextColored(level_colour(LogLevel::Error),
+                               "DESYNC HALTED -- peers disagreed and battle was frozen (open mgmp panel for details)");
+        }
+        ImGui::End();
+    }
 
     ImGui::Render();
     // RenderDrawData backs up and restores the GL state it touches, which is

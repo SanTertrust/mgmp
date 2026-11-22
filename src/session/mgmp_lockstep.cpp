@@ -31,6 +31,7 @@
 #include "mgmp_log.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
@@ -124,10 +125,23 @@ constexpr uintptr_t kTC_QueueCount = 0x60;
 // argument to the splash walk.
 constexpr uintptr_t kChar_TObj     = 0x60;
 constexpr uintptr_t kChar_Facing   = 0x388;
-constexpr uintptr_t kChar_HP       = 0x4B0;
-constexpr uintptr_t kChar_Shield   = 0x4B4;
-constexpr uintptr_t kChar_MaxHP    = 0x4BC;
-constexpr uintptr_t kChar_Dead     = 0x4C2;
+constexpr uintptr_t kChar_HP           = 0x4B0;
+constexpr uintptr_t kChar_Shield       = 0x4B4;
+constexpr uintptr_t kChar_DivineShield = 0x4B8;
+constexpr uintptr_t kChar_MaxHP        = 0x4BC;
+constexpr uintptr_t kChar_Dead         = 0x4C2;
+
+constexpr uintptr_t kEntity_Deleted        = 24;
+constexpr uintptr_t kEntity_CompCount      = 36;
+constexpr uintptr_t kEntity_CompData       = 40;
+constexpr uintptr_t kComp_Enabled          = 14;
+constexpr uintptr_t kComp_Destroyed        = 15;
+constexpr uintptr_t kComp_Active           = 16;
+constexpr int32_t   kPassiveTypeId         = 1414;
+constexpr uintptr_t kPassive_Stacks        = 0x5C;
+constexpr uintptr_t kPassive_Data          = 0x68;
+constexpr uintptr_t kPassive_PendingRemoval = 0x75;
+constexpr uintptr_t kGon_Name              = 0x88;
 constexpr uintptr_t kTObj_Tile     = 0x48;
 constexpr uintptr_t kTObj_Owner    = 0x98;
 
@@ -155,13 +169,16 @@ typedef void* (__fastcall *fn_affecting_elements)(const void* chr, uint32_t* out
 // state hash goes from "detects divergence" to "manufactures it".
 #pragma pack(push, 1)
 struct CatState {
-    int32_t hp     = 0, shield = 0, maxhp = 0;
+    int32_t hp     = 0, shield = 0, divine_shield = 0, maxhp = 0;
     int32_t tx     = 0, ty     = 0;
     int32_t fx     = 0, fy     = 0;
     uint32_t e0    = 0, e1     = 0;   // ElementList, or 0/0 if we could not read it
+    uint64_t passive_hash  = 0;       // sorted FNV-1a over active Passive/Status (type, stacks, name)
+    uint16_t passive_count = 0;
     uint8_t dead   = 0;
     uint8_t linked = 0;   // the TacticsObject round trip held for this cat
     uint8_t elems  = 0;   // the ElementList above is real, not a fallback zero
+    uint8_t passives_ok = 0;
     uint8_t in_battle = 1; // still in the live character list; see read_cat_state
     // Whether the fields above were read at all. Only meaningful in the copy
     // build_hash keeps for the desync dump: a row that could not be read is a
@@ -371,6 +388,118 @@ bool read_affecting_elements(const void* chr, uint32_t out[2]) {
     }
 }
 
+// SEH-only helper (no C++ objects with destructors) to query Component::GetObjectHierarchy.
+bool component_passive_type(const void* comp, int32_t& out_type, bool& out_is_passive) {
+    out_type = 0;
+    out_is_passive = false;
+    if (!comp) return false;
+    __try {
+        void* const* vt = *(void* const* const*)comp;
+        if (!vt || !vt[3]) return false;
+        using fn_hier = const void* (__fastcall*)(const void*);
+        const void* hier = ((fn_hier)vt[3])(comp);
+        if (!hier) return false;
+        const uint64_t len = *(const uint64_t*)((const uint8_t*)hier + 64);
+        if (len == 0 || len > 16) return false;
+        const int32_t* ids = (const int32_t*)hier;
+        out_type = ids[0];
+        for (uint64_t k = 0; k < len; ++k) {
+            if (ids[k] == kPassiveTypeId) { out_is_passive = true; break; }
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out_type = 0;
+        out_is_passive = false;
+        return false;
+    }
+}
+
+bool read_gon_name(const void* gon, char* out, size_t cap, size_t& out_len) {
+    out_len = 0;
+    if (!out || cap == 0) return false;
+    out[0] = 0;
+    if (!gon) return false;
+    const uint8_t* str = (const uint8_t*)gon + kGon_Name;
+    uint64_t sz = 0, c = 0;
+    if (!mem_read(str + 16, &sz, sizeof(sz)) || !mem_read(str + 24, &c, sizeof(c)))
+        return false;
+    if (sz > 4096) return false;
+    const void* chars = str;
+    if (c > 15) {
+        if (!mem_read(str, &chars, sizeof(chars)) || !chars) return false;
+    }
+    const size_t copy_len = (sz < cap - 1) ? (size_t)sz : (cap - 1);
+    if (copy_len > 0 && !mem_read(chars, out, copy_len)) { out[0] = 0; return false; }
+    out[copy_len] = 0;
+    out_len = copy_len;
+    return true;
+}
+
+bool read_cat_passives(const void* chr, uint64_t& out_hash, uint16_t& out_count) {
+    out_hash = 0;
+    out_count = 0;
+    if (!chr) return false;
+
+    const void* ent = nullptr;
+    if (!mem_read((const uint8_t*)chr + kComp_Entity, &ent, sizeof(ent)) || !ent)
+        return false;
+    uint8_t deleted = 0;
+    if (!mem_read((const uint8_t*)ent + kEntity_Deleted, &deleted, 1) || deleted)
+        return false;
+
+    uint32_t count = 0;
+    const void* const* comps = nullptr;
+    if (!mem_read((const uint8_t*)ent + kEntity_CompCount, &count, sizeof(count)))
+        return false;
+    if (count > 256) return false;
+    if (count > 0 && (!mem_read((const uint8_t*)ent + kEntity_CompData, &comps, sizeof(comps)) || !comps))
+        return false;
+
+    constexpr uint32_t kMaxHashedPassives = 64;
+    uint64_t hashes[kMaxHashedPassives];
+    uint32_t n = 0;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const void* comp = nullptr;
+        if (!mem_read(comps + i, &comp, sizeof(comp)) || !comp) continue;
+
+        uint8_t flags[3] = {};
+        if (!mem_read((const uint8_t*)comp + kComp_Enabled, flags, 3)) return false;
+        // active != 0 && destroyed == 0 && enabled != 0
+        if (flags[2] == 0 || flags[1] != 0 || flags[0] == 0) continue;
+
+        int32_t type_id = 0;
+        bool is_passive = false;
+        if (!component_passive_type(comp, type_id, is_passive)) return false;
+        if (!is_passive) continue;
+
+        uint8_t pending_removal = 0;
+        if (!mem_read((const uint8_t*)comp + kPassive_PendingRemoval, &pending_removal, 1))
+            return false;
+        if (pending_removal) continue;
+
+        int32_t stacks = 0;
+        if (!mem_read((const uint8_t*)comp + kPassive_Stacks, &stacks, sizeof(stacks)))
+            return false;
+
+        const void* gon = nullptr;
+        mem_read((const uint8_t*)comp + kPassive_Data, &gon, sizeof(gon));
+        char name[64];
+        size_t name_len = 0;
+        read_gon_name(gon, name, sizeof(name), name_len);
+
+        uint64_t h = fnv1a(&type_id, sizeof(type_id));
+        h = fnv1a(&stacks, sizeof(stacks), h);
+        if (name_len > 0) h = fnv1a(name, name_len, h);
+        if (n < kMaxHashedPassives) hashes[n++] = h;
+    }
+
+    if (n > 1) std::sort(hashes, hashes + n);
+    out_hash  = (n > 0) ? fnv1a(hashes, n * sizeof(uint64_t)) : 0;
+    out_count = (uint16_t)n;
+    return true;
+}
+
 // `in_battle` is whether this character is still in the live character list.
 //
 // It gates the one thing here that is a CALL rather than a read. A character
@@ -387,12 +516,13 @@ bool read_cat_state(const void* chr, CatState& out, bool in_battle = true) {
     if (!chr) return false;
 
     const uint8_t* c = (const uint8_t*)chr;
-    bool ok = mem_read(c + kChar_HP,     &out.hp,     sizeof(out.hp))
-           && mem_read(c + kChar_Shield, &out.shield, sizeof(out.shield))
-           && mem_read(c + kChar_MaxHP,  &out.maxhp,  sizeof(out.maxhp))
-           && mem_read(c + kChar_Dead,   &out.dead,   sizeof(out.dead))
-           && mem_read(c + kChar_Facing,     &out.fx, sizeof(out.fx))
-           && mem_read(c + kChar_Facing + 4, &out.fy, sizeof(out.fy));
+    bool ok = mem_read(c + kChar_HP,           &out.hp,            sizeof(out.hp))
+           && mem_read(c + kChar_Shield,       &out.shield,        sizeof(out.shield))
+           && mem_read(c + kChar_DivineShield, &out.divine_shield, sizeof(out.divine_shield))
+           && mem_read(c + kChar_MaxHP,        &out.maxhp,         sizeof(out.maxhp))
+           && mem_read(c + kChar_Dead,         &out.dead,          sizeof(out.dead))
+           && mem_read(c + kChar_Facing,       &out.fx,            sizeof(out.fx))
+           && mem_read(c + kChar_Facing + 4,   &out.fy,            sizeof(out.fy));
     if (!ok) return false;
 
     // The tile lives on the TacticsObject, and we only trust it if the object
@@ -431,6 +561,13 @@ bool read_cat_state(const void* chr, CatState& out, bool in_battle = true) {
         out.e0 = el[0];
         out.e1 = el[1];
         out.elems = 1;
+    }
+    uint64_t ph = 0;
+    uint16_t pc = 0;
+    if (in_battle && !off_board(out) && read_cat_passives(chr, ph, pc)) {
+        out.passive_hash  = ph;
+        out.passive_count = pc;
+        out.passives_ok   = 1;
     }
     return true;
 }
@@ -669,9 +806,10 @@ void trace_state_deltas() {
         int  n = 0;
         what[0] = 0;
 
-        if (now.hp     != was.hp)     appendf(what, sizeof(what), n, "hp %d->%d", was.hp, now.hp);
-        if (now.shield != was.shield) appendf(what, sizeof(what), n, "shield %d->%d", was.shield, now.shield);
-        if (now.maxhp  != was.maxhp)  appendf(what, sizeof(what), n, "maxhp %d->%d", was.maxhp, now.maxhp);
+        if (now.hp            != was.hp)            appendf(what, sizeof(what), n, "hp %d->%d", was.hp, now.hp);
+        if (now.shield        != was.shield)        appendf(what, sizeof(what), n, "shield %d->%d", was.shield, now.shield);
+        if (now.divine_shield != was.divine_shield) appendf(what, sizeof(what), n, "divine %d->%d", was.divine_shield, now.divine_shield);
+        if (now.maxhp         != was.maxhp)         appendf(what, sizeof(what), n, "maxhp %d->%d", was.maxhp, now.maxhp);
         if (now.tx != was.tx || now.ty != was.ty)
             appendf(what, sizeof(what), n, "tile (%d,%d)->(%d,%d)", was.tx, was.ty, now.tx, now.ty);
         if (now.dead   != was.dead)   appendf(what, sizeof(what), n, "dead %u->%u", was.dead, now.dead);
@@ -679,6 +817,12 @@ void trace_state_deltas() {
         if (now.e0 != was.e0 || now.e1 != was.e1)
             appendf(what, sizeof(what), n, "elem %08X:%08X->%08X:%08X", was.e0, was.e1, now.e0, now.e1);
         if (now.elems  != was.elems)  appendf(what, sizeof(what), n, "elem-read %u->%u", was.elems, now.elems);
+        if (now.passive_count != was.passive_count || now.passive_hash != was.passive_hash)
+            appendf(what, sizeof(what), n, "passives %u:%016llX->%u:%016llX",
+                    (unsigned)was.passive_count, (unsigned long long)was.passive_hash,
+                    (unsigned)now.passive_count, (unsigned long long)now.passive_hash);
+        if (now.passives_ok != was.passives_ok)
+            appendf(what, sizeof(what), n, "passive-read %u->%u", was.passives_ok, now.passives_ok);
         if (now.in_battle != was.in_battle)
             appendf(what, sizeof(what), n, "in-battle %u->%u", was.in_battle, now.in_battle);
         // Facing is traced even though the hash does not cover it -- the one
@@ -1445,13 +1589,14 @@ HashMsg build_hash(void* turn_control) {
             // Field by field, skipping fx/fy. Deliberately not a memcpy of a
             // trimmed struct: the next person to add a field should have to
             // decide which side of this line it goes on.
-            sh = fnv1a(&st.hp,     sizeof(st.hp),     sh);
-            sh = fnv1a(&st.shield, sizeof(st.shield), sh);
-            sh = fnv1a(&st.maxhp,  sizeof(st.maxhp),  sh);
-            sh = fnv1a(&st.tx,     sizeof(st.tx),     sh);
-            sh = fnv1a(&st.ty,     sizeof(st.ty),     sh);
-            sh = fnv1a(&st.dead,   sizeof(st.dead),   sh);
-            sh = fnv1a(&st.linked, sizeof(st.linked), sh);
+            sh = fnv1a(&st.hp,            sizeof(st.hp),            sh);
+            sh = fnv1a(&st.shield,        sizeof(st.shield),        sh);
+            sh = fnv1a(&st.divine_shield, sizeof(st.divine_shield), sh);
+            sh = fnv1a(&st.maxhp,         sizeof(st.maxhp),         sh);
+            sh = fnv1a(&st.tx,            sizeof(st.tx),            sh);
+            sh = fnv1a(&st.ty,            sizeof(st.ty),            sh);
+            sh = fnv1a(&st.dead,          sizeof(st.dead),          sh);
+            sh = fnv1a(&st.linked,        sizeof(st.linked),        sh);
             // The elements affecting this cat -- passives, statuses, equipment
             // and, decisively, the TILE it is standing on. Everything else in
             // this hash is a per-character field, so grid state has been
@@ -1462,9 +1607,12 @@ HashMsg build_hash(void* turn_control) {
             //
             // This also drags equipment into the hash for the first time, which
             // is the gap that let a mismatched trinket survive to turn 4.
-            sh = fnv1a(&st.e0,    sizeof(st.e0),    sh);
-            sh = fnv1a(&st.e1,    sizeof(st.e1),    sh);
-            sh = fnv1a(&st.elems, sizeof(st.elems), sh);
+            sh = fnv1a(&st.e0,            sizeof(st.e0),            sh);
+            sh = fnv1a(&st.e1,            sizeof(st.e1),            sh);
+            sh = fnv1a(&st.elems,         sizeof(st.elems),         sh);
+            sh = fnv1a(&st.passive_hash,  sizeof(st.passive_hash),  sh);
+            sh = fnv1a(&st.passive_count, sizeof(st.passive_count), sh);
+            sh = fnv1a(&st.passives_ok,   sizeof(st.passives_ok),   sh);
         }
         h.state_hash = sh;
         g.hashed_count = g.cat_count;
@@ -1588,14 +1736,18 @@ void compare_state_dump(const StateDumpMsg& m) {
         line[0] = 0;
         MGMP_DIFF(" hp %d|%d",        a.hp, b.hp);
         MGMP_DIFF(" shield %d|%d",    a.shield, b.shield);
+        MGMP_DIFF(" divine %d|%d",    a.divine_shield, b.divine_shield);
         MGMP_DIFF(" maxhp %d|%d",     a.maxhp, b.maxhp);
         MGMP_DIFF(" dead %u|%u",      (unsigned)a.dead, (unsigned)b.dead);
         MGMP_DIFF(" elem0 %08X|%08X", a.e0, b.e0);
         MGMP_DIFF(" elem1 %08X|%08X", a.e1, b.e1);
+        MGMP_DIFF(" passives %u|%u",  (unsigned)a.passive_count, (unsigned)b.passive_count);
+        MGMP_DIFF(" phash %016llX|%016llX", (unsigned long long)a.passive_hash, (unsigned long long)b.passive_hash);
         MGMP_DIFF(" in_battle %u|%u", (unsigned)a.in_battle, (unsigned)b.in_battle);
         MGMP_DIFF(" readable %u|%u",  (unsigned)a.readable,  (unsigned)b.readable);
         MGMP_DIFF(" linked %u|%u",    (unsigned)a.linked,    (unsigned)b.linked);
         MGMP_DIFF(" elems %u|%u",     (unsigned)a.elems,     (unsigned)b.elems);
+        MGMP_DIFF(" passives_ok %u|%u", (unsigned)a.passives_ok, (unsigned)b.passives_ok);
         #undef MGMP_DIFF
 
         if ((a.tx != b.tx || a.ty != b.ty) && k < (int)sizeof(line) - 48) {
