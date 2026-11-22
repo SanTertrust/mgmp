@@ -75,9 +75,8 @@ constexpr bool     kNodeHashHalt = false;
 // Include character HP/shield/tile in the per-turn hash. Off leaves the RNG
 // stream and the queue. The hash gates itself on evidence anyway.
 constexpr bool     kStateHash  = true;
-// One line per cat whose state changed, at every turn boundary. This is the
-// only thing that answers "when did the field last move, and by how much",
-// which is the question a two-HP difference actually turns on.
+// Trace changed cat state at hash boundaries and individual damage calls
+// during multiplayer battles.
 constexpr bool     kStateTrace = true;
 
 // --- peer cursors -----------------------------------------------------------

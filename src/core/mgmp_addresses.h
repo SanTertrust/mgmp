@@ -85,6 +85,10 @@ enum Target : int {
     T_ReturnCatFromAdv,  // House::ReturnCatFromAdventure(int64_t)
     T_DoInterstitials,   // glaiel::DoInterstitialsInternal(InterstitialQueue)
     T_GoOnAdventure,     // MewDirector::GoOnAnAdventure(map, collars, cats)
+    T_ReceiveDamage,     // glaiel::Character::ReceiveDamage(const DamageInstance&)
+    T_ReceiveDamagePassives,
+    T_OnElementInfluence,
+    T_IsBackstab,
     T_COUNT
 };
 
@@ -461,6 +465,10 @@ static const TargetDesc kTargets[T_COUNT] = {
     { 0x001E5C10, "RETCAT",      "glaiel::House::ReturnCatFromAdventure" },
     { 0x0020DB30, "INTERSTITIAL","glaiel::DoInterstitialsInternal" },
     { 0x003B13F0, "GOADV_UI",    "glaiel::MewDirector::GoOnAnAdventure(map,collars,cats)" },
+    { 0x00110120, "DAMAGE",      "glaiel::Character::ReceiveDamage" },
+    { 0x0010F010, "DMGPASSIVES", "glaiel::Character::receive_damage_passives" },
+    { 0x0011B4B0, "DMGELEMENT",  "glaiel::Character::OnElementInfluence" },
+    { 0x0011D110, "BACKSTAB",    "glaiel::Character::IsBackstab(iVec2D,iVec2D)" },
 };
 
 // Coarse module guard, checked before the per-target signatures.

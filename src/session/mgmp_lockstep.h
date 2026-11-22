@@ -121,6 +121,18 @@ bool lockstep_peer_owns_character(const void* character);
 
 // --- diagnostics ------------------------------------------------------------
 
+void lockstep_trace_cast_passives(const void* ability, const char* gon_name);
+
+// Trace the incoming damage and the target's health across the original call.
+void lockstep_trace_damage(void* target, const void* damage, uintptr_t caller_rva,
+                           void (__fastcall* receive_damage)(void*, const void*));
+void lockstep_trace_damage_passives(void* target, void* damage, const void* participants,
+                                    bool speculative,
+                                    void (__fastcall* original)(void*, void*, const void*, bool));
+void lockstep_trace_damage_elements(const void* target, const void* elements);
+bool lockstep_trace_backstab(void* target, uint64_t direction, uint64_t tile,
+                             bool (__fastcall* original)(void*, uint64_t, uint64_t));
+
 struct LockstepStats {
     uint32_t sent = 0, applied = 0, pending = 0;
     uint32_t desyncs = 0;

@@ -16,6 +16,7 @@ const char* type_name(uint32_t t) {
     case TA_None:    return "none";
     case TA_Ability: return "ability";
     case TA_EndTurn: return "endturn";
+    case TA_Reactions: return "reactions";
     case TA_Invoke:  return "invoke";
     default:         return "?";
     }

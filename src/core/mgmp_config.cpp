@@ -162,6 +162,10 @@ void hook_defaults() {
     // Hot path, and its only remaining job is pumping the socket -- forced on
     // below by net.role and by the panel.
     g_cfg.hook[T_FrameBegin] = false;
+    g_cfg.hook[T_ReceiveDamage] = false;
+    g_cfg.hook[T_ReceiveDamagePassives] = false;
+    g_cfg.hook[T_OnElementInfluence] = false;
+    g_cfg.hook[T_IsBackstab] = false;
 
     // The two that MODIFY the game -- see mgmp_tuning.h.
     g_cfg.hook[T_SaveScumPenalty] = tune::kHookSaveScum;
@@ -203,6 +207,10 @@ void hooks_implied_by(bool net_configured) {
         // produces a game that listens, accepts a peer, and never completes the
         // handshake, with nothing in the log to say why.
         g_cfg.hook[T_FrameBegin] = true;
+        g_cfg.hook[T_ReceiveDamage] = tune::kStateTrace;
+        g_cfg.hook[T_ReceiveDamagePassives] = tune::kStateTrace;
+        g_cfg.hook[T_OnElementInfluence] = tune::kStateTrace;
+        g_cfg.hook[T_IsBackstab] = tune::kStateTrace;
 
         // The inventory push has no other route to the peer: without these the
         // host's bucket serialize goes into its own save file and nothing is

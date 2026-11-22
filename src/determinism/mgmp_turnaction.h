@@ -65,6 +65,7 @@ enum TurnActionType : uint32_t {
     TA_None    = 1,   // brain has not decided yet -- PlayerBrain polls with this
     TA_Ability = 2,   // use `ability` at `target` facing `dir` -> Character::DoAction
     TA_EndTurn = 3,   // confirmed -> Character::EndTurn
+    TA_Reactions = 6, // builds the character/tile lists for reaction processing
     TA_Invoke  = 7,   // calls the std::function at +0x78; not serializable
 };
 

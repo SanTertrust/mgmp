@@ -75,6 +75,8 @@ constexpr uint32_t kMaxCats    = 254;
 constexpr uint32_t kMaxSentLog = 512;
 constexpr uint32_t kMaxPending = kMaxSentLog;
 constexpr uint8_t  kNoCat      = 0xFF;
+thread_local bool t_battle_thread = false;
+thread_local uint32_t t_damage_hit = 0;
 
 // Character list, reached from TurnControl. See the header for provenance.
 constexpr uintptr_t kTC_Scene      = 0x18;
@@ -145,6 +147,59 @@ constexpr uintptr_t kGon_Name              = 0x88;
 constexpr uintptr_t kTObj_Tile     = 0x48;
 constexpr uintptr_t kTObj_Owner    = 0x98;
 
+// DamageInstance fields verified in IDA against ReceiveDamage.
+constexpr uintptr_t kDamage_Flags = 0x59;
+constexpr uintptr_t kDamage_Type = 0x8C;
+constexpr uintptr_t kDamage_Amount = 0x90;
+constexpr uintptr_t kDamage_Elements = 0x148;
+
+struct DamageStage {
+    int32_t amount = 0;
+    uint8_t flags = 0;
+    bool readable = false;
+};
+
+struct DamageCalcTrace {
+    const void* target = nullptr;
+    const void* working_damage = nullptr;
+    DamageStage before_passives, after_passives, after_crit;
+    int32_t facing[2] = {};
+    int32_t backstab_direction[2] = {};
+    int32_t backstab_tile[2] = {};
+    bool backstab_checked = false;
+    bool facing_read = false;
+    bool is_backstab = false;
+};
+
+thread_local DamageCalcTrace* t_damage_calc = nullptr;
+thread_local DamageCalcTrace* t_backstab_calc = nullptr;
+
+struct ScopedDamageTrace {
+    DamageCalcTrace*& slot;
+    DamageCalcTrace* previous;
+    ScopedDamageTrace(DamageCalcTrace*& slot, DamageCalcTrace* next)
+        : slot(slot), previous(slot) { slot = next; }
+    ~ScopedDamageTrace() { slot = previous; }
+};
+
+DamageStage read_damage_stage(const void* damage) {
+    const auto* bytes = static_cast<const uint8_t*>(damage);
+    DamageStage stage;
+    stage.readable = mem_read(bytes + kDamage_Amount, &stage.amount, sizeof(stage.amount)) &&
+        mem_read(bytes + kDamage_Flags, &stage.flags, sizeof(stage.flags));
+    return stage;
+}
+
+void format_damage_stage(char* out, size_t cap, const DamageStage& stage) {
+    if (!stage.readable) {
+        strcpy_s(out, cap, "-");
+        return;
+    }
+    _snprintf_s(out, cap, _TRUNCATE, "%d(miss=%u block=%u crit=%u backstab=%u)",
+                stage.amount, (stage.flags >> 1) & 1u, (stage.flags >> 2) & 1u,
+                (stage.flags >> 3) & 1u, (stage.flags >> 4) & 1u);
+}
+
 // PlayerBrain::og_orientation (iVec2D): PlayerBrain::update saves this at the
 // top of each frame and restores Character+0x388 to it at the end unless the
 // player clicked to turn. Updating it alongside Character::Face keeps the
@@ -213,6 +268,7 @@ struct State {
     CatState hashed[kMaxCats];
     uint32_t hashed_count = 0;
     uint32_t hashed_turn  = 0;
+    uint8_t  hashed_membership = 0;
     bool     hashed_valid = false;
     // One dump per divergence in each direction. After the first there is
     // nothing new to learn and the peer is halted anyway.
@@ -435,9 +491,8 @@ bool read_gon_name(const void* gon, char* out, size_t cap, size_t& out_len) {
     return true;
 }
 
-bool read_cat_passives(const void* chr, uint64_t& out_hash, uint16_t& out_count) {
-    out_hash = 0;
-    out_count = 0;
+template <typename Visit>
+bool visit_cat_passives(const void* chr, Visit visit) {
     if (!chr) return false;
 
     const void* ent = nullptr;
@@ -454,10 +509,6 @@ bool read_cat_passives(const void* chr, uint64_t& out_hash, uint16_t& out_count)
     if (count > 256) return false;
     if (count > 0 && (!mem_read((const uint8_t*)ent + kEntity_CompData, &comps, sizeof(comps)) || !comps))
         return false;
-
-    constexpr uint32_t kMaxHashedPassives = 64;
-    uint64_t hashes[kMaxHashedPassives];
-    uint32_t n = 0;
 
     for (uint32_t i = 0; i < count; ++i) {
         const void* comp = nullptr;
@@ -487,12 +538,24 @@ bool read_cat_passives(const void* chr, uint64_t& out_hash, uint16_t& out_count)
         char name[64];
         size_t name_len = 0;
         read_gon_name(gon, name, sizeof(name), name_len);
+        visit(comp, type_id, stacks, name, name_len);
+    }
+    return true;
+}
 
+bool read_cat_passives(const void* chr, uint64_t& out_hash, uint16_t& out_count) {
+    out_hash = 0;
+    out_count = 0;
+    uint64_t hashes[64];
+    uint32_t n = 0;
+    const bool ok = visit_cat_passives(chr, [&](const void*, int32_t type_id, int32_t stacks,
+                                                const char* name, size_t name_len) {
         uint64_t h = fnv1a(&type_id, sizeof(type_id));
         h = fnv1a(&stacks, sizeof(stacks), h);
         if (name_len > 0) h = fnv1a(name, name_len, h);
-        if (n < kMaxHashedPassives) hashes[n++] = h;
-    }
+        if (n < sizeof(hashes) / sizeof(hashes[0])) hashes[n++] = h;
+    });
+    if (!ok) return false;
 
     if (n > 1) std::sort(hashes, hashes + n);
     out_hash  = (n > 0) ? fnv1a(hashes, n * sizeof(uint64_t)) : 0;
@@ -572,11 +635,6 @@ bool read_cat_state(const void* chr, CatState& out, bool in_battle = true) {
     return true;
 }
 
-// Dumps every cat's state to the log. Called on a state-only hash mismatch,
-// because the hash says only THAT the peers disagree. Two logs each holding
-// this table, diffed, say WHICH cat and which field -- which is exactly how the
-// one suspected desync so far was settled, by diffing the raw traces rather
-// than by staring at hashes.
 // Membership, not length.
 //
 // A turn that APPENDS a summon and REMOVES something else leaves the count
@@ -624,31 +682,36 @@ uint32_t snapshot_departed(const bool still_in[kMaxCats]) {
     return left;
 }
 
-void dump_cat_states(const char* why) {
-    log_line("LOCKSTEP", "cat state table (%s):", why);
+void dump_cat_states(uint32_t turn) {
+    if (!g.hashed_valid || g.hashed_turn != turn) {
+        log_line("LOCKSTEP", "cat state table unavailable for hash turn %u", turn);
+        return;
+    }
+    log_line("LOCKSTEP", "cat state table battle=%016llx hash_turn=%u membership_read=%u:",
+             (unsigned long long)g.battles.current, turn, (unsigned)g.hashed_membership);
 
-    // Worked out up front so each row can say whether that cat is still in the
-    // battle at all. A departed entry is the one case where the fields below
-    // are not trustworthy: our snapshot pointer outlives its membership.
+    for (uint32_t i = 0; i < g.hashed_count; ++i) {
+        const CatState& st = g.hashed[i];
+        if (!st.in_battle) {
+            log_line("LOCKSTEP", "  cat %2u  in_battle=0 readable=%u",
+                     i, (unsigned)st.readable);
+            continue;
+        }
+        log_line("LOCKSTEP", "  cat %2u  hp=%d/%d shield=%d divine=%d tile=(%d,%d) "
+                 "face=(%d,%d) elem=%08X:%08X passives=%u:%016llX "
+                 "dead=%u linked=%u readable=%u elem_read=%u passive_read=%u",
+                 i, st.hp, st.maxhp, st.shield, st.divine_shield, st.tx, st.ty,
+                 st.fx, st.fy, st.e0, st.e1, (unsigned)st.passive_count,
+                 (unsigned long long)st.passive_hash, (unsigned)st.dead,
+                 (unsigned)st.linked, (unsigned)st.readable, (unsigned)st.elems,
+                 (unsigned)st.passives_ok);
+    }
+
+    // Summons are read live for context. The rows above come from the hash.
     uint32_t live_now = 0, appeared_now = 0;
     bool still_in[kMaxCats];
     const bool have_membership =
         snapshot_membership(g.snapped_list, live_now, still_in, appeared_now);
-
-    for (uint32_t i = 0; i < g.cat_count; ++i) {
-        CatState st{};
-        const bool present = !have_membership || still_in[i];
-        if (!read_cat_state(g.cats[i], st, present)) {
-            log_line("LOCKSTEP", "  cat %2u  <unreadable>", i);
-            continue;
-        }
-        log_line("LOCKSTEP", "  cat %2u  hp=%d/%d shield=%d tile=(%d,%d) face=(%d,%d) elem=%08X:%08X%s%s%s%s",
-                 i, st.hp, st.maxhp, st.shield, st.tx, st.ty, st.fx, st.fy,
-                 st.e0, st.e1,
-                 st.dead ? " DEAD" : "", st.linked ? "" : " [unlinked]",
-                 st.elems ? "" : " [no-elem]",
-                 (have_membership && !still_in[i]) ? " [GONE -- no longer in the live list]" : "");
-    }
 
     // Everything the snapshot does NOT cover: summons, and anything else the
     // battle appended to the character list after it started.
@@ -687,12 +750,9 @@ void dump_cat_states(const char* why) {
     }
 
     if (have_membership && (appeared_now != 0 || departed != 0)) {
-        log_line("LOCKSTEP", "  ROSTER CHANGED: %u entr(ies) appeared after battle"
-                             " start and %u snapshot entr(ies) left the live list"
-                             " (live %u, snapshot %u). COMPARE BOTH NUMBERS WITH THE"
-                             " PEER'S FIRST: if they differ the divergence is here"
-                             " and not in the %u cats above.",
-                 appeared_now, departed, live, g.cat_count, g.cat_count);
+        log_line("LOCKSTEP", "  live roster at dump time: %u appeared, %u departed "
+                             "(live %u, snapshot %u)",
+                 appeared_now, departed, live, g.cat_count);
     }
 
     if (!have_membership) {
@@ -774,28 +834,10 @@ void appendf(char* buf, size_t cap, int& n, const char* fmt, ...) {
 }
 
 void trace_state_deltas() {
-    if (!tune::kStateTrace || !g.snapped) return;
-    // Gated on the same evidence the hash is. With state_hash_on false at least
-    // one cat failed its link or range check, so every reading here is heap luck
-    // -- and a trace of heap luck is worse than silence: it prints movement that
-    // never happened, in the one place a reader is looking for movement that
-    // did. Nothing is lost, either: a zero state hash cannot mismatch.
-    if (!g.state_hash_on) return;
+    if (!tune::kStateTrace || !g.hashed_valid || g.hashed_turn != g.turn) return;
 
-    uint32_t live = 0, appeared = 0;
-    bool still_in[kMaxCats];
-    const bool have_membership =
-        snapshot_membership(g.snapped_list, live, still_in, appeared);
-
-    for (uint32_t i = 0; i < g.cat_count; ++i) {
-        const bool present = !have_membership || still_in[i];
-
-        CatState now{};
-        // A cat that cannot be read at all gets a default-constructed entry, so
-        // "became unreadable" shows up as a change like any other rather than
-        // silently freezing its last known values.
-        read_cat_state(g.cats[i], now, present);
-
+    for (uint32_t i = 0; i < g.hashed_count; ++i) {
+        const CatState& now = g.hashed[i];
         const CatState& was = g.prev_state[i];
         if (!g.have_prev) { g.prev_state[i] = now; continue; }
 
@@ -825,6 +867,8 @@ void trace_state_deltas() {
             appendf(what, sizeof(what), n, "passive-read %u->%u", was.passives_ok, now.passives_ok);
         if (now.in_battle != was.in_battle)
             appendf(what, sizeof(what), n, "in-battle %u->%u", was.in_battle, now.in_battle);
+        if (now.readable != was.readable)
+            appendf(what, sizeof(what), n, "readable %u->%u", was.readable, now.readable);
         // Facing is traced even though the hash does not cover it -- the one
         // exception to the "only hashed fields" rule above, and it is earned.
         // The backstab test reads facing, so it decides damage; the hash cannot
@@ -852,6 +896,51 @@ uint8_t cat_index_of(const void* character) {
     for (uint32_t i = 0; i < g.cat_count; ++i)
         if (g.cats[i] == character) return (uint8_t)i;
     return kNoCat;
+}
+
+int trace_cat_index(const void* character) {
+    const uint8_t i = cat_index_of(character);
+    return i == kNoCat ? -1 : (int)i;
+}
+
+void trace_passives(const void* character, const char* role, const char* event,
+                    const char* ability, uint64_t battle, uint32_t next_hash) {
+    char list[3072] = {};
+    int length = 0;
+    unsigned count = 0, listed = 0;
+    const bool read = visit_cat_passives(character, [&](const void* comp, int32_t, int32_t stacks,
+                                                       const char* name, size_t name_len) {
+        ++count;
+        char cls[96];
+        if (!name_len) {
+            rtti_class_name(comp, cls, sizeof(cls));
+            name = cls;
+        }
+        char entry[120];
+        const int size = _snprintf_s(entry, sizeof(entry), _TRUNCATE, "%s:%d", name, stacks);
+        if (size < 0 || (size_t)(length + size + 1) >= sizeof(list)) return;
+        appendf(list, sizeof(list), length, "%s", entry);
+        ++listed;
+    });
+
+    int32_t tile[2] = {};
+    const void* object = nullptr;
+    const void* owner = nullptr;
+    const bool has_tile = character &&
+        mem_read(static_cast<const uint8_t*>(character) + kChar_TObj, &object, sizeof(object)) &&
+        object &&
+        mem_read(static_cast<const uint8_t*>(object) + kTObj_Owner, &owner, sizeof(owner)) &&
+        owner == character &&
+        mem_read(static_cast<const uint8_t*>(object) + kTObj_Tile, tile, sizeof(tile));
+    char position[32] = "?";
+    if (has_tile)
+        _snprintf_s(position, sizeof(position), _TRUNCATE, "(%d,%d)", tile[0], tile[1]);
+
+    log_line_lvl(LogLevel::Trace, "PASSIVES",
+                 "battle=%016llx next_hash=%u %s role=%s cat=%d tile=%s ability=%s "
+                 "read=%u count=%u listed=%u active=[%s]",
+                 (unsigned long long)battle, next_hash, event, role, trace_cat_index(character),
+                 position, ability, (unsigned)read, count, listed, list);
 }
 
 // Snapshot the battle's character list. Called once per battle, at the first
@@ -1617,6 +1706,7 @@ HashMsg build_hash(void* turn_control) {
         h.state_hash = sh;
         g.hashed_count = g.cat_count;
         g.hashed_turn  = h.turn;
+        g.hashed_membership = memb;
         g.hashed_valid = true;
     }
     return h;
@@ -1718,11 +1808,22 @@ void compare_state_dump(const StateDumpMsg& m) {
         const CatState& a = g.hashed[i];
         const CatState& b = theirs[i];
 
+        if (!a.in_battle || !b.in_battle) {
+            if (a.in_battle != b.in_battle || a.readable != b.readable) {
+                ++differ;
+                log_line_lvl(LogLevel::Error, "LOCKSTEP",
+                             "  cat %2u in_battle %u|%u readable %u|%u",
+                             i, (unsigned)a.in_battle, (unsigned)b.in_battle,
+                             (unsigned)a.readable, (unsigned)b.readable);
+            }
+            continue;
+        }
+
         // Field by field, and facing is INCLUDED here even though the hash
         // excludes it. That exclusion is about what may halt a run; it is not a
         // reason to hide the field once the run has already halted -- and
         // facing is precisely what explained the 49-turn backstab desync.
-        char line[320];
+        char line[512];
         int  k = 0;
         // _snprintf_s returns -1 on truncation, so the length is re-measured
         // rather than accumulated: a negative return added to `k` would index
@@ -1743,7 +1844,6 @@ void compare_state_dump(const StateDumpMsg& m) {
         MGMP_DIFF(" elem1 %08X|%08X", a.e1, b.e1);
         MGMP_DIFF(" passives %u|%u",  (unsigned)a.passive_count, (unsigned)b.passive_count);
         MGMP_DIFF(" phash %016llX|%016llX", (unsigned long long)a.passive_hash, (unsigned long long)b.passive_hash);
-        MGMP_DIFF(" in_battle %u|%u", (unsigned)a.in_battle, (unsigned)b.in_battle);
         MGMP_DIFF(" readable %u|%u",  (unsigned)a.readable,  (unsigned)b.readable);
         MGMP_DIFF(" linked %u|%u",    (unsigned)a.linked,    (unsigned)b.linked);
         MGMP_DIFF(" elems %u|%u",     (unsigned)a.elems,     (unsigned)b.elems);
@@ -1768,18 +1868,12 @@ void compare_state_dump(const StateDumpMsg& m) {
     }
 
     if (differ == 0) {
-        // Worth its own loud line. Every hashed field agreeing while the hash
-        // did not means the divergence is somewhere the state hash does not
-        // look: the rng stream, the queue, or state no cat row carries.
         log_line_lvl(LogLevel::Warn, "LOCKSTEP",
-                     "  every cat row AGREES. Whatever diverged is not in the "
-                     "cat table -- look at the rng and queue halves of the hash, "
-                     "and at the summon tail below, which the snapshot does not "
-                     "cover.");
+                     "  no field differences in the compared cat rows; see "
+                     "rng, queue, roster size and membership_read in the hash logs");
     } else {
-        log_line("LOCKSTEP", "  %u of %u cat(s) differ. Diff the two peers' "
-                             "APPLY/DOACTION/TRIGGER lines for the first one, "
-                             "back from this turn.", differ, n);
+        log_line("LOCKSTEP", "  %u of %u cat(s) differ. Compare DAMAGE and action "
+                             "lines leading up to this hash turn.", differ, n);
     }
 }
 
@@ -1820,7 +1914,7 @@ void compare_hash(const HashMsg& mine, const HashMsg& theirs) {
 
     // --- halting (the default) ------------------------------------------
     if (config().net_desync_halt) {
-        if (rng_ok && queue_ok) dump_cat_states("state-only mismatch");
+        if (mine.state_hash != theirs.state_hash) dump_cat_states(mine.turn);
         halt(why);
         return;
     }
@@ -1832,15 +1926,14 @@ void compare_hash(const HashMsg& mine, const HashMsg& theirs) {
     // few boundaries can say whether this was a divergence or a skew.
     ++g.stats.desyncs;
 
-    // The first two get the whole table; after that it would be the same 45
-    // lines with one number moving, which is what the delta trace is for.
-    const bool worth_dumping = (rng_ok && queue_ok && g.mismatches <= 2);
+    // Keep the full table for state mismatches early in the report.
+    const bool worth_dumping = mine.state_hash != theirs.state_hash && g.mismatches <= 2;
     if (worth_dumping)
-        dump_cat_states("state-only mismatch (NOT halting -- net_desync_halt = 0)");
+        dump_cat_states(mine.turn);
 
     log_line("LOCKSTEP", "!! MISMATCH #%u at turn %u (not halting): %s",
              g.mismatches, mine.turn, why);
-    if (!worth_dumping && rng_ok && queue_ok)
+    if (!worth_dumping && mine.state_hash != theirs.state_hash)
         log_line("LOCKSTEP", "   (cat table suppressed after the first two --"
                              " read the `delta:` lines instead)");
 }
@@ -2042,6 +2135,168 @@ void lockstep_shutdown() {
 bool lockstep_active() { return g.active && net_active(); }
 bool lockstep_halted() { return g.halted; }
 bool lockstep_in_battle() { return g.active && g.snapped && !g.halted; }
+
+void lockstep_trace_cast_passives(const void* ability, const char* gon_name) {
+    if (!tune::kStateTrace || !t_battle_thread || !lockstep_in_battle() || !ability) return;
+    // Ability::trigger uses Ability::character for the cast, including delayed triggers.
+    constexpr uintptr_t kAbility_Character = 0x10;
+    const void* actor = nullptr;
+    if (!mem_read(static_cast<const uint8_t*>(ability) + kAbility_Character,
+                  &actor, sizeof(actor)) || !actor) return;
+    trace_passives(actor, "caster", "event=cast", gon_name, g.battles.current, g.turn);
+}
+
+void lockstep_trace_damage(void* target, const void* damage, uintptr_t caller_rva,
+                           void (__fastcall* receive_damage)(void*, const void*)) {
+    // Nested hits, including ones skipped by the trace, own their own stages.
+    ScopedDamageTrace damage_scope(t_damage_calc, nullptr);
+    ScopedDamageTrace backstab_scope(t_backstab_calc, nullptr);
+    if (!t_battle_thread || !lockstep_in_battle() || !target || !damage) {
+        receive_damage(target, damage);
+        return;
+    }
+
+    constexpr uintptr_t kSource = 0x00;
+    constexpr uintptr_t kAbilityAndPassive = 0x20;
+    constexpr uintptr_t kSpeculativeFlags = 0x5B;
+    constexpr uintptr_t kTile = 0x9C;
+
+    const auto* d = static_cast<const uint8_t*>(damage);
+    const auto* c = static_cast<const uint8_t*>(target);
+    uint8_t flags = 0;
+    const void* source = nullptr;
+    const void* origins[2] = {};
+    int32_t input[2] = {};
+    int32_t tile[2] = {};
+    int32_t before[3] = {};
+    uint64_t generation = 0;
+    if (!mem_read(d + kSpeculativeFlags, &flags, sizeof(flags)) || (flags & 1) ||
+        !mem_read(d + kSource, &source, sizeof(source)) ||
+        !mem_read(d + kAbilityAndPassive, origins, sizeof(origins)) ||
+        !mem_read(d + kDamage_Type, input, sizeof(input)) ||
+        !mem_read(d + kTile, tile, sizeof(tile)) ||
+        !mem_read(c + kChar_HP, before, sizeof(before)) ||
+        !mem_read(c - sizeof(generation), &generation, sizeof(generation))) {
+        receive_damage(target, damage);
+        return;
+    }
+
+    const auto battle = g.battles.current;
+    const auto next_hash = g.turn;
+    const void* source_cat = nullptr;
+    if (source)
+        mem_read(static_cast<const uint8_t*>(source) + kTObj_Owner, &source_cat, sizeof(source_cat));
+    const int victim = trace_cat_index(target);
+    const int attacker = trace_cat_index(source_cat);
+    const char* source_kind = source_cat ? "character" : (source ? "object" : "none");
+    char ability[96] = "-", passive[96] = "-";
+    if (origins[0] && !ability_gon_name(origins[0], ability, sizeof(ability)))
+        rtti_class_name(origins[0], ability, sizeof(ability));
+    if (origins[1]) {
+        const void* gon = nullptr;
+        size_t name_len = 0;
+        mem_read(static_cast<const uint8_t*>(origins[1]) + kPassive_Data, &gon, sizeof(gon));
+        if (!read_gon_name(gon, passive, sizeof(passive), name_len) || name_len == 0)
+            rtti_class_name(origins[1], passive, sizeof(passive));
+    }
+
+    const uint32_t hit = ++t_damage_hit;
+    char event[48];
+    _snprintf_s(event, sizeof(event), _TRUNCATE, "event=damage hit=%u", hit);
+    trace_passives(target, source_cat == target ? "source+target" : "target",
+                   event, ability, battle, next_hash);
+    if (source_cat && source_cat != target)
+        trace_passives(source_cat, "source", event, ability, battle, next_hash);
+
+    DamageCalcTrace calc;
+    calc.target = target;
+    t_damage_calc = &calc;
+    receive_damage(target, damage);
+    t_damage_calc = nullptr;
+
+    // A hit can remove its target. Check the generation used by game refs
+    // before attributing the post-call health to the same character.
+    int32_t after[3] = {};
+    uint64_t after_generation = 0;
+    char result[112];
+    _snprintf_s(result, sizeof(result), _TRUNCATE,
+                "hp=%d shield=%d divine=%d after=unavailable", before[0], before[1], before[2]);
+    if (mem_read(c - sizeof(after_generation), &after_generation, sizeof(after_generation)) &&
+        generation == after_generation && mem_read(c + kChar_HP, after, sizeof(after))) {
+        _snprintf_s(result, sizeof(result), _TRUNCATE,
+                    "hp=%d->%d shield=%d->%d divine=%d->%d",
+                    before[0], after[0], before[1], after[1], before[2], after[2]);
+    }
+    log_line_lvl(LogLevel::Trace, "DAMAGE",
+                 "battle=%016llx next_hash=%u target_cat=%d source=%s source_cat=%d "
+                 "type=%d input=%d tile=(%d,%d) caller=+0x%llX %s ability=%s passive=%s hit=%u",
+                 (unsigned long long)battle, next_hash, victim, source_kind, attacker,
+                 input[0], input[1], tile[0], tile[1], (unsigned long long)caller_rva,
+                 result, ability, passive, hit);
+
+    char pre[80], post[80], crit[80], facing[32] = "-", backstab_args[96] = "";
+    format_damage_stage(pre, sizeof(pre), calc.before_passives);
+    format_damage_stage(post, sizeof(post), calc.after_passives);
+    format_damage_stage(crit, sizeof(crit), calc.after_crit);
+    if (calc.facing_read)
+        _snprintf_s(facing, sizeof(facing), _TRUNCATE, "(%d,%d)", calc.facing[0], calc.facing[1]);
+    if (calc.backstab_checked)
+        _snprintf_s(backstab_args, sizeof(backstab_args), _TRUNCATE,
+                    " check_dir=(%d,%d) check_tile=(%d,%d)",
+                    calc.backstab_direction[0], calc.backstab_direction[1],
+                    calc.backstab_tile[0], calc.backstab_tile[1]);
+    log_line_lvl(LogLevel::Trace, "DAMAGECALC",
+                 "battle=%016llx next_hash=%u hit=%u target_cat=%d "
+                 "before_passives=%s after_passives=%s post_crit=%s "
+                 "backstab_check=%s target_facing=%s%s",
+                 (unsigned long long)battle, next_hash, hit, victim, pre, post, crit,
+                 calc.backstab_checked ? (calc.is_backstab ? "1" : "0") : "-",
+                 facing, backstab_args);
+}
+
+void lockstep_trace_damage_passives(void* target, void* damage, const void* participants,
+                                    bool speculative,
+                                    void (__fastcall* original)(void*, void*, const void*, bool)) {
+    auto* calc = t_damage_calc;
+    const bool track = calc && target == calc->target && damage &&
+                       !speculative && !calc->working_damage;
+    ScopedDamageTrace scope(t_backstab_calc, track ? calc : nullptr);
+    if (track) {
+        // ReceiveDamage passes a mutable copy of its input to this call.
+        calc->working_damage = damage;
+        calc->before_passives = read_damage_stage(damage);
+    }
+    original(target, damage, participants, speculative);
+    if (track) calc->after_passives = read_damage_stage(damage);
+}
+
+void lockstep_trace_damage_elements(const void* target, const void* elements) {
+    auto* calc = t_damage_calc;
+    if (!calc || target != calc->target || !calc->working_damage || calc->after_crit.readable)
+        return;
+    // ReceiveDamage passes its own DamageInstance::elements after resolving the
+    // crit. Pointer identity excludes other element notifications in the hit.
+    if (elements == static_cast<const uint8_t*>(calc->working_damage) + kDamage_Elements)
+        calc->after_crit = read_damage_stage(calc->working_damage);
+}
+
+bool lockstep_trace_backstab(void* target, uint64_t direction, uint64_t tile,
+                             bool (__fastcall* original)(void*, uint64_t, uint64_t)) {
+    auto* calc = t_backstab_calc;
+    const bool track = calc && target == calc->target && !calc->backstab_checked;
+    if (track) {
+        calc->facing_read = mem_read(static_cast<const uint8_t*>(target) + kChar_Facing,
+                                     calc->facing, sizeof(calc->facing));
+        std::memcpy(calc->backstab_direction, &direction, sizeof(direction));
+        std::memcpy(calc->backstab_tile, &tile, sizeof(tile));
+    }
+    const bool result = original(target, direction, tile);
+    if (track) {
+        calc->backstab_checked = true;
+        calc->is_backstab = result;
+    }
+    return result;
+}
 
 // One question with three answers, because mgmp_aim needs all three and asking
 // them separately would mean three lookups of the same character and three
@@ -2687,6 +2942,7 @@ void lockstep_on_applied(const void* action, const void* actor) {
 
 void lockstep_turn_boundary(void* turn_control) {
     if (!g.active) return;
+    t_battle_thread = true;
 
     // A new battle means a new character list, and the old roster describes
     // cats that no longer exist. Detecting it matters more now than it did in
@@ -2819,11 +3075,13 @@ void lockstep_turn_boundary(void* turn_control) {
     // explain rather than under the next turn's.
     trace_state_deltas();
 
-    log_line("LOCKSTEP", "turn %u hash rng=%016llx state=%016llx queue=%u chars=%u/%u%s",
+    log_line("LOCKSTEP", "turn %u hash rng=%016llx state=%016llx queue=%u chars=%u/%u%s "
+                         "battle=%016llx membership_read=%s",
              mine.turn,
              (unsigned long long)mine.rng_hash,
              (unsigned long long)mine.state_hash, mine.queue_depth,
-             live_chars, g.cat_count, roster);
+             live_chars, g.cat_count, roster, (unsigned long long)mine.battle_id,
+             g.state_hash_on ? (g.hashed_membership ? "1" : "0") : "-");
 
     // Remember it before comparing: if the peer's counterpart arrives later,
     // match-on-arrival in lockstep_pump needs to find this turn here.

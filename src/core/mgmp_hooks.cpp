@@ -88,6 +88,10 @@ fn_this_i32   o_BeginTurn   = nullptr;
 fn_this       o_EndTurn     = nullptr;
 fn_this       o_FrameBegin  = nullptr;
 fn_this_ptr   o_ApplyAction = nullptr;
+void (__fastcall* o_ReceiveDamage)(void*, const void*) = nullptr;
+void (__fastcall* o_ReceiveDamagePassives)(void*, void*, const void*, bool) = nullptr;
+void (__fastcall* o_OnElementInfluence)(void*, const void*) = nullptr;
+bool (__fastcall* o_IsBackstab)(void*, uint64_t, uint64_t) = nullptr;
 fn_ptr_i32    o_SaveScum      = nullptr;
 fn_this       o_TimeDelay     = nullptr;
 fn_this       o_MapUpdate     = nullptr;
@@ -217,7 +221,10 @@ void __fastcall h_DoAction(void* self, void* ta, unsigned char flag) {
 void __fastcall h_Trigger(void* self, void* ta) {
     Who    w(self, "abil");
     TaDump d(ta);
-    log_line("TRIGGER", "%s %s", w.text, d.text);
+    char gon[96];
+    const char* name = ability_gon_name(self, gon, sizeof(gon)) && gon[0] ? gon : "-";
+    log_line("TRIGGER", "gon=%s %s %s", name, w.text, d.text);
+    lockstep_trace_cast_passives(self, name);
     o_Trigger(self, ta);
 }
 
@@ -240,6 +247,25 @@ void __fastcall h_ApplyAction(void* self, void* ta) {
     if (lockstep_active()) lockstep_on_applied(ta, current_actor(self));
 
     o_ApplyAction(self, ta);
+}
+
+void __fastcall h_ReceiveDamage(void* self, const void* damage) {
+    lockstep_trace_damage(self, damage, (uintptr_t)_ReturnAddress() - g_base, o_ReceiveDamage);
+}
+
+void __fastcall h_ReceiveDamagePassives(void* self, void* damage, const void* participants,
+                                      bool speculative) {
+    lockstep_trace_damage_passives(self, damage, participants, speculative, o_ReceiveDamagePassives);
+}
+
+void __fastcall h_OnElementInfluence(void* self, const void* elements) {
+    lockstep_trace_damage_elements(self, elements);
+    o_OnElementInfluence(self, elements);
+}
+
+// Each iVec2D is passed by value in a single 64-bit register on MSVC x64.
+bool __fastcall h_IsBackstab(void* self, uint64_t direction, uint64_t tile) {
+    return lockstep_trace_backstab(self, direction, tile, o_IsBackstab);
 }
 
 // The one hook that changes the game instead of watching it.
@@ -643,6 +669,10 @@ const Binding kBindings[] = {
     { T_EndTurn,     (void*)&h_EndTurn,     (void**)&o_EndTurn     },
     { T_FrameBegin,  (void*)&h_FrameBegin,  (void**)&o_FrameBegin  },
     { T_ApplyAction, (void*)&h_ApplyAction, (void**)&o_ApplyAction },
+    { T_ReceiveDamage, (void*)&h_ReceiveDamage, (void**)&o_ReceiveDamage },
+    { T_ReceiveDamagePassives, (void*)&h_ReceiveDamagePassives, (void**)&o_ReceiveDamagePassives },
+    { T_OnElementInfluence, (void*)&h_OnElementInfluence, (void**)&o_OnElementInfluence },
+    { T_IsBackstab, (void*)&h_IsBackstab, (void**)&o_IsBackstab },
 
     { T_MapUpdate,   (void*)&h_MapUpdate,   (void**)&o_MapUpdate   },
     { T_EnterNode,   (void*)&h_EnterNode,   (void**)&o_EnterNode   },
