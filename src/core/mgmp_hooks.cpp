@@ -106,6 +106,7 @@ fn_this_ptr   o_LevelSelect   = nullptr;   // select_option(this, LevelUpOption*
 fn_this       o_LevelUpdate   = nullptr;
 fn_this       o_CombatMenu    = nullptr;
 fn_this       o_ButtonUpdate  = nullptr;
+fn_this       o_TurnOrderPortrait = nullptr;
 // Two pointers, not one: UpdateDecision RETURNS a TurnAction by value, so the
 // caller passes the sret buffer in rdx (`lea rdx, [sret]` @ 0x1408DF2EF, one
 // instruction before the call). Typed as a one-argument function, the detour
@@ -586,6 +587,11 @@ void __fastcall h_GoOnAdventure(void* self, void* map_str, void* collars_vec, vo
     o_GoOnAdventure(self, map_str, collars_vec, cat_ids_buf);
 }
 
+void __fastcall h_TurnOrderPortrait(void* self) {
+    o_TurnOrderPortrait(self);
+    combatlock_on_turn_portrait(self);
+}
+
 void __fastcall h_ButtonUpdate(void* self) {
     // Fires for every button in the game. Outside a combat-menu tick this is a
     // load and a branch: combatlock_on_button's first test is the scope flag.
@@ -735,6 +741,7 @@ const Binding kBindings[] = {
 
     { T_CombatMenuUpdate, (void*)&h_CombatMenu,   (void**)&o_CombatMenu   },
     { T_ButtonUpdate,     (void*)&h_ButtonUpdate, (void**)&o_ButtonUpdate },
+    { T_TurnOrderPortraitUpdate, (void*)&h_TurnOrderPortrait, (void**)&o_TurnOrderPortrait },
     { T_HighlightRefresh, (void*)&h_HighlightRefresh, (void**)&o_HighlightRefresh },
     { T_UpdateDecision,   (void*)&h_UpdateDecision, (void**)&o_UpdateDecision },
 

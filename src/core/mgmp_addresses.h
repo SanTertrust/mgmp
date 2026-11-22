@@ -96,6 +96,7 @@ enum Target : int {
     T_ButchBoxPlace,
     T_FurniturePoopPop,  // glaiel::FurniturePiece::PoopPop()
     T_MewDirAutoSaveHouse,// glaiel::MewDirector::AutoSaveHouse()
+    T_TurnOrderPortraitUpdate, // glaiel::TurnOrderPortrait::update()
     T_COUNT
 };
 
@@ -483,6 +484,7 @@ static const TargetDesc kTargets[T_COUNT] = {
     { 0x000AED00, "HBOXPLACE",   "glaiel::ButchBox::try_place_cat" },
     { 0x002EF9D0, "HPOOPPOP",    "glaiel::FurniturePiece::PoopPop" },
     { 0x003BDCF0, "HAUTOSAVE",   "glaiel::MewDirector::AutoSaveHouse" },
+    { 0x008EBCE0, "TURNPORT",    "glaiel::TurnOrderPortrait::update" },
 };
 
 // Coarse module guard, checked before the per-target signatures.
@@ -600,6 +602,17 @@ enum Call : int {
     C_InvScreen2Lookup,        // Equipment*(InventoryScreen2*, int64_t uid)
     C_InvScreen2ItemEquipped,  // int64_t(InventoryScreen2*, int64_t uid)
     C_InvItemBoxClickApply,    // void(InventoryItemBox** box_ptr)
+
+    // --- native game UI overlay module (mgmp_gameui.cpp) -----------------
+    C_CreateRenderCore,        // RenderCore*(Scene*, Entity*, int* layers)
+    C_CreateCamera,            // Camera*(Scene*, Entity*)
+    C_CreateRendererEmpty,     // Renderer*(Scene*, Entity*)
+    C_RendererInit,            // void(Renderer*, std::string clip_name)
+    C_CreateCatParts,          // CatParts*(Scene*, Entity*, CatData*&)
+    C_RendererFindChild,       // swf::DisplayObject*(Renderer*, std::string)
+    C_DynamicTextBoxSetText,   // void(swf::DynamicTextBox*, std::wstring, bool, bool)
+    C_DynamicTextBoxSetColor,  // void(swf::DynamicTextBox*, Color*)
+    C_MovieClipGotoAndStop,    // void(swf::MovieClip*, int frame)
     C_COUNT
 };
 
@@ -865,6 +878,17 @@ static const CallDesc kCalls[C_COUNT] = {
     { 0x0034BDD0, "glaiel::InventoryScreen2::lookup" },
     { 0x0034BCB0, "glaiel::InventoryScreen2::item_equipped_status" },
     { 0x0034F0A0, "glaiel::InventoryItemBox::click::lambda_1" },
+
+    // --- native game UI overlay module (mgmp_gameui.cpp) -----------------
+    { 0x00054E40, "glaiel::Scene::CreateComponent<RenderCore>" },
+    { 0x00055120, "glaiel::Scene::CreateComponent<Camera>" },
+    { 0x00367060, "glaiel::Scene::CreateComponent<Renderer>" },
+    { 0x0097A900, "glaiel::Renderer::init(std::string)" },
+    { 0x00090EA0, "glaiel::Scene::CreateComponent<CatParts,CatData*&>" },
+    { 0x0005A100, "glaiel::Renderer::FindChild<DisplayObject>" },
+    { 0x0098E8A0, "glaiel::swf::DynamicTextBox::setText(wstring)" },
+    { 0x0098E640, "glaiel::swf::DynamicTextBox::SetColor" },
+    { 0x009A8A20, "glaiel::swf::MovieClip::gotoAndStop(int)" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only
@@ -1053,6 +1077,14 @@ constexpr uintptr_t kCM_ButtonsEnd   = 248;
 constexpr uintptr_t kCM_Subject      = 280;   // Character*
 constexpr uintptr_t kCM_SubjectGen   = 288;   // its generation at assignment
 constexpr uintptr_t kRefGenOffset    = 8;     // generation lives at ptr-8
+
+// glaiel::TurnOrderPortrait layout, read off TurnOrderPortrait::update @ 0x8EBCE0
+// and TurnOrderPortrait::update_portrait @ 0x8EBA30.
+constexpr uintptr_t kTOP_Renderer    = 0x38;  // Renderer* (single renderer for circle + cathead)
+constexpr uintptr_t kTOP_Kind        = 0x50;  // int32_t (8 = round divider)
+constexpr uintptr_t kTOP_Subject     = 0x58;  // Character* (Ref<Character>)
+constexpr uintptr_t kTOP_SubjGen     = 0x60;  // uint64_t generation (ptr - 8)
+constexpr uintptr_t kTOP_TurnIdx     = 0xA0;  // int32_t (-1 = fading out)
 
 // glaiel::Button, sizeof 0x3C0. +752 is the state, and it indexes the array of
 // per-state SWF frame names that starts at +768 with a 32-byte stride -- which
@@ -1364,5 +1396,22 @@ constexpr uintptr_t kIQ_Flag1                = 137;  // uint8_t
 constexpr uintptr_t kIQ_State                = 140;  // uint32_t
 
 constexpr uint32_t  kRva_ScreenBounds        = 0x013C5C04; // 4 floats: left, right, top, bottom
+
+// --- native game UI & cat ownership offsets ------------------------------
+constexpr uintptr_t kScene_SortDepth         = 1120; // double
+constexpr uintptr_t kScene_Paused            = 1240; // bool
+constexpr uintptr_t kCamera_Transform        = 56;   // Transform*
+constexpr uintptr_t kCamera_PixelsPerUnit    = 360;  // double
+constexpr uintptr_t kCamera_YDirection       = 368;  // int32_t
+constexpr uintptr_t kRenderer_Transform      = 64;   // Transform*
+constexpr uintptr_t kRenderer_Graphics       = 128;  // swf::DisplayObject*
+constexpr uintptr_t kDispObj_Flags           = 8;    // u8, bit 0x20 = visible
+
+constexpr uintptr_t kChar_CatData            = 0x88; // CatData*
+constexpr uintptr_t kCatData_Name            = 0x18; // std::wstring
+constexpr uintptr_t kCatData_Level           = 0xC30;// int32_t
+constexpr uintptr_t kCatData_Uid             = 0xC48;// int64_t
+constexpr uintptr_t kLvl_Cat                 = 0xA0; // LevelUpScreen::cat (CatData*)
+constexpr uintptr_t kEvt_CatChoice           = 0x128;// WorldEvent::cat_choice (CatData*)
 
 } // namespace mgmp

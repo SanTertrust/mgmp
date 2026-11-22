@@ -65,6 +65,11 @@ void combatlock_leave();
 // otherwise, which is every button in the game except this bar's.
 void combatlock_on_button(void* button);
 
+// From TurnOrderPortrait::update (post-original): dims the Turn Order portrait
+// of player cats owned by another peer so players can distinguish their own cats
+// at a glance. Leaves own cats, enemies, round markers, and fading portraits alone.
+void combatlock_on_turn_portrait(void* portrait);
+
 // For the panel: whether the bar is currently being held down, and how many
 // buttons the last tick covered.
 bool     combatlock_engaged();

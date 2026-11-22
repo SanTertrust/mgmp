@@ -133,6 +133,38 @@ void combatlock_on_button(void* button) {
     mem_write((uint8_t*)button + kBtn_State, &disabled, sizeof(disabled));
 }
 
+void combatlock_on_turn_portrait(void* portrait) {
+    if (!tune::kCombatLock || !portrait) return;
+
+    // Leave portraits that are fading out (-1) or round dividers (kind == 8) alone.
+    int32_t turn_idx = 0;
+    if (!mem_read((const uint8_t*)portrait + kTOP_TurnIdx, &turn_idx, sizeof(turn_idx)) ||
+        turn_idx == -1)
+        return;
+
+    int32_t kind = 0;
+    if (!mem_read((const uint8_t*)portrait + kTOP_Kind, &kind, sizeof(kind)) ||
+        kind == 8)
+        return;
+
+    void* renderer = nullptr;
+    if (!mem_read((const uint8_t*)portrait + kTOP_Renderer, &renderer, sizeof(renderer)) ||
+        !renderer)
+        return;
+
+    void* ch = nullptr;
+    uint64_t gen = 0, live = 0;
+    if (!mem_read((const uint8_t*)portrait + kTOP_Subject, &ch, sizeof(ch)) || !ch)
+        return;
+    if (!mem_read((const uint8_t*)portrait + kTOP_SubjGen, &gen, sizeof(gen)))
+        return;
+    if (!mem_read((const uint8_t*)ch - kRefGenOffset, &live, sizeof(live)) || live != gen)
+        return;
+
+    const double alpha = lockstep_peer_owns_character(ch) ? 0.45 : 1.0;
+    mem_write((uint8_t*)renderer + kRenderer_Alpha, &alpha, sizeof(alpha));
+}
+
 bool     combatlock_engaged() { return g.held; }
 uint32_t combatlock_buttons() { return g.buttons; }
 

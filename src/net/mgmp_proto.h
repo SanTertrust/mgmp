@@ -52,7 +52,7 @@ namespace mgmp {
 // So: if the value a peer puts in a message changes meaning, that is a protocol
 // change even when every byte stays where it was. Refusing at connect is free;
 // diagnosing it from a turn-0 halt is not.
-constexpr uint32_t kProtoVersion = 37;  // Remote click indicator + 3s screen ping marker
+constexpr uint32_t kProtoVersion = 38;  // Adventure cat ownership draft overlay
 
 // A frame's payload may not exceed this. RUNSTATE (phase 5) is the only message
 // that will ever approach it; everything in phase 4 is under 128 bytes.
@@ -137,6 +137,8 @@ enum MsgType : uint8_t {
     MSG_HOUSE_POOP_POP      = 32, // both: sync FurniturePiece::PoopPop by piece_uid
     MSG_HOUSE_FURNITURE     = 33, // both: sync House furniture placement layout
     MSG_SCREEN_PING         = 34, // both: remote click ripple (LMB) & 3s screen ping (MMB)
+    MSG_DRAFT_PICK          = 35, // client -> host: toggle ownership pick of a cat_uid
+    MSG_DRAFT_STATE         = 36, // host -> peers: full adventure cat ownership draft state
 };
 
 // A save file is a plain sqlite3 database (the shipped ones start with the
@@ -906,6 +908,24 @@ struct ScreenPingMsg {
     float   wy       = 0.0f;
 };
 
+constexpr uint32_t kMaxDraftCats = 8;
+
+struct DraftPickMsg {
+    uint32_t generation = 0;
+    uint64_t cat_uid    = 0;
+};
+
+struct DraftStateMsg {
+    uint32_t generation = 0;
+    uint8_t  active     = 0;          // 1 = overlay open / drafting, 0 = finalized
+    uint8_t  count      = 0;          // 0..kMaxDraftCats
+    uint8_t  peer_count = 0;          // 0..kMaxPeers
+    uint64_t cat_uid[kMaxDraftCats] = {};
+    uint8_t  owner[kMaxDraftCats]   = {};  // kNoPeer if unclaimed
+    uint8_t  peer_ids[kMaxPeers]    = {};
+    uint8_t  peer_quota[kMaxPeers]  = {};
+};
+
 // Host -> client: the run-history object at *(MewDirector+1424), whole.
 //
 // WHY IT HAS TO BE SYNCED, WHICH WAS NOT OBVIOUS AND IS NOT OPTIONAL.
@@ -1495,6 +1515,33 @@ inline uint32_t enc_screen_ping(uint8_t* p, uint32_t cap, const ScreenPingMsg& m
     return w.ok ? w.len : 0;
 }
 
+inline uint32_t enc_draft_pick(uint8_t* p, uint32_t cap, const DraftPickMsg& m) {
+    Writer w(p, cap);
+    w.u8v(MSG_DRAFT_PICK);
+    w.u32v(m.generation);
+    w.u64v(m.cat_uid);
+    return w.ok ? w.len : 0;
+}
+
+inline uint32_t enc_draft_state(uint8_t* p, uint32_t cap, const DraftStateMsg& m) {
+    if (m.count > kMaxDraftCats || m.peer_count > kMaxPeers) return 0;
+    Writer w(p, cap);
+    w.u8v(MSG_DRAFT_STATE);
+    w.u32v(m.generation);
+    w.u8v(m.active);
+    w.u8v(m.count);
+    w.u8v(m.peer_count);
+    for (uint8_t i = 0; i < m.count; ++i) {
+        w.u64v(m.cat_uid[i]);
+        w.u8v(m.owner[i]);
+    }
+    for (uint8_t i = 0; i < m.peer_count; ++i) {
+        w.u8v(m.peer_ids[i]);
+        w.u8v(m.peer_quota[i]);
+    }
+    return w.ok ? w.len : 0;
+}
+
 inline uint32_t enc_halt(uint8_t* p, uint32_t cap, const HaltMsg& h) {
     Writer w(p, cap);
     w.u8v(MSG_HALT);
@@ -1917,6 +1964,30 @@ inline bool dec_screen_ping(Reader& r, ScreenPingMsg& m) {
     return r.ok;
 }
 
+inline bool dec_draft_pick(Reader& r, DraftPickMsg& m) {
+    m.generation = r.u32v();
+    m.cat_uid    = r.u64v();
+    return r.ok;
+}
+
+inline bool dec_draft_state(Reader& r, DraftStateMsg& m) {
+    m = {};
+    m.generation = r.u32v();
+    m.active     = r.u8v();
+    m.count      = r.u8v();
+    m.peer_count = r.u8v();
+    if (!r.ok || m.count > kMaxDraftCats || m.peer_count > kMaxPeers) return false;
+    for (uint8_t i = 0; i < m.count; ++i) {
+        m.cat_uid[i] = r.u64v();
+        m.owner[i]   = r.u8v();
+    }
+    for (uint8_t i = 0; i < m.peer_count; ++i) {
+        m.peer_ids[i]   = r.u8v();
+        m.peer_quota[i] = r.u8v();
+    }
+    return r.ok;
+}
+
 inline bool dec_halt(Reader& r, HaltMsg& h) {
     h.turn = r.u32v();
     r.str(h.reason, sizeof(h.reason));
@@ -1959,6 +2030,8 @@ inline const char* msg_name(uint8_t t) {
         case MSG_HOUSE_POOP_POP: return "HOUSE_POOP";
         case MSG_HOUSE_FURNITURE: return "HOUSE_FURN";
         case MSG_SCREEN_PING: return "SCREEN_PING";
+        case MSG_DRAFT_PICK:  return "DRAFT_PICK";
+        case MSG_DRAFT_STATE: return "DRAFT_STATE";
         default:          return "?";
     }
 }

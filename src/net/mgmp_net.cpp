@@ -211,6 +211,8 @@ bool decode_into(const uint8_t* buf, uint32_t len, NetMsg& m) {
         case MSG_HOUSE_POOP_POP: return dec_house_poop_pop(r, m.house_poop_pop);
         case MSG_HOUSE_FURNITURE: return dec_house_furniture(r, m.house_furniture);
         case MSG_SCREEN_PING: return dec_screen_ping(r, m.screen_ping);
+        case MSG_DRAFT_PICK:  return dec_draft_pick(r, m.draft_pick);
+        case MSG_DRAFT_STATE: return dec_draft_state(r, m.draft_state);
         case MSG_PEERS:   return dec_peers(r, m.peers);
         case MSG_HALT:    return dec_halt(r, m.halt);
         case MSG_REFUSE:  r.str(m.refuse, sizeof(m.refuse)); return r.ok;
@@ -909,6 +911,24 @@ bool net_send_screen_ping(const ScreenPingMsg& m) {
     uint8_t p[64];
     uint32_t n = enc_screen_ping(p, sizeof(p), m);
     return n && net_send(p, n);
+}
+
+bool net_send_draft_pick(const DraftPickMsg& m) {
+    uint8_t p[64];
+    uint32_t n = enc_draft_pick(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_draft_state(const DraftStateMsg& m) {
+    uint8_t p[256];
+    uint32_t n = enc_draft_state(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_draft_state_to(uint8_t peer, const DraftStateMsg& m) {
+    uint8_t p[256];
+    uint32_t n = enc_draft_state(p, sizeof(p), m);
+    return n && net_send_peer(peer, p, n);
 }
 
 namespace {

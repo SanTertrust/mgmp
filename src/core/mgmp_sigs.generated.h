@@ -112,6 +112,8 @@ static const SigTargetDesc kTargetSigs[] = {
       "40 53 48 83 EC 50 48 8B D9 48 8B 89 D8 02 00 00" },
     { 0x003BDCF0, "HAUTOSAVE",
       "48 89 5C 24 18 48 89 74 24 20 55 57 41 56 48 8D AC 24 60 FF FF FF" },
+    { 0x008EBCE0, "TURNPORT",
+      "40 53 48 83 EC 30 48 8B 41 18 48 8B D9" },
 };
 
 // INDEXED BY enum Call -- order is load-bearing.
@@ -222,6 +224,24 @@ static const SigTargetDesc kCallSigs[] = {
       "48 89 54 24 10 48 83 EC 38 4C 8B D1" },
     { 0x0034F0A0, "glaiel::InventoryItemBox::click::lambda_1",
       "48 8B C4 48 89 58 20 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 38 FF FF FF" },
+    { 0x00054E40, "glaiel::Scene::CreateComponent<RenderCore>",
+      "40 53 55 41 56 48 83 EC 20 80 B9 B0 04 00 00 00 4D 8B F0 48 8B EA 48 8B D9 74 0B 33 C0 48 83 C4 20 41 5E 5D 5B C3 48 89 74 24 48 48 8D 0D ? ? ? ? 48 89 7C 24 50 E8 ? ? ? ? 48 89 44 24 40 48 8B F8 48 85 C0 0F 84 ? ? ? ? 8B 0D ? ? ? ? 33 C0" },
+    { 0x00055120, "glaiel::Scene::CreateComponent<Camera>",
+      "48 89 6C 24 20 57 48 83 EC 20 80 B9 B0 04 00 00 00 48 8B EA 48 8B F9 74 0D 33 C0 48 8B 6C 24 48 48 83 C4 20 5F C3 48 89 5C 24 38 48 8D 0D ? ? ? ? 48 89 74 24 40 E8 ? ? ? ? 48 89 44 24 30 48 8B D8 48 85 C0 0F 84 ? ? ? ? 33 D2 41 B8 78 01 00 00" },
+    { 0x00367060, "glaiel::Scene::CreateComponent<Renderer>",
+      "48 89 5C 24 20 55 48 83 EC 20 80 B9 B0 04 00 00 00 48 8B EA 48 8B D9 74 0D 33 C0 48 8B 5C 24 48 48 83 C4 20 5D C3 48 89 74 24 38 48 8D 0D ? ? ? ? 48 89 7C 24 40 E8 ? ? ? ? 48 89 44 24 30 48 8B F8 48 85 C0 74 1D 33 D2 41 B8 08 01 00 00" },
+    { 0x0097A900, "glaiel::Renderer::init(std::string)",
+      "48 89 5C 24 18 48 89 54 24 10 55 56 57 48 81 EC 80 00 00 00 48 8B FA" },
+    { 0x00090EA0, "glaiel::Scene::CreateComponent<CatParts,CatData*&>",
+      "48 89 5C 24 10 48 89 6C 24 18 56 57 41 56 48 83 EC 40 4D 8B F0 48 8B EA 48 8B D9 80 B9 B0 04 00 00 00 74 07 33 C0 E9 ? ? ? ? 48 8D 0D ? ? ? ? E8 ? ? ? ? 48 8B F8 48 89 44 24 60 48 85 C0 74 1D 33 D2 41 B8 90 0A 00 00" },
+    { 0x0005A100, "glaiel::Renderer::FindChild<DisplayObject>",
+      "48 89 54 24 10 53 56 57 48 83 EC 60 48 8B F2 48 8B D9 48 8B 89 80 00 00 00 48 85 C9 75 12 48 8B CA E8 ? ? ? ? 33 C0 48 83 C4 60 5F 5E 5B C3 48 8B 01 FF 50 18 48 8B 8B 80 00 00 00 48 85 C9 74 24 48 8B 01 FF 10 83 F8 01 74 11 48 8B 8B 80 00 00 00 48 8B 01 FF 10 83 F8 02 75 09 48 8B 9B 80 00 00 00 EB 02 33 DB 48 8B D6 48 8D 4C 24 20 E8 ? ? ? ? 48 8B F8 48 89 84 24 80 00 00 00 48 8B D0 48 8D 4C 24 40 E8 ? ? ? ? 45 33 C0" },
+    { 0x0098E8A0, "glaiel::swf::DynamicTextBox::setText(wstring)",
+      "48 89 5C 24 08 48 89 74 24 18 48 89 54 24 10 57 48 83 EC 20 45 0F B6 D0" },
+    { 0x0098E640, "glaiel::swf::DynamicTextBox::SetColor",
+      "F3 0F 10 15 ? ? ? ? 4C 8B D9 F3 0F 10 02" },
+    { 0x009A8A20, "glaiel::swf::MovieClip::gotoAndStop(int)",
+      "40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 80 63 09 FD" },
 };
 
 // Globals, recovered from a referencing instruction's own

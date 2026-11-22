@@ -12,6 +12,7 @@
 #include "mgmp_runhist.h"
 #include "mgmp_lockstep.h"
 #include "mgmp_follow.h"
+#include "mgmp_draft.h"
 #include "mgmp_choice.h"
 #include "mgmp_savefile.h"
 #include "mgmp_leave.h"
@@ -171,6 +172,7 @@ void go_ready(const char* how) {
     log_line("SESSION", "handshake complete -- %s", how);
     lockstep_init();
     follow_init();
+    draft_init();
     savefile_init();
     leave_init();
     catsync_init();
@@ -309,6 +311,7 @@ void handle_hello(uint8_t from, const Hello& h) {
     // can, and a battle built before its cats arrive is a battle built from the
     // wrong cats.
     follow_catchup(from);
+    draft_catchup(from);
 
     // The decisions already taken in the battle it is walking into. Must come
     // after the node -- these name a battle_id the peer does not recognise
@@ -472,6 +475,7 @@ void session_shutdown() {
     nodehash_shutdown();
     aim_shutdown();
     follow_shutdown();
+    draft_shutdown();
     choice_shutdown();
     lockstep_shutdown();
     net_shutdown();
@@ -494,6 +498,7 @@ void session_update() {
 
     if (g.phase == Phase::Ready) {
         lockstep_pump();
+        draft_tick();
         // The host's save is published from here rather than at the click,
         // because the click routinely happens before a peer has connected --
         // and, on a new game, before the file it names exists on disk.

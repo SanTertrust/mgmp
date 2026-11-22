@@ -183,6 +183,7 @@ void hook_defaults() {
     // on below by net.role, next to the rest of the co-op surface.
     g_cfg.hook[T_CombatMenuUpdate] = false;
     g_cfg.hook[T_ButtonUpdate]     = false;
+    g_cfg.hook[T_TurnOrderPortraitUpdate] = false;
 
     // The aim-preview facing freeze. Also off without a session, and here the
     // reason is that the preview is real feedback: a solo player watching their
@@ -244,8 +245,9 @@ void hooks_implied_by(bool net_configured) {
         // would be the worst of the three states: the log would report greying
         // that never appeared on screen.
         if (tune::kCombatLock) {
-            g_cfg.hook[T_CombatMenuUpdate] = true;
-            g_cfg.hook[T_ButtonUpdate]     = true;
+            g_cfg.hook[T_CombatMenuUpdate]        = true;
+            g_cfg.hook[T_ButtonUpdate]            = true;
+            g_cfg.hook[T_TurnOrderPortraitUpdate] = true;
         }
 
         // Not optional and not a diagnostic: without it the aim preview writes

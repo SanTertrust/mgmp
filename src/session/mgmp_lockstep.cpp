@@ -16,6 +16,7 @@
 #include "mgmp_nodehash.h"
 #include "mgmp_runhist.h"
 #include "mgmp_follow.h"
+#include "mgmp_draft.h"
 #include "mgmp_choice.h"
 #include "mgmp_savefile.h"
 #include "mgmp_leave.h"
@@ -1057,15 +1058,39 @@ void snapshot_cats(void* turn_control) {
             log_line("LOCKSTEP", "!! no peer list yet -- deferring the split; if "
                                  "this repeats, PEERS never arrived");
         }
-        const SplitRange range = split_for(g.humans, P, pos);
-        const uint32_t   mine  = range.count;
-
-        uint32_t seen = 0;
+        const uint8_t self_id = net_self();
+        bool drafted_cat[kMaxCats] = {};
+        uint32_t drafted_count = 0;
+        uint32_t unassigned_humans = 0;
         for (uint32_t i = 0; i < g.cat_count; ++i) {
             if (!g.human_cat[i]) continue;
+            void* cd = nullptr;
+            uint64_t uid = 0;
+            uint8_t owner = kNoPeer;
+            if (mem_read((const uint8_t*)g.cats[i] + kChar_CatData, &cd, sizeof(cd)) && cd &&
+                mem_read((const uint8_t*)cd + kCatData_Uid, &uid, sizeof(uid)) && uid &&
+                draft_lookup_owner(uid, &owner)) {
+                g.local_cat[i] = (owner == self_id);
+                drafted_cat[i] = true;
+                ++drafted_count;
+            } else {
+                ++unassigned_humans;
+            }
+        }
+
+        const SplitRange range = split_for(unassigned_humans, P, pos);
+        uint32_t seen = 0;
+        for (uint32_t i = 0; i < g.cat_count; ++i) {
+            if (!g.human_cat[i] || drafted_cat[i]) continue;
             g.local_cat[i] = split_owns(range, seen);
             ++seen;
         }
+
+        uint32_t mine = 0;
+        for (uint32_t i = 0; i < g.cat_count; ++i) if (g.local_cat[i]) ++mine;
+        if (drafted_count)
+            log_line("LOCKSTEP", "applied cat draft ownership to %u/%u human cat(s)",
+                     drafted_count, g.humans);
 
         if (mine == 0 && g.humans)
             log_line("LOCKSTEP", "!! %u human cat(s) over %u player(s) leaves this "
@@ -2538,6 +2563,7 @@ void lockstep_pump() {
 
             case kNetPeerDisconnected:
                 house_on_peer_disconnect(m.from);
+                draft_on_peer_disconnected(m.from);
                 break;
 
             case MSG_HOUSE_BASELINE:
@@ -2597,6 +2623,14 @@ void lockstep_pump() {
 
             case MSG_SCREEN_PING:
                 overlay_on_ping(m.from, m.screen_ping);
+                break;
+
+            case MSG_DRAFT_PICK:
+                draft_on_pick(m.from, m.draft_pick);
+                break;
+
+            case MSG_DRAFT_STATE:
+                draft_on_state(m.draft_state);
                 break;
 
             // Same class as CURSOR exactly: cosmetic, not epoch-gated here.

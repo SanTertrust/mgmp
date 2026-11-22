@@ -6,6 +6,7 @@
 #include "mgmp_nodehash.h"
 #include "mgmp_runhist.h"
 #include "mgmp_follow.h"
+#include "mgmp_draft.h"
 #include "mgmp_house.h"
 #include "mgmp_lockstep.h"
 #include "mgmp_net.h"
@@ -291,6 +292,13 @@ bool follow_on_enter_node(void* map_screen, void* node, bool* sent) {
     house_on_first_node();
     g.first_node_pending = false;
 
+    // If a cat ownership draft is active or needed for this adventure run,
+    // hold node entry until players finish picking their cats.
+    if (draft_is_active()) return false;
+    if (known && draft_needs_selection()) {
+        if (draft_begin_host(index)) return false;
+    }
+
     // --- the host: publish it --------------------------------------------
     if (!known) {
         // Nothing to send that the client could resolve. Do not block the host
@@ -442,6 +450,7 @@ void follow_forget() {
     g.jump_pending  = false;
     g.map_tick      = 0;
     g.map           = nullptr;
+    draft_reset();
 }
 
 void follow_catchup(uint8_t peer) {
@@ -526,6 +535,11 @@ void* follow_map_update(void* map_screen) {
     if (read_nodes(map_screen, map_count, map_nodes)) {
         g.map_tick = GetTickCount64();
         house_on_map_ready();
+        uint32_t draft_node_idx = 0;
+        if (draft_take_ready_node(&draft_node_idx)) {
+            void* node = node_at(map_screen, draft_node_idx);
+            return node && follow_on_enter_node(map_screen, node, nullptr) ? node : nullptr;
+        }
         if (g.first_node_pending && house_clients_map_ready()) {
             g.first_node_pending = false;
             void* node = node_at(map_screen, g.first_node_index);

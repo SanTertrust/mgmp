@@ -1,6 +1,7 @@
 // mgmp_choice -- see mgmp_choice.h for why replicating the CHOICE replaces
 // replicating everything the choice does.
 #include "mgmp_choice.h"
+#include "mgmp_draft.h"
 #include "mgmp_follow.h"
 #include "mgmp_net.h"
 #include "mgmp_tuning.h"
@@ -412,6 +413,18 @@ void choice_shutdown() {
     if (g.cs_ready) { DeleteCriticalSection(&g.cs); g.cs_ready = false; }
 }
 
+// Helper: read CatData* at screen+offset -> cat_uid -> draft owner.
+// Returns true and writes *out_owner when the screen's subject cat has an
+// active connected owner from the adventure draft.
+bool screen_cat_owner(const void* screen, uintptr_t cat_ptr_off, uint8_t* out_owner) {
+    if (!screen) return false;
+    void* cd = nullptr;
+    uint64_t uid = 0;
+    if (!mem_read((const uint8_t*)screen + cat_ptr_off, &cd, sizeof(cd)) || !cd) return false;
+    if (!mem_read((const uint8_t*)cd + kCatData_Uid, &uid, sizeof(uid)) || !uid)  return false;
+    return draft_lookup_owner(uid, out_owner);
+}
+
 // --- the world event -------------------------------------------------------
 
 bool choice_on_event_commit(void* cap) {
@@ -429,14 +442,20 @@ bool choice_on_event_commit(void* cap) {
     uint8_t* begin = nullptr; uint32_t count = 0;
     const bool have = read_options(we, kEvt_OptBegin, kEvt_OptEnd, begin, count);
 
-    if (g.is_client) {
+    uint8_t cat_owner = kNoPeer;
+    const bool has_cat_owner = screen_cat_owner(we, kEvt_CatChoice, &cat_owner);
+    const bool local_owns_event = has_cat_owner ? (cat_owner == net_self()) : !g.is_client;
+
+    if (!local_owns_event) {
         ++g.swallowed;
-        log_line("CHOICE", "suppressed a local event click -- the host owns this run's"
-                           " choices (this peer had %u option(s))", have ? count : 0);
+        log_line("CHOICE", "suppressed a local event click -- %s owns this event's"
+                           " choice (this peer had %u option(s))",
+                 has_cat_owner ? "another player (cat owner)" : "the host",
+                 have ? count : 0);
         return false;                        // do NOT run the original
     }
 
-    // Host: name the index, publish it, then let the click through.
+    // Owner: name the index, publish it, then let the click through.
     if (!have) {
         log_line("CHOICE", "!! could not read this event's option array -- the peer will"
                            " not be told which option was picked");
@@ -466,7 +485,7 @@ void choice_on_event_update(void* world_event) {
     if (!g.on || !world_event) return;
     Guard guard;
     g.world_event = world_event;
-    if (g.is_client) apply_pending(kChoiceEvent, world_event);
+    apply_pending(kChoiceEvent, world_event);
 }
 
 // --- the level-up screen ---------------------------------------------------
@@ -481,6 +500,14 @@ bool choice_on_level_select(void* screen, void* opt) {
     uint8_t committed = 0;
     if (mem_read((const uint8_t*)screen + kLvl_Committed, &committed, 1) && committed)
         return true;
+
+    uint8_t cat_owner = kNoPeer;
+    if (screen_cat_owner(screen, kLvl_Cat, &cat_owner) && cat_owner != net_self()) {
+        ++g.swallowed;
+        log_line("CHOICE", "suppressed a local level-up click -- peer %u owns this cat",
+                 (unsigned)cat_owner);
+        return false;
+    }
 
     // The option arrives as a COPY (the button callback copy-constructs it
     // through sub_14037BBB0), so the index cannot come from pointer arithmetic
@@ -542,13 +569,9 @@ void choice_on_message(const ChoiceMsg& m) {
 
     const uint8_t kind = (m.kind == kChoiceLevelUp) ? kChoiceLevelUp : kChoiceEvent;
 
-    if (!g.is_client && kind != kChoiceLevelUp) {
-        // Same asymmetry mgmp_follow reports: event choices are host -> client,
-        // so a host receiving one is talking to a peer that also believes it hosts.
-        log_line("CHOICE", "!! received a %s choice while hosting -- both peers believe"
-                           " they own the run", kind_name(m.kind));
-        return;
-    }
+    // Both level-up choices and cat-owned event choices can originate from
+    // whichever peer owns the subject cat, so accept incoming choices on both
+    // host and clients.
 
     // A choice for a node mgmp_follow already gave up on. Refusing it here is
     // the other half of choice_on_node_skipped: that one catches the choice
