@@ -595,6 +595,11 @@ enum Call : int {
     C_AnimatorSetState,         // void(Animator*, int state, std::string substate)
     C_FurniturePieceRemove,    // void(FurniturePiece*)
     C_CreateFurniturePiece,    // FurniturePiece*(Component* house, int64_t* uid)
+    C_ClassTagBoxClick,        // void(ClassTagBox*)
+    C_CatSelectorShowStats,    // void(CatSelector*, int64_t cat_id)
+    C_InvScreen2Lookup,        // Equipment*(InventoryScreen2*, int64_t uid)
+    C_InvScreen2ItemEquipped,  // int64_t(InventoryScreen2*, int64_t uid)
+    C_InvItemBoxClickApply,    // void(InventoryItemBox** box_ptr)
     C_COUNT
 };
 
@@ -855,6 +860,11 @@ static const CallDesc kCalls[C_COUNT] = {
     { 0x009AA360, "glaiel::Animator::SetState(int,std::string)" },
     { 0x002EEEF0, "glaiel::FurniturePiece::remove" },
     { 0x001F1E60, "glaiel::Component::Create<FurniturePiece,int64_t&>" },
+    { 0x001405A0, "glaiel::ClassTagBox::click" },
+    { 0x000E18B0, "glaiel::CatSelector::ShowStats" },
+    { 0x0034BDD0, "glaiel::InventoryScreen2::lookup" },
+    { 0x0034BCB0, "glaiel::InventoryScreen2::item_equipped_status" },
+    { 0x0034F0A0, "glaiel::InventoryItemBox::click::lambda_1" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only
@@ -1304,7 +1314,17 @@ constexpr uintptr_t kRenderer_Visible        = 81;   // bool
 constexpr uintptr_t kCatData_Equipment       = 2480; // CatEquipment, five inline slots
 constexpr size_t    kEquipment_Size          = 96;
 constexpr uintptr_t kEquipment_Name          = 8;   // std::string
+constexpr int       kCompId_ClassChooser      = 520;
+constexpr uintptr_t kClassChooser_Selector    = 0x48;  // CatSelector*
+constexpr uintptr_t kClassChooser_CurrentCat  = 0xD0;  // int64_t
+constexpr uintptr_t kCatSelector_SelectedIndex = 0x78; // int32_t (unbounded carousel index)
+constexpr uintptr_t kCatSelector_CurrentCat   = 0x88;  // int64_t
 constexpr int       kCompId_ClassTagBox       = 523;
+constexpr int       kCompId_InventoryItemBox  = 1163;
+constexpr int       kCompId_InventoryScreen2  = 1164;
+constexpr uintptr_t kInvScreen2_Selector      = 0x50;  // CatSelector*
+constexpr uintptr_t kInvScreen2_CurrentCat    = 0x108; // int64_t
+constexpr uintptr_t kInvItemBox_ItemUid       = 0x58;  // int64_t
 constexpr int       kCompId_FurniturePiece    = 1008;
 constexpr uintptr_t kFPiece_PlacedGrid        = 0x48;  // FurnitureGrid*
 constexpr uintptr_t kFPiece_Entry             = 0x2D8; // FurniturePieceEntry* (nullptr once popped)

@@ -52,7 +52,7 @@ namespace mgmp {
 // So: if the value a peer puts in a message changes meaning, that is a protocol
 // change even when every byte stays where it was. Refusing at connect is free;
 // diagnosing it from a turn-0 halt is not.
-constexpr uint32_t kProtoVersion = 34;  // House bidirectional furniture layout sync
+constexpr uint32_t kProtoVersion = 37;  // Remote click indicator + 3s screen ping marker
 
 // A frame's payload may not exceed this. RUNSTATE (phase 5) is the only message
 // that will ever approach it; everything in phase 4 is under 128 bytes.
@@ -136,6 +136,7 @@ enum MsgType : uint8_t {
     MSG_HOUSE_INTERSTITIALS = 31, // host -> client: serialized night/breeding InterstitialQueue
     MSG_HOUSE_POOP_POP      = 32, // both: sync FurniturePiece::PoopPop by piece_uid
     MSG_HOUSE_FURNITURE     = 33, // both: sync House furniture placement layout
+    MSG_SCREEN_PING         = 34, // both: remote click ripple (LMB) & 3s screen ping (MMB)
 };
 
 // A save file is a plain sqlite3 database (the shipped ones start with the
@@ -844,6 +845,7 @@ struct HousePrepCat {
     int64_t cat_id         = 0;
     char    cat_class[48]  = {};
     char    eq_summary[256] = {};
+    char    eq_slots[5][48] = {};
 };
 
 constexpr uint8_t  kMaxPrepCollars = 24;
@@ -856,12 +858,14 @@ enum class PrepStage : uint8_t {
 };
 
 struct HousePrepMsg {
-    uint32_t     generation   = 0;
-    uint8_t      active       = 0;
-    uint8_t      stage        = 0;
-    uint8_t      count        = 0;
-    uint8_t      collar_count = 0;
-    char         map_name[64] = {};
+    uint32_t     generation     = 0;
+    uint8_t      active         = 0;
+    uint8_t      stage          = 0;
+    uint8_t      count          = 0;
+    uint8_t      collar_count   = 0;
+    int64_t      focused_cat_id = 0;
+    int32_t      focused_index  = 0;
+    char         map_name[64]   = {};
     char         collars[kMaxPrepCollars][24] = {};
     HousePrepCat cats[kMaxPrepCats] = {};
 };
@@ -891,6 +895,15 @@ struct HouseFurnitureMsg {
     uint32_t generation = 0;
     uint32_t size       = 0;
     uint8_t* data       = nullptr; // encode: borrowed. decode: owned by receiver (free()).
+};
+
+struct ScreenPingMsg {
+    uint8_t kind     = 0;   // 0 = click ripple (LMB), 1 = 3s screen ping (MMB)
+    uint8_t in_house = 0;
+    float   nx       = 0.0f;
+    float   ny       = 0.0f;
+    float   wx       = 0.0f;
+    float   wy       = 0.0f;
 };
 
 // Host -> client: the run-history object at *(MewDirector+1424), whole.
@@ -1414,6 +1427,8 @@ inline uint32_t enc_house_prep(uint8_t* p, uint32_t cap, const HousePrepMsg& m) 
     w.u8v(n);
     uint8_t nc = m.collar_count > kMaxPrepCollars ? kMaxPrepCollars : m.collar_count;
     w.u8v(nc);
+    w.u64v((uint64_t)m.focused_cat_id);
+    w.u32v((uint32_t)m.focused_index);
     w.str(m.map_name);
     for (uint8_t i = 0; i < nc; ++i)
         w.str(m.collars[i]);
@@ -1421,6 +1436,8 @@ inline uint32_t enc_house_prep(uint8_t* p, uint32_t cap, const HousePrepMsg& m) 
         w.u64v((uint64_t)m.cats[i].cat_id);
         w.str(m.cats[i].cat_class);
         w.str(m.cats[i].eq_summary);
+        for (uint8_t s = 0; s < 5; ++s)
+            w.str(m.cats[i].eq_slots[s]);
     }
     return w.ok ? w.len : 0;
 }
@@ -1463,6 +1480,18 @@ inline uint32_t enc_house_furniture(uint8_t* p, uint32_t cap, const HouseFurnitu
     w.u32v(m.generation);
     w.u32v(m.size);
     w.raw(m.data, m.size);
+    return w.ok ? w.len : 0;
+}
+
+inline uint32_t enc_screen_ping(uint8_t* p, uint32_t cap, const ScreenPingMsg& m) {
+    Writer w(p, cap);
+    w.u8v(MSG_SCREEN_PING);
+    w.u8v(m.kind);
+    w.u8v(m.in_house);
+    w.f32v(m.nx);
+    w.f32v(m.ny);
+    w.f32v(m.wx);
+    w.f32v(m.wy);
     return w.ok ? w.len : 0;
 }
 
@@ -1822,6 +1851,8 @@ inline bool dec_house_prep(Reader& r, HousePrepMsg& m) {
     m.count        = r.u8v();
     m.collar_count = r.u8v();
     if (!r.ok || m.count > kMaxPrepCats || m.collar_count > kMaxPrepCollars) return false;
+    m.focused_cat_id = (int64_t)r.u64v();
+    m.focused_index  = (int32_t)r.u32v();
     r.str(m.map_name, sizeof(m.map_name));
     for (uint8_t i = 0; i < m.collar_count; ++i)
         r.str(m.collars[i], sizeof(m.collars[i]));
@@ -1829,6 +1860,8 @@ inline bool dec_house_prep(Reader& r, HousePrepMsg& m) {
         m.cats[i].cat_id = (int64_t)r.u64v();
         r.str(m.cats[i].cat_class, sizeof(m.cats[i].cat_class));
         r.str(m.cats[i].eq_summary, sizeof(m.cats[i].eq_summary));
+        for (uint8_t s = 0; s < 5; ++s)
+            r.str(m.cats[i].eq_slots[s], sizeof(m.cats[i].eq_slots[s]));
     }
     return r.ok;
 }
@@ -1874,6 +1907,16 @@ inline bool dec_house_furniture(Reader& r, HouseFurnitureMsg& m) {
     return true;
 }
 
+inline bool dec_screen_ping(Reader& r, ScreenPingMsg& m) {
+    m.kind     = r.u8v();
+    m.in_house = r.u8v();
+    m.nx       = r.f32v();
+    m.ny       = r.f32v();
+    m.wx       = r.f32v();
+    m.wy       = r.f32v();
+    return r.ok;
+}
+
 inline bool dec_halt(Reader& r, HaltMsg& h) {
     h.turn = r.u32v();
     r.str(h.reason, sizeof(h.reason));
@@ -1915,6 +1958,7 @@ inline const char* msg_name(uint8_t t) {
         case MSG_HOUSE_INTERSTITIALS: return "HOUSE_INTER";
         case MSG_HOUSE_POOP_POP: return "HOUSE_POOP";
         case MSG_HOUSE_FURNITURE: return "HOUSE_FURN";
+        case MSG_SCREEN_PING: return "SCREEN_PING";
         default:          return "?";
     }
 }

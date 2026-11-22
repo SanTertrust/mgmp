@@ -212,6 +212,16 @@ static const SigTargetDesc kCallSigs[] = {
       "40 55 57 48 83 EC 28 48 8B 79 48 48 8B E9" },
     { 0x001F1E60, "glaiel::Component::Create<FurniturePiece,int64_t&>",
       "48 89 5C 24 08 57 48 83 EC 20 48 8B 41 18 48 8B FA 48 8B 58 08 80 BB B0 04 00 00 00 74 0D 33 C0 48 8B 5C 24 30 48 83 C4 20 5F C3 48 8B CB E8 ? ? ? ? 4C 8B C7 48 8B D0 48 8B CB 48 8B 5C 24 30 48 83 C4 20 5F E9 ? ? ? ? CC CC CC CC CC 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57" },
+    { 0x001405A0, "glaiel::ClassTagBox::click",
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 38 FF FF FF" },
+    { 0x000E18B0, "glaiel::CatSelector::ShowStats",
+      "48 89 5C 24 10 48 89 6C 24 18 56 57 41 56 48 83 EC 40 48 8B DA" },
+    { 0x0034BDD0, "glaiel::InventoryScreen2::lookup",
+      "48 89 5C 24 10 57 48 83 EC 30 44 8B 41 58" },
+    { 0x0034BCB0, "glaiel::InventoryScreen2::item_equipped_status",
+      "48 89 54 24 10 48 83 EC 38 4C 8B D1" },
+    { 0x0034F0A0, "glaiel::InventoryItemBox::click::lambda_1",
+      "48 8B C4 48 89 58 20 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 38 FF FF FF" },
 };
 
 // Globals, recovered from a referencing instruction's own

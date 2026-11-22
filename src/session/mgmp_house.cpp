@@ -64,6 +64,10 @@ using FnDirectorAddScene      = void*(__fastcall*)(void* dir, void* std_str);
 using FnCreateActSel          = void*(__fastcall*)(void* scene, void* entity);
 using FnAnimatorSetState      = void(__fastcall*)(void* animator, int32_t state, void* substate);
 using FnCreateFurnPiece       = void*(__fastcall*)(void* house, int64_t* uid);
+using FnCatSelectorShowStats  = void(__fastcall*)(void* selector, int64_t cat_id);
+using FnInvScreen2Lookup      = void*(__fastcall*)(void* screen, int64_t uid);
+using FnInvScreen2ItemEq      = int64_t(__fastcall*)(void* screen, int64_t uid);
+using FnInvItemBoxClickApply  = void(__fastcall*)(void** box_ptr);
 
 struct InterpSample {
     uint32_t host_tick_ms = 0;
@@ -99,6 +103,7 @@ struct HostCapture {
 
 struct PeerCursorState {
     bool     valid    = false;
+    uint8_t  in_house = 0;      // 1 = House world-space, 2 = Prep screen-space
     uint32_t gen      = 0;
     float    wx       = 0.0f;
     float    wy       = 0.0f;
@@ -156,6 +161,11 @@ struct HouseState {
     FnCreateFurnPiece       create_furn_piece = nullptr;
     FnDirectorAddScene      dir_add_scene   = nullptr;
     FnCreateActSel          create_act_sel  = nullptr;
+    FnVoidPtr               class_tag_box_click = nullptr;
+    FnCatSelectorShowStats  cat_selector_show_stats = nullptr;
+    FnInvScreen2Lookup      inv_screen_lookup = nullptr;
+    FnInvScreen2ItemEq      inv_screen_item_eq = nullptr;
+    FnInvItemBoxClickApply  inv_item_box_click_apply = nullptr;
 
     // Lifecycle & phase
     HostPhase phase            = HostPhase::Outside;
@@ -246,6 +256,7 @@ struct HouseState {
     HousePrepMsg              pending_class_chooser{};
     uint32_t                  pending_class_chooser_gen = 0;
     bool                      has_pending_class_chooser = false;
+    uint32_t                  entered_class_chooser_gen = 0;
 
     // Peer cursors & diagnostics
     PeerCursorState peer_cursors[kMaxPeers];
@@ -627,6 +638,7 @@ void clear_generation_state() {
     g.client_map_generation = 0;
     g.sent_map_generation = 0;
     g.has_pending_class_chooser = false;
+    g.entered_class_chooser_gen = 0;
     g.queued_interstitial_blob.clear();
     g.has_queued_interstitial = false;
     g.queued_baseline_cats.clear();
@@ -1061,6 +1073,7 @@ void read_prep_equipment(const uint8_t* cat, HousePrepCat& summary) {
         char item[48]{};
         const auto* name = cat + kCatData_Equipment + slot * kEquipment_Size + kEquipment_Name;
         if (!mem_read_std_string(name, item, sizeof(item)) || !item[0]) continue;
+        strncpy_s(summary.eq_slots[slot], item, _TRUNCATE);
         const int written = sprintf_s(summary.eq_summary + used,
                                       sizeof(summary.eq_summary) - used,
                                       "%s%s", used ? ", " : "", item);
@@ -1072,6 +1085,20 @@ void read_prep_class_tags(HousePrepMsg& summary) {
     const void* scene = nullptr;
     bool suspended = false;
     if (!leave_find_scene("ClassChooser", &scene, &suspended) || suspended) return;
+    void** choosers = nullptr;
+    uint32_t chooser_count = 0;
+    if (get_cached_list(const_cast<void*>(scene), kCompId_ClassChooser, &choosers, &chooser_count) &&
+        chooser_count > 0 && choosers && choosers[0]) {
+        int64_t focused = 0;
+        if (mem_read((const uint8_t*)choosers[0] + kClassChooser_CurrentCat, &focused, sizeof(focused)))
+            summary.focused_cat_id = focused;
+        void* selector = nullptr;
+        if (mem_read((const uint8_t*)choosers[0] + kClassChooser_Selector, &selector, sizeof(selector)) && selector) {
+            int32_t sel_idx = 0;
+            if (mem_read((const uint8_t*)selector + kCatSelector_SelectedIndex, &sel_idx, sizeof(sel_idx)))
+                summary.focused_index = sel_idx;
+        }
+    }
     void** boxes = nullptr;
     uint32_t count = 0;
     if (!get_cached_list(const_cast<void*>(scene), kCompId_ClassTagBox, &boxes, &count) || !boxes)
@@ -1089,6 +1116,307 @@ void read_prep_class_tags(HousePrepMsg& summary) {
             }
         }
     }
+}
+
+void read_prep_storage_focus(HousePrepMsg& summary) {
+    const void* scene = nullptr;
+    bool suspended = false;
+    if (!leave_find_scene("StorageItems", &scene, &suspended) || suspended) return;
+    void** screens = nullptr;
+    uint32_t screen_count = 0;
+    if (!get_cached_list(const_cast<void*>(scene), kCompId_InventoryScreen2, &screens, &screen_count) ||
+        screen_count == 0 || !screens || !screens[0])
+        return;
+    int64_t focused = 0;
+    if (mem_read((const uint8_t*)screens[0] + kInvScreen2_CurrentCat, &focused, sizeof(focused)))
+        summary.focused_cat_id = focused;
+    void* selector = nullptr;
+    if (mem_read((const uint8_t*)screens[0] + kInvScreen2_Selector, &selector, sizeof(selector)) && selector) {
+        int32_t sel_idx = 0;
+        if (mem_read((const uint8_t*)selector + kCatSelector_SelectedIndex, &sel_idx, sizeof(sel_idx)))
+            summary.focused_index = sel_idx;
+    }
+}
+
+void client_sync_class_chooser() {
+    if (!g.is_client || !g.have_prep || g.last_prep.stage != (uint8_t)PrepStage::ClassChooser)
+        return;
+    if (!g.class_tag_box_click || !g.cat_selector_show_stats)
+        return;
+
+    const void* cc_scene = nullptr;
+    bool cc_susp = false;
+    if (!leave_find_scene("ClassChooser", &cc_scene, &cc_susp) || !cc_scene || cc_susp)
+        return;
+
+    uint8_t destroying = 0;
+    if (!mem_read((const uint8_t*)cc_scene + kScene_Destroying, &destroying, 1) || destroying)
+        return;
+
+    void** choosers = nullptr;
+    uint32_t chooser_count = 0;
+    if (!get_cached_list(const_cast<void*>(cc_scene), kCompId_ClassChooser, &choosers, &chooser_count) ||
+        chooser_count == 0 || !choosers || !choosers[0])
+        return;
+    void* chooser = choosers[0];
+
+    void* selector = nullptr;
+    if (!mem_read((const uint8_t*)chooser + kClassChooser_Selector, &selector, sizeof(selector)) || !selector)
+        return;
+
+    void** boxes = nullptr;
+    uint32_t box_count = 0;
+    get_cached_list(const_cast<void*>(cc_scene), kCompId_ClassTagBox, &boxes, &box_count);
+
+    const void* reg = current_cat_registry();
+    const auto& prep = g.last_prep;
+
+    auto is_party_cat = [&](int64_t cid) -> bool {
+        if (cid == 0) return false;
+        for (uint8_t i = 0; i < prep.count; ++i)
+            if (prep.cats[i].cat_id == cid) return true;
+        return false;
+    };
+
+    auto** scene_current = reinterpret_cast<void**>(addr_of_data(D_SceneCurrent));
+    void* prev_scene = scene_current ? *scene_current : nullptr;
+    if (scene_current) *scene_current = const_cast<void*>(cc_scene);
+
+    auto focus_cat = [&](int64_t cid, bool apply_host_index) {
+        if (!is_party_cat(cid)) return;
+        if (apply_host_index)
+            *(int32_t*)((uintptr_t)selector + kCatSelector_SelectedIndex) = prep.focused_index;
+        int64_t sel_cur = 0;
+        mem_read((const uint8_t*)selector + kCatSelector_CurrentCat, &sel_cur, sizeof(sel_cur));
+        if (sel_cur != cid)
+            g.cat_selector_show_stats(selector, cid);
+        *(int64_t*)((uintptr_t)chooser + kClassChooser_CurrentCat) = cid;
+    };
+
+    // Pass 1: unequip any ClassTagBox whose assigned cat no longer wants that collar.
+    if (boxes && box_count > 0) {
+        for (uint32_t bi = 0; bi < box_count; ++bi) {
+            void* box = boxes[bi];
+            if (!box) continue;
+            int64_t box_cid = -1;
+            if (!mem_read((const uint8_t*)box + kClassTagBox_CatId, &box_cid, sizeof(box_cid)) || box_cid == -1)
+                continue;
+            char box_cls[48]{};
+            mem_read_std_string((const uint8_t*)box + kClassTagBox_Class, box_cls, sizeof(box_cls));
+            for (uint8_t ci = 0; ci < prep.count; ++ci) {
+                if (prep.cats[ci].cat_id != box_cid) continue;
+                if (strcmp(box_cls, prep.cats[ci].cat_class) != 0) {
+                    focus_cat(box_cid, box_cid == prep.focused_cat_id);
+                    g.class_tag_box_click(box);
+                    log_line("HOUSE", "client ClassChooser unequip '%s' from cat %lld",
+                             box_cls, (long long)box_cid);
+                }
+                break;
+            }
+        }
+    }
+
+    // Pass 2: equip missing collars for each cat.
+    if (boxes && box_count > 0) {
+        for (uint8_t ci = 0; ci < prep.count; ++ci) {
+            const int64_t cid = prep.cats[ci].cat_id;
+            const char* desired = prep.cats[ci].cat_class;
+            if (cid == 0 || !desired[0] || strcmp(desired, "Colorless") == 0) continue;
+
+            bool already_box = false;
+            for (uint32_t bi = 0; bi < box_count; ++bi) {
+                void* box = boxes[bi];
+                if (!box) continue;
+                int64_t box_cid = -1;
+                if (!mem_read((const uint8_t*)box + kClassTagBox_CatId, &box_cid, sizeof(box_cid)) || box_cid != cid)
+                    continue;
+                char box_cls[48]{};
+                mem_read_std_string((const uint8_t*)box + kClassTagBox_Class, box_cls, sizeof(box_cls));
+                if (strcmp(box_cls, desired) == 0) {
+                    already_box = true;
+                    break;
+                }
+            }
+            if (already_box) continue;
+
+            if (reg && g.cat_by_id) {
+                const auto* cat = static_cast<const uint8_t*>(g.cat_by_id(reg, cid));
+                if (cat) {
+                    char cur_cls[48]{};
+                    mem_read_std_string(cat + kCatData_Class, cur_cls, sizeof(cur_cls));
+                    if (strcmp(cur_cls, desired) == 0) continue;
+                }
+            }
+
+            for (uint32_t bi = 0; bi < box_count; ++bi) {
+                void* box = boxes[bi];
+                if (!box) continue;
+                int64_t box_cid = -1;
+                if (!mem_read((const uint8_t*)box + kClassTagBox_CatId, &box_cid, sizeof(box_cid)) || box_cid != -1)
+                    continue;
+                char box_cls[48]{};
+                mem_read_std_string((const uint8_t*)box + kClassTagBox_Class, box_cls, sizeof(box_cls));
+                if (strcmp(box_cls, desired) == 0) {
+                    focus_cat(cid, cid == prep.focused_cat_id);
+                    g.class_tag_box_click(box);
+                    log_line("HOUSE", "client ClassChooser equip '%s' on cat %lld",
+                             desired, (long long)cid);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Pass 3: mirror host's focused cat & carousel wrap index.
+    if (prep.focused_cat_id != 0)
+        focus_cat(prep.focused_cat_id, true);
+
+    if (scene_current) *scene_current = prev_scene;
+}
+
+void client_sync_storage_items() {
+    if (!g.is_client || !g.have_prep || g.last_prep.stage != (uint8_t)PrepStage::StorageItems)
+        return;
+    if (!g.inv_screen_lookup || !g.inv_screen_item_eq || !g.inv_item_box_click_apply ||
+        !g.cat_selector_show_stats)
+        return;
+
+    const void* st_scene = nullptr;
+    bool st_susp = false;
+    if (!leave_find_scene("StorageItems", &st_scene, &st_susp) || !st_scene || st_susp)
+        return;
+
+    uint8_t destroying = 0;
+    if (!mem_read((const uint8_t*)st_scene + kScene_Destroying, &destroying, 1) || destroying)
+        return;
+
+    void** screens = nullptr;
+    uint32_t screen_count = 0;
+    if (!get_cached_list(const_cast<void*>(st_scene), kCompId_InventoryScreen2, &screens, &screen_count) ||
+        screen_count == 0 || !screens || !screens[0])
+        return;
+    void* screen = screens[0];
+
+    void* selector = nullptr;
+    if (!mem_read((const uint8_t*)screen + kInvScreen2_Selector, &selector, sizeof(selector)) || !selector)
+        return;
+
+    void** boxes = nullptr;
+    uint32_t box_count = 0;
+    get_cached_list(const_cast<void*>(st_scene), kCompId_InventoryItemBox, &boxes, &box_count);
+
+    const void* reg = current_cat_registry();
+    const auto& prep = g.last_prep;
+
+    auto is_party_cat = [&](int64_t cid) -> bool {
+        if (cid == 0) return false;
+        for (uint8_t i = 0; i < prep.count; ++i)
+            if (prep.cats[i].cat_id == cid) return true;
+        return false;
+    };
+
+    auto** scene_current = reinterpret_cast<void**>(addr_of_data(D_SceneCurrent));
+    void* prev_scene = scene_current ? *scene_current : nullptr;
+    if (scene_current) *scene_current = const_cast<void*>(st_scene);
+
+    auto focus_cat = [&](int64_t cid, bool apply_host_index) {
+        if (!is_party_cat(cid)) return;
+        if (apply_host_index)
+            *(int32_t*)((uintptr_t)selector + kCatSelector_SelectedIndex) = prep.focused_index;
+        int64_t sel_cur = 0;
+        mem_read((const uint8_t*)selector + kCatSelector_CurrentCat, &sel_cur, sizeof(sel_cur));
+        if (sel_cur != cid)
+            g.cat_selector_show_stats(selector, cid);
+        *(int64_t*)((uintptr_t)screen + kInvScreen2_CurrentCat) = cid;
+    };
+
+    // Pass 1: unequip any item whose cat no longer wears that item in that slot.
+    if (boxes && box_count > 0 && reg && g.cat_by_id) {
+        for (uint32_t bi = 0; bi < box_count; ++bi) {
+            void* box = boxes[bi];
+            if (!box) continue;
+            int64_t uid = 0;
+            if (!mem_read((const uint8_t*)box + kInvItemBox_ItemUid, &uid, sizeof(uid)) || uid == 0)
+                continue;
+            const int64_t eq_cat = g.inv_screen_item_eq(screen, uid);
+            if (eq_cat <= 0) continue;
+
+            const auto* cat = static_cast<const uint8_t*>(g.cat_by_id(reg, eq_cat));
+            if (!cat) continue;
+
+            int found_slot = -1;
+            char cur_name[48]{};
+            for (int s = 0; s < 5; ++s) {
+                const uint8_t* slot_ptr = cat + kCatData_Equipment + s * kEquipment_Size;
+                int64_t slot_uid = 0;
+                if (mem_read(slot_ptr, &slot_uid, sizeof(slot_uid)) && slot_uid == uid) {
+                    found_slot = s;
+                    mem_read_std_string(slot_ptr + kEquipment_Name, cur_name, sizeof(cur_name));
+                    break;
+                }
+            }
+            if (found_slot < 0) continue;
+
+            for (uint8_t ci = 0; ci < prep.count; ++ci) {
+                if (prep.cats[ci].cat_id != eq_cat) continue;
+                if (strcmp(cur_name, prep.cats[ci].eq_slots[found_slot]) != 0) {
+                    focus_cat(eq_cat, eq_cat == prep.focused_cat_id);
+                    void* box_ptr = box;
+                    g.inv_item_box_click_apply(&box_ptr);
+                    log_line("HOUSE", "client StorageItems unequip '%s' from cat %lld (slot %d)",
+                             cur_name, (long long)eq_cat, found_slot);
+                }
+                break;
+            }
+        }
+    }
+
+    // Pass 2: equip missing items onto each cat's slots.
+    if (boxes && box_count > 0 && reg && g.cat_by_id) {
+        for (uint8_t ci = 0; ci < prep.count; ++ci) {
+            const int64_t cid = prep.cats[ci].cat_id;
+            if (cid == 0) continue;
+            const auto* cat = static_cast<const uint8_t*>(g.cat_by_id(reg, cid));
+            if (!cat) continue;
+
+            for (int s = 0; s < 5; ++s) {
+                const char* desired = prep.cats[ci].eq_slots[s];
+                if (!desired[0]) continue;
+
+                char cur_name[48]{};
+                mem_read_std_string(cat + kCatData_Equipment + s * kEquipment_Size + kEquipment_Name,
+                                    cur_name, sizeof(cur_name));
+                if (strcmp(cur_name, desired) == 0) continue;
+
+                for (uint32_t bi = 0; bi < box_count; ++bi) {
+                    void* box = boxes[bi];
+                    if (!box) continue;
+                    int64_t uid = 0;
+                    if (!mem_read((const uint8_t*)box + kInvItemBox_ItemUid, &uid, sizeof(uid)) || uid == 0)
+                        continue;
+                    if (g.inv_screen_item_eq(screen, uid) != -1) continue;
+                    const auto* eq = static_cast<const uint8_t*>(g.inv_screen_lookup(screen, uid));
+                    if (!eq) continue;
+                    char eq_name[48]{};
+                    mem_read_std_string(eq + kEquipment_Name, eq_name, sizeof(eq_name));
+                    if (strcmp(eq_name, desired) == 0) {
+                        focus_cat(cid, cid == prep.focused_cat_id);
+                        void* box_ptr = box;
+                        g.inv_item_box_click_apply(&box_ptr);
+                        log_line("HOUSE", "client StorageItems equip '%s' on cat %lld (slot %d)",
+                                 desired, (long long)cid, s);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 3: mirror host's focused cat & carousel wrap index.
+    if (prep.focused_cat_id != 0)
+        focus_cat(prep.focused_cat_id, true);
+
+    if (scene_current) *scene_current = prev_scene;
 }
 
 void host_poll_prep_state() {
@@ -1129,6 +1457,7 @@ void host_poll_prep_state() {
     }
 
     if (g.prep_stage == PrepStage::ClassChooser) read_prep_class_tags(msg);
+    else if (g.prep_stage == PrepStage::StorageItems) read_prep_storage_focus(msg);
     if (!g.have_prep || memcmp(&msg, &g.last_prep, sizeof(msg)) != 0) {
         g.last_prep = msg;
         g.have_prep = true;
@@ -1315,26 +1644,35 @@ void client_interpolate_cats() {
 }
 
 void send_cursor_sample() {
-    if (!net_active() || g.phase != HostPhase::House) return;
+    if (!net_active()) return;
+    if (g.phase != HostPhase::House && g.phase != HostPhase::Prep) return;
     uint32_t t = now_ms();
     if (t - g.last_cursor_ms < tune::kHouseCursorMs) return;
     g.last_cursor_ms = t;
 
-    float wx = 0.0f, wy = 0.0f;
-    if (!house_mouse_world(&wx, &wy)) return;
     float nx = 0.5f, ny = 0.5f;
     uint8_t mode = 0;
-    overlay_local_pointer(nx, ny, mode);
-    project_world_to_norm(wx, wy, &nx, &ny);
+    const bool have_ptr = overlay_local_pointer(nx, ny, mode);
 
     HouseCursorMsg m{};
     m.generation = g.is_client ? g.client_gen : g.generation;
-    m.wx         = wx;
-    m.wy         = wy;
-    m.nx         = nx;
-    m.ny         = ny;
     m.mode       = mode;
-    m.in_house   = 1;
+
+    if (g.phase == HostPhase::House && live_house_scene_valid()) {
+        float wx = 0.0f, wy = 0.0f;
+        if (!house_mouse_world(&wx, &wy)) return;
+        project_world_to_norm(wx, wy, &nx, &ny);
+        m.wx       = wx;
+        m.wy       = wy;
+        m.nx       = nx;
+        m.ny       = ny;
+        m.in_house = 1;
+    } else {
+        if (!have_ptr) return;
+        m.nx       = nx;
+        m.ny       = ny;
+        m.in_house = 2; // Prep screen-space (ClassChooser / StorageItems / ActSelection)
+    }
     net_send_house_cursor(m);
 }
 
@@ -1871,6 +2209,11 @@ void house_set_base(uintptr_t base) {
     g.create_act_sel  = (FnCreateActSel)addr_of_call(C_CreateActSelection);
     g.furn_remove     = (FnVoidPtr)addr_of_call(C_FurniturePieceRemove);
     g.create_furn_piece = (FnCreateFurnPiece)addr_of_call(C_CreateFurniturePiece);
+    g.class_tag_box_click = (FnVoidPtr)addr_of_call(C_ClassTagBoxClick);
+    g.cat_selector_show_stats = (FnCatSelectorShowStats)addr_of_call(C_CatSelectorShowStats);
+    g.inv_screen_lookup = (FnInvScreen2Lookup)addr_of_call(C_InvScreen2Lookup);
+    g.inv_screen_item_eq = (FnInvScreen2ItemEq)addr_of_call(C_InvScreen2ItemEquipped);
+    g.inv_item_box_click_apply = (FnInvItemBoxClickApply)addr_of_call(C_InvItemBoxClickApply);
 }
 
 void house_pump() {
@@ -2062,9 +2405,14 @@ void house_pump() {
                              pm.map_name, (unsigned)pm.count, (unsigned)pm.collar_count);
                     g.go_on_adv(client_md, map_s, collars_vec, cat_ids);
                     g.has_pending_class_chooser = false;
+                    g.entered_class_chooser_gen = g.client_gen;
                 }
             }
         }
+
+        // Client: mirror host's collar/item assignments & cat carousel focus in prep screens.
+        client_sync_class_chooser();
+        client_sync_storage_items();
 
         // Client: transition StorageItems -> ActSelection when host opens ActSelection.
         if (g.phase == HostPhase::Prep && g.have_prep &&
@@ -2457,8 +2805,9 @@ void house_on_message(uint8_t from, const NetMsg& m) {
             pc.prev_wx = pc.valid && pc.gen == c.generation ? pc.wx : c.wx;
             pc.prev_wy = pc.valid && pc.gen == c.generation ? pc.wy : c.wy;
             pc.prev_ms = pc.valid && pc.gen == c.generation ? pc.recv_ms : now;
-            pc.valid   = (c.in_house != 0);
-            pc.gen     = c.generation;
+            pc.valid    = (c.in_house != 0);
+            pc.in_house = c.in_house;
+            pc.gen      = c.generation;
             pc.wx      = c.wx;
             pc.wy      = c.wy;
             pc.nx      = c.nx;
@@ -2473,7 +2822,8 @@ void house_on_message(uint8_t from, const NetMsg& m) {
             g.last_prep = m.house_prep;
             g.have_prep = (m.house_prep.active != 0);
             if (m.house_prep.active && m.house_prep.map_name[0] &&
-                m.house_prep.stage == (uint8_t)PrepStage::ClassChooser) {
+                m.house_prep.stage == (uint8_t)PrepStage::ClassChooser &&
+                g.entered_class_chooser_gen != m.house_prep.generation) {
                 g.pending_class_chooser     = m.house_prep;
                 g.pending_class_chooser_gen = m.house_prep.generation;
                 g.has_pending_class_chooser = true;
@@ -2502,6 +2852,7 @@ void house_on_message(uint8_t from, const NetMsg& m) {
                 } else if (g.phase == HostPhase::Adventure) {
                     // Clear House actor references before adventure transition.
                     g.has_pending_class_chooser = false;
+    g.entered_class_chooser_gen = 0;
                     g.prep_stage = PrepStage::None;
                     g.client_map_generation = pm.generation;
                     g.sent_map_generation = 0;
@@ -2669,7 +3020,11 @@ void house_status(char* out, size_t out_size) {
 }
 
 const HousePrepMsg* house_spectator_prep() {
-    return g.on && g.is_client && g.phase == HostPhase::Prep && g.have_prep ? &g.last_prep : nullptr;
+    if (!g.on || !g.is_client || g.phase != HostPhase::Prep || !g.have_prep) return nullptr;
+    if (g.last_prep.stage == (uint8_t)PrepStage::ClassChooser ||
+        g.last_prep.stage == (uint8_t)PrepStage::StorageItems)
+        return nullptr;
+    return &g.last_prep;
 }
 
 bool house_get_peer_cursor(uint8_t peer, float* out_nx, float* out_ny,
@@ -2677,10 +3032,18 @@ bool house_get_peer_cursor(uint8_t peer, float* out_nx, float* out_ny,
     if (out_active) *out_active = false;
     if (!g.on || peer >= kMaxPeers) return false;
     if (g.phase != HostPhase::House && g.phase != HostPhase::Prep) return false;
-    if (!live_house_scene_valid()) return false;
     const auto& pc = g.peer_cursors[peer];
     if (!pc.valid) return false;
     if (now_ms() - pc.recv_ms > 2000) return false;
+    if (pc.in_house == 2) {
+        // Prep screen-space cursor (ClassChooser / StorageItems / ActSelection).
+        if (out_nx) *out_nx = pc.nx;
+        if (out_ny) *out_ny = pc.ny;
+        if (out_mode) *out_mode = pc.mode;
+        if (out_active) *out_active = true;
+        return true;
+    }
+    if (!live_house_scene_valid()) return false;
     const uint32_t span = pc.recv_ms - pc.prev_ms;
     const uint32_t delay = std::min(span, tune::kHouseInterpDelayMs);
     const uint32_t target = now_ms() - delay;
@@ -2718,6 +3081,16 @@ bool house_get_peer_cursor(uint8_t peer, float* out_nx, float* out_ny,
     if (out_mode) *out_mode = pc.mode;
     if (out_active) *out_active = true;
     return true;
+}
+
+bool house_local_mouse_world(float* out_wx, float* out_wy) {
+    if (!g.on || g.phase != HostPhase::House || !live_house_scene_valid()) return false;
+    return house_mouse_world(out_wx, out_wy);
+}
+
+bool house_project_world(float wx, float wy, float* out_nx, float* out_ny) {
+    if (!g.on || g.phase != HostPhase::House || !live_house_scene_valid()) return false;
+    return project_world_to_norm(wx, wy, out_nx, out_ny);
 }
 
 // ---------------------------------------------------------------------------

@@ -815,13 +815,17 @@ int main() {
 
         HousePrepMsg prep{};
         prep.generation = 3; prep.active = 1; prep.count = 1;
+        prep.focused_cat_id = 42; prep.focused_index = 4;
         prep.cats[0].cat_id = 42;
         strncpy_s(prep.cats[0].cat_class, "Hunter", _TRUNCATE);
+        strncpy_s(prep.cats[0].eq_slots[3], "RustyKnife", _TRUNCATE);
         memset(prep.cats[0].eq_summary, 'A', sizeof(prep.cats[0].eq_summary) - 1);
         n = enc_house_prep(buf, sizeof(buf), prep);
         Reader rp(buf, n); check(rp.u8v() == MSG_HOUSE_PREP, "house prep tag");
         HousePrepMsg prep2{};
-        check(dec_house_prep(rp, prep2) && strcmp(prep2.cats[0].cat_class, "Hunter") == 0, "dec_house_prep");
+        check(dec_house_prep(rp, prep2) && prep2.focused_cat_id == 42 && prep2.focused_index == 4 &&
+              strcmp(prep2.cats[0].cat_class, "Hunter") == 0 &&
+              strcmp(prep2.cats[0].eq_slots[3], "RustyKnife") == 0, "dec_house_prep");
         check(strcmp(prep2.cats[0].eq_summary, prep.cats[0].eq_summary) == 0, "prep equipment summary");
 
         HousePhaseMsg ph{ 3, 2, 1 };
@@ -846,6 +850,14 @@ int main() {
               hf2.data && memcmp(hf2.data, fblob, sizeof(fblob)) == 0,
               "dec_house_furniture");
         free(hf2.data);
+
+        ScreenPingMsg sp{ 1, 1, 0.25f, 0.75f, 123.5f, -45.25f };
+        n = enc_screen_ping(buf, sizeof(buf), sp);
+        Reader rsp(buf, n); check(rsp.u8v() == MSG_SCREEN_PING, "screen ping tag");
+        ScreenPingMsg sp2{};
+        check(dec_screen_ping(rsp, sp2) && sp2.kind == 1 && sp2.in_house == 1 &&
+              sp2.nx == 0.25f && sp2.ny == 0.75f && sp2.wx == 123.5f && sp2.wy == -45.25f,
+              "dec_screen_ping");
     }
 
     printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED",

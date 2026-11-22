@@ -84,6 +84,7 @@ struct NetMsg {
     HouseInterstitialsMsg house_interstitials;
     HousePoopPopMsg  house_poop_pop;
     HouseFurnitureMsg house_furniture;
+    ScreenPingMsg    screen_ping;
     HaltMsg   halt;
     char      refuse[192] = {};
 };
@@ -207,6 +208,7 @@ bool net_send_house_interstitials_to(uint8_t peer, const HouseInterstitialsMsg& 
 bool net_send_house_poop_pop(const HousePoopPopMsg& m);
 bool net_send_house_furniture(const HouseFurnitureMsg& m);
 bool net_send_house_furniture_to(uint8_t peer, const HouseFurnitureMsg& m);
+bool net_send_screen_ping(const ScreenPingMsg& m);
 
 // Pops one decoded message, or returns false if the queue is empty. Call it
 // from the game thread; drain in a loop until it returns false.

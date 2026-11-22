@@ -210,6 +210,7 @@ bool decode_into(const uint8_t* buf, uint32_t len, NetMsg& m) {
         case MSG_HOUSE_INTERSTITIALS: return dec_house_interstitials(r, m.house_interstitials);
         case MSG_HOUSE_POOP_POP: return dec_house_poop_pop(r, m.house_poop_pop);
         case MSG_HOUSE_FURNITURE: return dec_house_furniture(r, m.house_furniture);
+        case MSG_SCREEN_PING: return dec_screen_ping(r, m.screen_ping);
         case MSG_PEERS:   return dec_peers(r, m.peers);
         case MSG_HALT:    return dec_halt(r, m.halt);
         case MSG_REFUSE:  r.str(m.refuse, sizeof(m.refuse)); return r.ok;
@@ -264,6 +265,7 @@ bool relayed(uint8_t type) {
         // like the per-turn HASH above it.
         case MSG_NODEHASH:
         case MSG_HOUSE_CURSOR:
+        case MSG_SCREEN_PING:
         case MSG_CHOICE:
             return true;
         default:
@@ -901,6 +903,12 @@ bool net_send_house_furniture(const HouseFurnitureMsg& m) {
 
 bool net_send_house_furniture_to(uint8_t peer, const HouseFurnitureMsg& m) {
     return send_house_furniture_frame(m, false, peer);
+}
+
+bool net_send_screen_ping(const ScreenPingMsg& m) {
+    uint8_t p[64];
+    uint32_t n = enc_screen_ping(p, sizeof(p), m);
+    return n && net_send(p, n);
 }
 
 namespace {

@@ -356,6 +356,24 @@ struct State {
 
     Peer peers[kMaxPeers];
 
+    struct Mark {
+        bool     active   = false;
+        uint8_t  peer     = 0;
+        uint8_t  kind     = 0;     // 0 = click ripple (350 ms), 1 = 3s screen ping (3000 ms)
+        uint8_t  in_house = 0;
+        float    nx       = 0.0f;
+        float    ny       = 0.0f;
+        float    wx       = 0.0f;
+        float    wy       = 0.0f;
+        uint64_t start_ms = 0;
+    };
+    static constexpr int      kMaxMarks       = 24;
+    static constexpr uint64_t kClickDurationMs = 350;
+    static constexpr uint64_t kPingDurationMs  = 3000;
+    Mark marks[kMaxMarks];
+    bool prev_lmb = false;
+    bool prev_mmb = false;
+
     float   nx = 0, ny = 0;
     // The window in the MOUSE's own units, asked of SDL every frame. See
     // mouse_space() -- this is the divisor the fraction is taken against, and
@@ -563,16 +581,13 @@ bool build() {
     gl.GetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
     gl.GetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev_vbo);
 
-    // Six vertices of {x, y, u, v}, rewritten per draw: the quad's corners
-    // depend on the crop box of whichever cursor state is being drawn, and
-    // there are at most three of them on screen. A buffer update per pointer is
-    // cheaper than a uniform scheme that would have to encode the same four
-    // numbers anyway.
+    // Up to 256 vertices of {x, y, u, v}, rewritten per draw (6 for a cursor
+    // quad, 192 for a 32-segment ring).
     gl.GenVertexArrays(1, &g.vao);
     gl.GenBuffers(1, &g.vbo);
     gl.BindVertexArray(g.vao);
     gl.BindBuffer(GL_ARRAY_BUFFER, g.vbo);
-    gl.BufferData(GL_ARRAY_BUFFER, 6 * 4 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    gl.BufferData(GL_ARRAY_BUFFER, 256 * 4 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
     gl.EnableVertexAttribArray(0);
     gl.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), nullptr);
     gl.EnableVertexAttribArray(1);
@@ -973,6 +988,77 @@ void draw_cursor(uint8_t mode, float nx, float ny, const float rgb[3], float alp
     gl.DrawArrays(GL_TRIANGLES, 0, 6);
 }
 
+void draw_ring(float nx, float ny, float r_in_px, float r_out_px,
+               const float rgb[3], float alpha, int win_w, int win_h) {
+    if (alpha <= 0.005f || r_out_px <= r_in_px || win_w <= 0 || win_h <= 0) return;
+    constexpr int kSegs = 32;
+    constexpr float kTwoPi = 6.283185307179586f;
+    const float ref  = (float)tune::kCursorRefH;
+    const float grow = (ref > 1.0f && win_h > 0) ? (float)win_h / ref : 1.0f;
+    const float ox   = nx * 2.0f - 1.0f;
+    const float oy   = 1.0f - ny * 2.0f;
+    const float rx_i = (r_in_px  * grow) * 2.0f / (float)win_w;
+    const float ry_i = (r_in_px  * grow) * 2.0f / (float)win_h;
+    const float rx_o = (r_out_px * grow) * 2.0f / (float)win_w;
+    const float ry_o = (r_out_px * grow) * 2.0f / (float)win_h;
+
+    float verts[kSegs * 6][4];
+    int n = 0;
+    for (int i = 0; i < kSegs; ++i) {
+        const float a0 = kTwoPi * (float)i / (float)kSegs;
+        const float a1 = kTwoPi * (float)(i + 1) / (float)kSegs;
+        const float c0 = cosf(a0), s0 = sinf(a0);
+        const float c1 = cosf(a1), s1 = sinf(a1);
+        const float ix0 = ox + c0 * rx_i, iy0 = oy + s0 * ry_i;
+        const float ox0 = ox + c0 * rx_o, oy0 = oy + s0 * ry_o;
+        const float ix1 = ox + c1 * rx_i, iy1 = oy + s1 * ry_i;
+        const float ox1 = ox + c1 * rx_o, oy1 = oy + s1 * ry_o;
+        verts[n][0] = ix0; verts[n][1] = iy0; verts[n][2] = 0; verts[n][3] = 0; ++n;
+        verts[n][0] = ox0; verts[n][1] = oy0; verts[n][2] = 0; verts[n][3] = 0; ++n;
+        verts[n][0] = ox1; verts[n][1] = oy1; verts[n][2] = 0; verts[n][3] = 0; ++n;
+        verts[n][0] = ix0; verts[n][1] = iy0; verts[n][2] = 0; verts[n][3] = 0; ++n;
+        verts[n][0] = ox1; verts[n][1] = oy1; verts[n][2] = 0; verts[n][3] = 0; ++n;
+        verts[n][0] = ix1; verts[n][1] = iy1; verts[n][2] = 0; verts[n][3] = 0; ++n;
+    }
+    gl.BufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(n * 4 * sizeof(float)), verts);
+    gl.Uniform1f(g.u_usetex, 0.0f);
+    gl.Uniform4f(g.u_colour, rgb[0], rgb[1], rgb[2], alpha);
+    gl.DrawArrays(GL_TRIANGLES, 0, n);
+}
+
+void add_mark(uint8_t peer, uint8_t kind, uint8_t in_house,
+              float nx, float ny, float wx, float wy, uint64_t now) {
+    int slot = -1;
+    // Keep at most one active 3-second ping marker per player so a new ping
+    // replaces that player's previous ping instead of piling up.
+    if (kind == 1) {
+        for (int i = 0; i < State::kMaxMarks; ++i) {
+            if (g.marks[i].active && g.marks[i].peer == peer && g.marks[i].kind == 1) {
+                slot = i;
+                break;
+            }
+        }
+    }
+    if (slot < 0) {
+        slot = 0;
+        uint64_t oldest = UINT64_MAX;
+        for (int i = 0; i < State::kMaxMarks; ++i) {
+            if (!g.marks[i].active) { slot = i; break; }
+            if (g.marks[i].start_ms < oldest) { oldest = g.marks[i].start_ms; slot = i; }
+        }
+    }
+    State::Mark& m = g.marks[slot];
+    m.active   = true;
+    m.peer     = peer;
+    m.kind     = kind;
+    m.in_house = in_house;
+    m.nx       = nx;
+    m.ny       = ny;
+    m.wx       = wx;
+    m.wy       = wy;
+    m.start_ms = now;
+}
+
 // The replacement SDL_GL_SwapWindow. Draws first, then hands the frame to the
 // implementation we displaced -- after that call the buffer we drew into has
 // been presented and reused, so there is no "after" to draw in.
@@ -1021,6 +1107,9 @@ void overlay_set_base(uintptr_t base) {
 
 void overlay_init() {
     for (auto& p : g.peers) p = Peer{};
+    for (auto& m : g.marks) m = State::Mark{};
+    g.prev_lmb = false;
+    g.prev_mmb = false;
     g.built = false;
     g.prog = g.vao = g.vbo = 0;
     g.have_local = false;
@@ -1288,13 +1377,69 @@ void overlay_on_swap(void* window) {
 
     const uint8_t self = net_self();
     const uint64_t now = GetTickCount64();
-    bool any = false;
-    for (uint8_t i = 0; i < kMaxPeers && !any; ++i) {
+
+    // Determine which peer cursors are currently visible. Click ripples and
+    // screen pings are gated on cursor visibility so they never leak onto
+    // screens or transitions where peer cursors are hidden.
+    bool peer_cursor_vis[kMaxPeers] = {};
+    bool any_peer_cursor = false;
+    for (uint8_t i = 0; i < kMaxPeers; ++i) {
+        if (i == self) continue;
         bool hactive = false;
-        any = (i != self) && ((g.peers[i].have && (now - g.peers[i].at <= kStaleMs)) ||
-              (house_get_peer_cursor(i, nullptr, nullptr, nullptr, &hactive) && hactive));
+        const bool vis = (house_get_peer_cursor(i, nullptr, nullptr, nullptr, &hactive) && hactive) ||
+                         (g.peers[i].have && (now - g.peers[i].at <= kStaleMs));
+        peer_cursor_vis[i] = vis;
+        if (vis) any_peer_cursor = true;
     }
-    if (!any && !test) {
+
+    // Detect local LMB click (remote ripple) and MMB click (3s screen ping).
+    {
+        HWND fg = GetForegroundWindow();
+        DWORD fg_pid = 0;
+        if (fg) GetWindowThreadProcessId(fg, &fg_pid);
+        const bool focused = (fg != nullptr && fg_pid == GetCurrentProcessId());
+        if (focused && g.have_local && net_active()) {
+            const bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            const bool mmb = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+            if (any_peer_cursor) {
+                auto emit = [&](uint8_t kind) {
+                    ScreenPingMsg pm{};
+                    pm.kind = kind;
+                    pm.nx   = g.nx;
+                    pm.ny   = g.ny;
+                    float wx = 0.0f, wy = 0.0f;
+                    if (house_local_mouse_world(&wx, &wy)) {
+                        pm.in_house = 1;
+                        pm.wx = wx;
+                        pm.wy = wy;
+                    }
+                    net_send_screen_ping(pm);
+                    if (kind == 1) {
+                        // Show our own 3s screen ping locally as well.
+                        add_mark(self, 1, pm.in_house, pm.nx, pm.ny, pm.wx, pm.wy, now);
+                    }
+                };
+                if (lmb && !g.prev_lmb) emit(0);
+                if (mmb && !g.prev_mmb) emit(1);
+            }
+            g.prev_lmb = lmb;
+            g.prev_mmb = mmb;
+        } else {
+            g.prev_lmb = false;
+            g.prev_mmb = false;
+        }
+    }
+
+    // Expire old click/ping marks.
+    for (auto& m : g.marks) {
+        if (!m.active) continue;
+        const uint64_t dur = (m.kind == 1) ? State::kPingDurationMs : State::kClickDurationMs;
+        if (now - m.start_ms >= dur) {
+            m.active = false;
+        }
+    }
+
+    if (!any_peer_cursor && !test) {
         if (!g.said_quiet) {
             trace("no peer position has arrived yet -- nothing to draw."
                   " Set net_cursor_gl_test = 1 to draw a marker anyway");
@@ -1384,6 +1529,66 @@ void overlay_on_swap(void* window) {
         draw_cursor(0, 0.58f, 0.5f, cyan, 1.0f, w, h);
     }
 
+    // Draw active click ripples and 3-second ping markers underneath peer arrows.
+    static const float kBlack[3] = { 0.0f, 0.0f, 0.0f };
+    static const float kWhite[3] = { 1.0f, 1.0f, 1.0f };
+    for (const auto& m : g.marks) {
+        if (!m.active) continue;
+        if (m.peer == self) {
+            if (!any_peer_cursor) continue;
+        } else {
+            if (m.peer >= kMaxPeers || !peer_cursor_vis[m.peer]) continue;
+        }
+        float mx_n = m.nx, my_n = m.ny;
+        if (m.in_house) {
+            float pnx = mx_n, pny = my_n;
+            if (!house_project_world(m.wx, m.wy, &pnx, &pny)) continue;
+            mx_n = pnx;
+            my_n = pny;
+        }
+        const float* rgb = kPeerRGB[m.peer % kMaxPeers];
+        const float age_s = (float)(now - m.start_ms) * 0.001f;
+        if (m.kind == 0) {
+            // Remote LMB click ripple (0.35 s).
+            const float t = age_s / 0.35f;
+            if (t >= 1.0f) continue;
+            const float ease = 1.0f - (1.0f - t) * (1.0f - t);
+            const float r_out = 6.0f + ease * 24.0f;
+            const float thick = 3.2f * (1.0f - t * 0.55f);
+            const float r_in  = (r_out > thick) ? (r_out - thick) : 0.0f;
+            const float alpha = 0.90f * (1.0f - t);
+            draw_ring(mx_n, my_n, r_in > 1.2f ? r_in - 1.2f : 0.0f, r_out + 1.2f, kBlack, alpha * 0.55f, w, h);
+            draw_ring(mx_n, my_n, r_in, r_out, rgb, alpha, w, h);
+            if (t < 0.30f) {
+                const float fa = (1.0f - t / 0.30f) * 0.85f;
+                draw_ring(mx_n, my_n, 0.0f, 4.5f * (1.0f - t), kWhite, fa, w, h);
+            }
+        } else {
+            // 3-second MMB screen ping marker.
+            const float t = age_s / 3.0f;
+            if (t >= 1.0f) continue;
+            const float fade = (age_s > 2.6f) ? ((3.0f - age_s) / 0.4f) : 1.0f;
+            const float pulse = 0.5f + 0.5f * sinf(age_s * 7.5f);
+
+            // Periodic expanding radar wave every 0.85 s.
+            const float wt = fmodf(age_s, 0.85f) / 0.85f;
+            const float we = 1.0f - (1.0f - wt) * (1.0f - wt);
+            const float wr_out = 10.0f + we * 38.0f;
+            const float wr_in  = wr_out - 3.0f * (1.0f - wt * 0.5f);
+            draw_ring(mx_n, my_n, wr_in, wr_out, rgb, 0.75f * (1.0f - wt) * fade, w, h);
+
+            // Steady breathing target ring + dark outline.
+            const float rr = 14.0f + pulse * 3.5f;
+            draw_ring(mx_n, my_n, rr - 1.4f, rr + 4.4f, kBlack, 0.65f * fade, w, h);
+            draw_ring(mx_n, my_n, rr,        rr + 3.0f, rgb,    0.95f * fade, w, h);
+
+            // Solid center dot + dark rim.
+            draw_ring(mx_n, my_n, 0.0f, 7.2f, kBlack, 0.75f * fade, w, h);
+            draw_ring(mx_n, my_n, 0.0f, 5.2f, rgb,    0.98f * fade, w, h);
+            draw_ring(mx_n, my_n, 0.0f, 2.2f, kWhite, 0.90f * fade, w, h);
+        }
+    }
+
     for (uint8_t i = 0; i < kMaxPeers; ++i) {
         if (i == self) continue;
         float hnx = 0.0f, hny = 0.0f;
@@ -1465,6 +1670,11 @@ void overlay_on_message(uint8_t from, const CursorMsg& c) {
         g.said_msg = true;
     }
     p.have = true;
+}
+
+void overlay_on_ping(uint8_t from, const ScreenPingMsg& p) {
+    if (from >= kMaxPeers) return;
+    add_mark(from, p.kind, p.in_house, p.nx, p.ny, p.wx, p.wy, GetTickCount64());
 }
 
 } // namespace mgmp

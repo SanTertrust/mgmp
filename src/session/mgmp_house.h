@@ -56,12 +56,14 @@ void        house_on_first_node();
 void        house_status(char* out, size_t out_size);
 const HousePrepMsg* house_spectator_prep();
 
-// Peer cursor projection for mgmp_overlay.cpp when in House.
+// Peer cursor projection for mgmp_overlay.cpp when in House or Prep.
 bool house_get_peer_cursor(uint8_t peer,
                            float* out_nx,
                            float* out_ny,
                            uint8_t* out_mode,
                            bool* out_active);
+bool house_local_mouse_world(float* out_wx, float* out_wy);
+bool house_project_world(float wx, float wy, float* out_nx, float* out_ny);
 
 // --- Hooks installed by mgmp_hooks.cpp (gated on tune::kHouseCoop) ----------
 

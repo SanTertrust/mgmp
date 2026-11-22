@@ -85,9 +85,13 @@ void overlay_on_swap(void* window);
 bool overlay_local_pointer(float& nx, float& ny, uint8_t& mode);
 
 struct CursorMsg;
+struct ScreenPingMsg;
 
 // From the lockstep pump, alongside cursor_on_message. The two consume the same
 // message: mgmp_cursor takes the tile out of it and this takes the fraction.
 void overlay_on_message(uint8_t from, const CursorMsg& c);
+
+// Remote click ripple (LMB) and 3-second screen ping marker (MMB).
+void overlay_on_ping(uint8_t from, const ScreenPingMsg& p);
 
 } // namespace mgmp

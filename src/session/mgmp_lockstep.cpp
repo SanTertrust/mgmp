@@ -2595,6 +2595,10 @@ void lockstep_pump() {
                 overlay_on_message(m.from, m.cursor);
                 break;
 
+            case MSG_SCREEN_PING:
+                overlay_on_ping(m.from, m.screen_ping);
+                break;
+
             // Same class as CURSOR exactly: cosmetic, not epoch-gated here.
             // mgmp_aim checks the battle id itself, at the moment it would
             // draw, for the same reason the overlay does.
