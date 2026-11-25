@@ -2,6 +2,8 @@
 
 an awesome and very cool mod that allows you to play with your friends
 
+you can watch the gameplay [here](https://youtu.be/tgWJtkz0ujo)
+
 currently it uses own loader (cause i wasn't into mewgenics modding)
 
 ## Status
