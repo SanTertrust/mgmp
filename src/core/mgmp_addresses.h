@@ -613,6 +613,7 @@ enum Call : int {
     C_DynamicTextBoxSetText,   // void(swf::DynamicTextBox*, std::wstring, bool, bool)
     C_DynamicTextBoxSetColor,  // void(swf::DynamicTextBox*, Color*)
     C_MovieClipGotoAndStop,    // void(swf::MovieClip*, int frame)
+    C_CatTempStatsClear,       // void(CatTemporaryStats*) -- clears passives_next_fight before unpack
     C_COUNT
 };
 
@@ -889,6 +890,7 @@ static const CallDesc kCalls[C_COUNT] = {
     { 0x0098E8A0, "glaiel::swf::DynamicTextBox::setText(wstring)" },
     { 0x0098E640, "glaiel::swf::DynamicTextBox::SetColor" },
     { 0x009A8A20, "glaiel::swf::MovieClip::gotoAndStop(int)" },
+    { 0x000B6F30, "glaiel::CatTemporaryStats::clear" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only
@@ -1409,6 +1411,7 @@ constexpr uintptr_t kDispObj_Flags           = 8;    // u8, bit 0x20 = visible
 
 constexpr uintptr_t kChar_CatData            = 0x88; // CatData*
 constexpr uintptr_t kCatData_Name            = 0x18; // std::wstring
+constexpr uintptr_t kCatData_TempStats       = 0x7A8;// CatTemporaryStats (passives_next_fight vector)
 constexpr uintptr_t kCatData_Level           = 0xC30;// int32_t
 constexpr uintptr_t kCatData_Uid             = 0xC48;// int64_t
 constexpr uintptr_t kLvl_Cat                 = 0xA0; // LevelUpScreen::cat (CatData*)

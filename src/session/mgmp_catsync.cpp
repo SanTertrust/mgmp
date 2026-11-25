@@ -27,16 +27,18 @@ typedef void  (__fastcall* fn_serialize_cat)(void* cat, void* stream, bool flag)
 typedef void  (__fastcall* fn_bs_dtor)(void* stream);
 typedef void* (__fastcall* fn_ofstream_ctor)(void* self);
 typedef void* (__fastcall* fn_cat_by_id)(void* registry, uint64_t id);
+typedef void  (__fastcall* fn_temp_stats_clear)(void* temp_stats);
 
 struct State {
     uintptr_t base = 0;
     bool      resolved = false;   // every call target verified
 
-    fn_serialize_cat serialize = nullptr;
-    fn_bs_dtor       bs_dtor   = nullptr;
-    fn_ofstream_ctor of_ctor   = nullptr;
-    fn_cat_by_id     by_id     = nullptr;
-    const void**     director_slot = nullptr;
+    fn_serialize_cat    serialize        = nullptr;
+    fn_bs_dtor          bs_dtor          = nullptr;
+    fn_ofstream_ctor    of_ctor          = nullptr;
+    fn_cat_by_id        by_id            = nullptr;
+    fn_temp_stats_clear temp_stats_clear = nullptr;
+    const void**        director_slot    = nullptr;
 
     bool on        = false;
     bool is_client = false;
@@ -95,6 +97,12 @@ bool safe_serialize(void* cat, void* stream) {
 
 bool safe_by_id(void* registry, uint64_t id, void** out) {
     __try { *out = g.by_id(registry, id); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+bool safe_temp_stats_clear(void* temp_stats) {
+    if (!g.temp_stats_clear || !temp_stats) return false;
+    __try { g.temp_stats_clear(temp_stats); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
@@ -219,7 +227,8 @@ void catsync_set_base(uintptr_t base) {
     // CAT SYNC off -- the wrong feature, named in the wrong log line. Same
     // convention mgmp_invsync already states.
     static const int kNeed[] = { C_SerializeCatData, C_ByteStreamDtor,
-                                 C_OfstreamCtor,     C_CatDataById };
+                                 C_OfstreamCtor,     C_CatDataById,
+                                 C_CatTempStatsClear };
     for (int idx : kNeed) {
         if (!addr_of_call((Call)idx)) {
             log_line("CATSYNC", "!! %s did not resolve by signature "
@@ -228,10 +237,11 @@ void catsync_set_base(uintptr_t base) {
         }
     }
 
-    g.serialize     = (fn_serialize_cat)addr_of_call(C_SerializeCatData);
-    g.bs_dtor       = (fn_bs_dtor)      addr_of_call(C_ByteStreamDtor);
-    g.of_ctor       = (fn_ofstream_ctor)addr_of_call(C_OfstreamCtor);
-    g.by_id         = (fn_cat_by_id)    addr_of_call(C_CatDataById);
+    g.serialize        = (fn_serialize_cat)   addr_of_call(C_SerializeCatData);
+    g.bs_dtor          = (fn_bs_dtor)         addr_of_call(C_ByteStreamDtor);
+    g.of_ctor          = (fn_ofstream_ctor)   addr_of_call(C_OfstreamCtor);
+    g.by_id            = (fn_cat_by_id)       addr_of_call(C_CatDataById);
+    g.temp_stats_clear = (fn_temp_stats_clear)addr_of_call(C_CatTempStatsClear);
     g.director_slot = (const void**)    addr_of_data(D_MewDirectorPtr);
     if (!g.director_slot) {
         log_line("CATSYNC", "!! the MewDirector* global did not resolve -- cat sync is OFF");
@@ -341,6 +351,12 @@ bool catsync_unpack_cat(void* cat, const CatDataMsg& m) {
     if (!bs_construct(bs)) return false;
     *(const void**)(bs + kBS_ReadBuf) = m.data;
     *(uint32_t*)(bs + kBS_ReadLen) = m.size;
+    // SerializeCatTempStats appends to CatData::temp_stats.passives_next_fight
+    // in READ mode without clearing it first. When both peers run an event that
+    // adds a next-fight status (e.g. Tragedy -> self_status_next_fight) and the
+    // client then unpacks the host's CatData on top of its live CatData, every
+    // PassiveNextFight entry would be duplicated and desync turn 0.
+    safe_temp_stats_clear((uint8_t*)cat + kCatData_TempStats);
     const bool ok = safe_serialize(cat, bs);
     safe_bs_dtor(bs);
     return ok;

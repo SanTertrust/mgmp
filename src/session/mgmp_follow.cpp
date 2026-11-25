@@ -418,9 +418,47 @@ uint64_t follow_here_seed() { return g.have_here ? g.here_seed : 0; }
 // MapScreen+0x80, so a wrong offset yields "unknown" instead of a confident
 // wrong number -- the same rule the per-turn state hash follows. That is what
 // makes reading two undocumented slots an acceptable risk here.
-constexpr uintptr_t kMap_Marker      = 0xA0;
-constexpr uintptr_t kMarker_AtNode   = 0x50;
-constexpr uintptr_t kMarker_Selected = 0x60;
+constexpr uintptr_t kMap_Marker       = 0xA0;
+constexpr uintptr_t kMarker_Transform = 0x48;
+constexpr uintptr_t kMarker_AtNode    = 0x50;
+constexpr uintptr_t kMarker_NextNode  = 0x58;
+constexpr uintptr_t kMarker_Selected  = 0x60;
+constexpr uintptr_t kMarker_MoveTimer = 0x68;
+constexpr uintptr_t kNode_Graphics    = 0x160;
+constexpr uintptr_t kClip_Pos         = 0x70;  // float x, y (converted to double in MapMarker::init/update)
+constexpr uintptr_t kTransform_Pos    = 0x80;  // double x, y, z
+
+// Keep MapScreen::cat_marker synchronized with the node we are entering via
+// o_EnterNode (client follow and debug panel jumps). EnterNode itself never
+// updates cat_marker: normally MapMarker::update walks to the clicked node,
+// sets current_node + transform->position, and then invokes EnterNode.
+// Without snapping here, the client's marker stays parked on the old node
+// (visibly stuck on the map, especially along forks/hard paths) and
+// MapScreen::CompleteCurrent marks that old node complete instead of `node`.
+void snap_marker_to_node(void* map_screen, void* node) {
+    if (!map_screen || !node) return;
+    void* marker = nullptr;
+    if (!mem_read((const uint8_t*)map_screen + kMap_Marker, &marker, sizeof(marker)) || !marker)
+        return;
+
+    void*  null_node = nullptr;
+    double zero_time = 0.0;
+    mem_write((uint8_t*)marker + kMarker_AtNode,    &node,      sizeof(node));
+    mem_write((uint8_t*)marker + kMarker_NextNode,  &null_node, sizeof(null_node));
+    mem_write((uint8_t*)marker + kMarker_Selected,  &null_node, sizeof(null_node));
+    mem_write((uint8_t*)marker + kMarker_MoveTimer, &zero_time, sizeof(zero_time));
+
+    void* graphics  = nullptr;
+    void* transform = nullptr;
+    if (mem_read((const uint8_t*)node + kNode_Graphics, &graphics, sizeof(graphics)) && graphics &&
+        mem_read((const uint8_t*)marker + kMarker_Transform, &transform, sizeof(transform)) && transform) {
+        float xy[2] = {};
+        if (mem_read((const uint8_t*)graphics + kClip_Pos, xy, sizeof(xy))) {
+            double pos[3] = { (double)xy[0], (double)xy[1], 0.0 };
+            mem_write((uint8_t*)transform + kTransform_Pos, pos, sizeof(pos));
+        }
+    }
+}
 
 bool read_marker_node(uintptr_t slot, uint32_t& index) {
     if (!g.map) return false;
@@ -583,6 +621,7 @@ void* follow_map_update(void* map_screen) {
         // property the follow path relies on in the other direction.
         bool sent = false;
         if (!follow_on_enter_node(map_screen, node, &sent)) return nullptr;
+        snap_marker_to_node(map_screen, node);
         return node;
     }
 
@@ -709,6 +748,7 @@ void* follow_map_update(void* map_screen) {
         log_line("FOLLOW", "!! LEFT SHIFT is down -- EnterNode branches on it and"
                            " this peer will not take the host's path");
 
+    snap_marker_to_node(map_screen, node);
     return node;
 }
 

@@ -242,6 +242,8 @@ static const SigTargetDesc kCallSigs[] = {
       "F3 0F 10 15 ? ? ? ? 4C 8B D9 F3 0F 10 02" },
     { 0x009A8A20, "glaiel::swf::MovieClip::gotoAndStop(int)",
       "40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 80 63 09 FD" },
+    { 0x000B6F30, "glaiel::CatTemporaryStats::clear",
+      "40 57 48 83 EC 50 33 C0 48 C7 44 24 20 FF FF FF 3F" },
 };
 
 // Globals, recovered from a referencing instruction's own
