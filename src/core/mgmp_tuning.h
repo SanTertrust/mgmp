@@ -43,9 +43,9 @@ constexpr bool     kPointers     = true;
 // a deliberate reconnect -- and Steven counts every one of them. The penalty
 // was measuring our tooling, not the player.
 constexpr bool     kHookSaveScum  = true;
-// Convert TimeDelayStatusApplication's wall-clock countdown to a turn count.
-// Never yet run against real content -- the one reachable user is AZ_LoseHead.
-constexpr bool     kHookTimeDelay = false;
+// Convert TimeDelayStatusApplication's wall-clock countdown to a turn count
+// so FPS differences cannot desync delayed status effects (e.g. AZ_LoseHead).
+constexpr bool     kHookTimeDelay = true;
 // Turn boundaries such a status waits before firing. 1 = the next boundary.
 constexpr uint32_t kTimeDelayTurns = 1;
 
@@ -166,9 +166,9 @@ constexpr float    kCursorInkRefH  = 106.0f;
 constexpr int      kContentAspectW = 16;
 constexpr int      kContentAspectH = 9;
 
-// Exponential smoothing time constant. CURSOR is throttled to ~60 messages a
-// second, so 25 ms keeps the pointer responsive without raw-sample jitter.
-constexpr uint32_t kCursorSmoothMs = 25;
+// Exponential smoothing time constant. CURSOR is sent at ~60 Hz (QPC-paced),
+// so 35 ms absorbs TCP arrival jitter cleanly while staying responsive.
+constexpr uint32_t kCursorSmoothMs = 35;
 
 // --- the combat menu lock ---------------------------------------------------
 

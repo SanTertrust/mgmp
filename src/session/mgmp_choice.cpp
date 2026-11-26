@@ -1,8 +1,10 @@
-// mgmp_choice -- see mgmp_choice.h for why replicating the CHOICE replaces
-// replicating everything the choice does.
+// mgmp_choice -- replicate the player's choice on WorldEvent and LevelUpScreen,
+// guard non-owner Shop/Adventure-Inventory clicks, grey out non-owner choice
+// buttons while keeping them clickable, and broadcast multi-peer teammate votes.
 #include "mgmp_choice.h"
 #include "mgmp_draft.h"
 #include "mgmp_follow.h"
+#include "mgmp_savefile.h"
 #include "mgmp_net.h"
 #include "mgmp_tuning.h"
 #include "mgmp_mem.h"
@@ -18,11 +20,6 @@ namespace mgmp {
 namespace {
 
 // --- the two option arrays -------------------------------------------------
-//
-// Both are {T* begin, T* end} with sizeof(T) == 240, and both are built in
-// authored file order. Read off setupActionChoice__inner_0 (v20 = *(v1+28),
-// v161 = *(v1+29), then "v20 += 240") and off the level-up button callback,
-// which resolves *(LevelUpScreen+864) + 240 * index.
 constexpr uintptr_t kEvt_OptBegin  = 224;
 constexpr uintptr_t kEvt_OptEnd    = 232;
 
@@ -32,71 +29,92 @@ constexpr uintptr_t kLvl_Committed = 792;   // select_option's "already chose" g
 
 constexpr uintptr_t kOptStride     = 240;
 
-// An event option entry's stat key -- "str".."lck", "coins", "quest", "none",
-// "home". A std::string at entry+64, compared against exactly those literals
-// all the way through setupActionChoice.
-constexpr uintptr_t kEvtOpt_Stat = 64;
-// A LevelUpOption's type (1 stats, 2/3 pools, 4/7 ability, 5, 6 item) and its
-// authored name, both read straight off select_option's own switch.
-constexpr uintptr_t kLvlOpt_Type = 0;
-constexpr uintptr_t kLvlOpt_Name = 200;
+constexpr uintptr_t kEvtOpt_Stat   = 64;
+constexpr uintptr_t kLvlOpt_Type   = 0;
+constexpr uintptr_t kLvlOpt_Name   = 200;
 
-// The shipped UI pads out to 4 buttons per screen. This bound only has to be
-// loose enough not to reject a legitimate list and tight enough to refuse a
-// wild pointer.
-constexpr uint32_t kMaxOptions = 64;
+// MenuPanel & Button layout (verified in IDA against Mewgenics.exe.i64).
+constexpr uintptr_t kEvt_Panel     = 0x40;  // WorldEvent::panel (MenuPanel*)
+constexpr uintptr_t kLvl_Panel     = 0xB0;  // LevelUpScreen::panel (MenuPanel*)
+constexpr uintptr_t kPanel_Buttons = 0x40;  // MenuPanel::buttons (std::map<string, Button*>)
+constexpr uintptr_t kBtn_Renderer  = 0x38;  // Button::renderer (Ref<Renderer>)
+constexpr uintptr_t kBtn_Clip      = 0x48;  // Button::button_clip (swf::MovieClip*)
+constexpr uintptr_t kBtn_Bounds    = 0x70;  // Button::cached_bounds (float[4]: xMin, xMax, yMin, yMax)
+constexpr uintptr_t kDispObj_CT    = 0x78;  // swf::DisplayObject::color_transform (8 floats)
 
-using fn_cap = void (__fastcall*)(void*);
+constexpr uint32_t kMaxOptions     = 64;
+constexpr uint32_t kMaxVoteButtons = 16;
+
+struct Vec2D { double x, y; };
+struct SwfColorTransform {
+    float mul_r, mul_g, mul_b, mul_a;
+    float add_r, add_g, add_b, add_a;
+};
+
+using fn_cap           = void   (__fastcall*)(void*);
+using fn_get_world_pos = Vec2D* (__fastcall*)(void* renderer, Vec2D* out, const Vec2D* local,
+                                              void* disp_obj, double scale);
+
+struct VoteEntry {
+    bool     active    = false;
+    uint8_t  kind      = 0;      // kChoiceEventVote or kChoiceLevelUpVote
+    uint32_t index     = 0;
+    uint64_t node_seed = 0;
+    uint64_t cat_uid   = 0;
+};
+
+struct BtnRect {
+    bool  valid = false;
+    float nx0 = 0.0f, ny0 = 0.0f, nx1 = 0.0f, ny1 = 0.0f;
+};
 
 struct State {
     bool on        = false;
     bool is_client = false;
 
-    // Resolved from the module base, prologue-checked, exactly like catsync's
-    // call targets: a bad address here would run an unrelated function with our
-    // arguments on the game's stack.
-    uintptr_t base     = 0;
-    bool      resolved = false;
-    fn_cap    evt_commit = nullptr;   // sub_140937F30
-    fn_cap    lvl_click  = nullptr;   // sub_140386810
+    uintptr_t        base          = 0;
+    bool             resolved      = false;
+    fn_cap           evt_commit    = nullptr;   // WorldEvent option commit lambda
+    fn_cap           lvl_click     = nullptr;   // LevelUpScreen button click lambda
+    fn_cap           lvl_reroll    = nullptr;   // LevelUpScreen::Reroll
+    fn_get_world_pos get_world_pos = nullptr;   // Renderer::get_world_position
 
-    void* world_event  = nullptr;   // latest WorldEvent*,    from its update
+    void* world_event  = nullptr;   // latest WorldEvent*, from its update
     void* level_screen = nullptr;   // latest LevelUpScreen*, from its update
 
-    // A CHOICE can arrive before this peer's screen exists -- the client is
-    // following the host into the node and may not have opened it yet. Hold it
-    // rather than dropping it, the way mgmp_follow holds a node.
-    bool     pending[2]          = {false, false};
-    // The node the host was standing in when it made the choice, and the node
-    // this peer is standing in now. A held choice may only be applied when the
-    // two agree -- the single check that stops a choice outliving its node.
-    uint64_t pending_seed[2]     = {0, 0};
-    uint64_t here_seed           = 0;
+    // Pending WorldEvent choice (at most one event screen per node).
+    bool     pending_evt        = false;
+    uint64_t pending_evt_seed   = 0;
+    uint32_t pending_evt_index  = 0;
+    uint32_t pending_evt_count  = 0;
+    char     pending_evt_name[48] = {};
+    bool     pending_evt_warned = false;
 
-    // NODES THIS PEER WILL NEVER ENTER, so a choice that arrives for one after
-    // the fact can be refused instead of held forever.
-    //
-    // The order is not fixed: mgmp_follow can discard a node before the host
-    // has even made its choice there, in which case the CHOICE arrives second
-    // and there is nothing held for choice_on_node_skipped to drop. Without
-    // this ring that message would sit in the pending slot indefinitely and
-    // block the next real one.
-    //
-    // Same device, and the same 16 entries, as the retired-battle_id ring in
-    // mgmp_battleid.h -- and for the same reason: an id that falls off the end
-    // degrades to "unknown, hold it", never to a wrong apply.
+    // Pending LevelUpScreen actions (select + reroll), queued per (node_seed, cat_uid)
+    // in arrival order so back-to-back level-ups and rerolls never overwrite each other.
+    static constexpr uint32_t kMaxPendingLvl = 32;
+    struct PendingLvl {
+        ChoiceMsg msg;
+        bool      warned = false;
+    };
+    PendingLvl lvl_q[kMaxPendingLvl];
+    uint32_t   lvl_q_count = 0;
+
+    uint64_t here_seed = 0;
+
     static constexpr uint32_t kSkippedRing = 16;
     uint64_t skipped[kSkippedRing] = {};
     uint32_t skipped_next          = 0;
-    uint32_t pending_index[2]    = {0, 0};
-    uint32_t pending_count[2]    = {0, 0};
-    uint32_t pending_aux[2]      = {0, 0};
-    char     pending_name[2][48] = {};
-    bool     pending_warned[2]   = {false, false};
 
-    // Set while we drive the game's own commit path, so the hook that exists to
-    // SWALLOW a click does not swallow the click we just injected. Not
-    // thread-local: every path that touches it is the game thread.
+    // Per-peer active votes on the current Event or LevelUpScreen, plus
+    // cached screen-space button rects updated every tick of the active screen.
+    VoteEntry votes[kMaxPeers];
+    BtnRect   btn_rects[kMaxVoteButtons];
+    uint8_t   btn_vote_kind = 0;
+    uint64_t  btn_node_seed = 0;
+    uint64_t  btn_cat_uid   = 0;
+    uint64_t  btn_rects_ms  = 0;
+
     bool injecting = false;
 
     uint32_t sent      = 0;
@@ -114,13 +132,38 @@ struct Guard {
     ~Guard() { if (g.cs_ready) LeaveCriticalSection(&g.cs); }
 };
 
-const char* kind_name(uint8_t k) { return k == kChoiceLevelUp ? "level-up" : "event"; }
+const char* kind_name(uint8_t k) {
+    if (k == kChoiceLevelUp)       return "level-up";
+    if (k == kChoiceLevelUpReroll) return "level-up reroll";
+    if (k == kChoiceEventVote)     return "event vote";
+    if (k == kChoiceLevelUpVote)   return "level-up vote";
+    return "event";
+}
 
-// Both called with the Guard held.
+void clear_votes() {
+    for (auto& v : g.votes) v = VoteEntry{};
+}
+
+uint64_t read_screen_cat_uid(const void* screen, uintptr_t cat_ptr_off) {
+    if (!screen) return 0;
+    void* cd = nullptr;
+    uint64_t uid = 0;
+    if (!mem_read((const uint8_t*)screen + cat_ptr_off, &cd, sizeof(cd)) || !cd) return 0;
+    if (!mem_read((const uint8_t*)cd + kCatData_Uid, &uid, sizeof(uid))) return 0;
+    return uid;
+}
+
+void lvl_q_erase(uint32_t idx) {
+    if (idx >= g.lvl_q_count) return;
+    for (uint32_t i = idx; i + 1 < g.lvl_q_count; ++i)
+        g.lvl_q[i] = g.lvl_q[i + 1];
+    --g.lvl_q_count;
+}
+
 void remember_skipped(uint64_t seed) {
     if (!seed) return;
     for (uint32_t i = 0; i < State::kSkippedRing; ++i)
-        if (g.skipped[i] == seed) return;          // already known, keep it once
+        if (g.skipped[i] == seed) return;
     g.skipped[g.skipped_next] = seed;
     g.skipped_next = (g.skipped_next + 1) % State::kSkippedRing;
 }
@@ -133,10 +176,6 @@ bool was_skipped(uint64_t seed) {
 }
 
 // --- reading a std::string out of the game ---------------------------------
-//
-// MSVC's std::string is {union{char buf[16]; char* ptr;}, size, capacity}, so
-// the characters are inline when capacity <= 15 and behind a pointer otherwise.
-// Copy at most cap-1 and always terminate: a garbled length must not walk.
 bool read_game_string(const void* str, char* out, uint32_t cap) {
     if (!out || cap == 0) return false;
     out[0] = '\0';
@@ -144,7 +183,7 @@ bool read_game_string(const void* str, char* out, uint32_t cap) {
     uint64_t len = 0, capacity = 0;
     if (!mem_read((const uint8_t*)str + 16, &len, sizeof(len))) return false;
     if (!mem_read((const uint8_t*)str + 24, &capacity, sizeof(capacity))) return false;
-    if (len > 4096) return false;                  // not a string we recognise
+    if (len > 4096) return false;
     const uint8_t* chars = (const uint8_t*)str;
     if (capacity > 15) {
         void* p = nullptr;
@@ -158,6 +197,163 @@ bool read_game_string(const void* str, char* out, uint32_t cap) {
     return true;
 }
 
+// --- button greying & screen-rect caching for multi-peer votes -------------
+
+bool safe_get_world_pos(void* renderer, Vec2D local, void* disp_obj, Vec2D& out) {
+    if (!g.get_world_pos || !renderer || !disp_obj) return false;
+    __try {
+        g.get_world_pos(renderer, &out, &local, disp_obj, 1.0);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void tint_button_clip(void* button, bool grey_out) {
+    if (!button) return;
+    void* clip = nullptr;
+    if (!mem_read((const uint8_t*)button + kBtn_Clip, &clip, sizeof(clip)) || !clip)
+        return;
+    const SwfColorTransform ct = grey_out
+        ? SwfColorTransform{ 0.42f, 0.42f, 0.42f, 0.78f, 0.12f, 0.12f, 0.12f, 0.0f }
+        : SwfColorTransform{ 1.00f, 1.00f, 1.00f, 1.00f, 0.00f, 0.00f, 0.00f, 0.0f };
+    mem_write((uint8_t*)clip + kDispObj_CT, &ct, sizeof(ct));
+}
+
+bool read_button_rect(void* button, BtnRect& out) {
+    out = BtnRect{};
+    if (!button || !g.get_world_pos) return false;
+    void* renderer = nullptr;
+    uint64_t gen = 0, live = 0;
+    if (!mem_read((const uint8_t*)button + kBtn_Renderer, &renderer, sizeof(renderer)) || !renderer)
+        return false;
+    if (!mem_read((const uint8_t*)button + kBtn_Renderer + 8, &gen, sizeof(gen))) return false;
+    if (!mem_read((const uint8_t*)renderer - kRefGenOffset, &live, sizeof(live)) || live != gen)
+        return false;
+
+    void* clip = nullptr;
+    if (!mem_read((const uint8_t*)button + kBtn_Clip, &clip, sizeof(clip)) || !clip) return false;
+
+    float b[4] = {}; // xMin, xMax, yMin, yMax
+    if (!mem_read((const uint8_t*)button + kBtn_Bounds, b, sizeof(b))) return false;
+    if (b[1] <= b[0] || b[3] <= b[2]) return false;
+
+    Vec2D p0{}, p1{};
+    if (!safe_get_world_pos(renderer, Vec2D{ b[0], b[2] }, clip, p0)) return false;
+    if (!safe_get_world_pos(renderer, Vec2D{ b[1], b[3] }, clip, p1)) return false;
+
+    float x0 = (float)(p0.x / 1280.0);
+    float y0 = (float)(p0.y / 720.0);
+    float x1 = (float)(p1.x / 1280.0);
+    float y1 = (float)(p1.y / 720.0);
+    if (x0 > x1) { float t = x0; x0 = x1; x1 = t; }
+    if (y0 > y1) { float t = y0; y0 = y1; y1 = t; }
+    if (x1 - x0 < 0.005f || y1 - y0 < 0.005f) return false;
+    if (x0 < -0.2f || x1 > 1.2f || y0 < -0.2f || y1 > 1.2f) return false;
+
+    out.valid = true;
+    out.nx0 = x0; out.ny0 = y0;
+    out.nx1 = x1; out.ny1 = y1;
+    return true;
+}
+
+// Walk MenuPanel::buttons (MSVC std::map<std::string, Button*>) read-only:
+// 1. Grey out option buttons (and reroll) when !local_owns while keeping them clickable.
+// 2. Cache screen-space rects of numbered option buttons for multi-peer vote markers.
+void sync_choice_panel(void* screen, uintptr_t panel_off, const char* prefix,
+                       bool local_owns, uint8_t vote_kind,
+                       uint64_t node_seed, uint64_t cat_uid) {
+    if (!screen) return;
+    void* panel = nullptr;
+    if (!mem_read((const uint8_t*)screen + panel_off, &panel, sizeof(panel)) || !panel)
+        return;
+
+    void* head = nullptr;
+    uint64_t count = 0;
+    if (!mem_read((const uint8_t*)panel + kPanel_Buttons, &head, sizeof(head)) || !head)
+        return;
+    if (!mem_read((const uint8_t*)panel + kPanel_Buttons + 8, &count, sizeof(count)) ||
+        count == 0 || count > 128)
+        return;
+
+    for (auto& r : g.btn_rects) r = BtnRect{};
+    g.btn_vote_kind = vote_kind;
+    g.btn_node_seed = node_seed;
+    g.btn_cat_uid   = cat_uid;
+
+    void* root = nullptr;
+    if (!mem_read((const uint8_t*)head + 8, &root, sizeof(root)) || !root) return;
+
+    void* stack[64];
+    int sp = 0;
+    stack[sp++] = root;
+    uint32_t visited = 0;
+    const size_t plen = strlen(prefix);
+    bool any_rect = false;
+
+    while (sp > 0 && visited < 128) {
+        void* node = stack[--sp];
+        if (!node || node == head) continue;
+        uint8_t isnil = 1;
+        if (!mem_read((const uint8_t*)node + 25, &isnil, 1) || isnil) continue;
+        ++visited;
+
+        void* left = nullptr; void* right = nullptr;
+        mem_read((const uint8_t*)node + 0,  &left,  sizeof(left));
+        mem_read((const uint8_t*)node + 16, &right, sizeof(right));
+        if (right && right != head && sp < 64) stack[sp++] = right;
+        if (left  && left  != head && sp < 64) stack[sp++] = left;
+
+        char key[48] = {};
+        if (!read_game_string((const uint8_t*)node + 32, key, sizeof(key))) continue;
+        void* btn = nullptr;
+        if (!mem_read((const uint8_t*)node + 64, &btn, sizeof(btn)) || !btn) continue;
+
+        if (strncmp(key, prefix, plen) == 0 && key[plen] >= '0' && key[plen] <= '9') {
+            uint32_t idx = 0;
+            for (const char* p = key + plen; *p >= '0' && *p <= '9'; ++p)
+                idx = idx * 10u + (uint32_t)(*p - '0');
+            tint_button_clip(btn, !local_owns);
+            if (idx < kMaxVoteButtons) {
+                if (read_button_rect(btn, g.btn_rects[idx])) any_rect = true;
+            }
+        } else if (vote_kind == kChoiceLevelUpVote && strcmp(key, "reroll") == 0) {
+            tint_button_clip(btn, !local_owns);
+        }
+    }
+
+    if (any_rect) g.btn_rects_ms = GetTickCount64();
+}
+
+void cast_local_vote(uint8_t vote_kind, uint32_t index, uint64_t node_seed, uint64_t cat_uid) {
+    const uint8_t self = net_self();
+    if (self >= kMaxPeers) return;
+
+    VoteEntry& mine = g.votes[self];
+    const bool same = mine.active && mine.kind == vote_kind &&
+                      mine.index == index && mine.node_seed == node_seed &&
+                      mine.cat_uid == cat_uid;
+    if (same) {
+        mine = VoteEntry{};
+    } else {
+        mine.active    = true;
+        mine.kind      = vote_kind;
+        mine.index     = index;
+        mine.node_seed = node_seed;
+        mine.cat_uid   = cat_uid;
+    }
+
+    ChoiceMsg vm{};
+    vm.kind      = vote_kind;
+    vm.index     = index;
+    vm.aux       = mine.active ? 1u : 0u;
+    vm.node_seed = node_seed;
+    vm.cat_uid   = cat_uid;
+    net_send_choice(vm);
+    log_line("CHOICE", "-> %s option %u (%s)", kind_name(vote_kind), index,
+             mine.active ? "voted" : "cleared");
+}
+
 // --- the option arrays -----------------------------------------------------
 
 bool read_options(const void* screen, uintptr_t begin_off, uintptr_t end_off,
@@ -169,7 +365,7 @@ bool read_options(const void* screen, uintptr_t begin_off, uintptr_t end_off,
     if (!mem_read((const uint8_t*)screen + end_off,   &e, sizeof(e))) return false;
     if (!b || e < b) return false;
     const uintptr_t bytes = (uintptr_t)(e - b);
-    if (bytes % kOptStride) return false;           // not the array we think it is
+    if (bytes % kOptStride) return false;
     const uintptr_t n = bytes / kOptStride;
     if (n == 0 || n > kMaxOptions) return false;
     begin = b; count = (uint32_t)n;
@@ -188,25 +384,14 @@ uint32_t option_type(const uint8_t* entry) {
 }
 
 // --- injecting -------------------------------------------------------------
-//
-// Both are the game's own commit path with our index substituted, rather than a
-// reimplementation of what the commit does. That matters: sub_140937F30 also
-// sets MewDirector+1812 and calls sub_14091AA00, and the level-up callback also
-// copy-constructs the LevelUpOption through sub_14037BBB0. Neither is something
-// worth reproducing by hand.
 
 bool inject_event(uint32_t index) {
     uint8_t* begin = nullptr; uint32_t count = 0;
     if (!read_options(g.world_event, kEvt_OptBegin, kEvt_OptEnd, begin, count)) return false;
     if (index >= count) return false;
 
-    // sub_140937F30 reads only a1+8 and a1+16 and never touches the vftable
-    // slot, so a bare three-qword block is a complete capture for it.
     void* cap[3] = { nullptr, g.world_event, begin + (uintptr_t)index * kOptStride };
     if (!g.evt_commit) return false;
-    // Calling the spliced address re-enters our own hook, which sees `injecting`
-    // and answers "run the original" -- so the game's commit runs exactly once
-    // and we do not need the trampoline exposed outside mgmp_hooks.cpp.
     g.injecting = true;
     g.evt_commit(cap);
     g.injecting = false;
@@ -218,8 +403,6 @@ bool inject_level(uint32_t index) {
     if (!read_options(g.level_screen, kLvl_OptBegin, kLvl_OptEnd, begin, count)) return false;
     if (index >= count) return false;
 
-    // sub_140386810's capture is {vftable, LevelUpScreen*, int index}; it reads
-    // the index as a 32-bit signed at +16 and does the +240*index itself.
     struct Cap { void* vt; void* screen; int32_t index; int32_t pad; };
     Cap cap = { nullptr, g.level_screen, (int32_t)index, 0 };
     if (!g.lvl_click) return false;
@@ -229,193 +412,158 @@ bool inject_level(uint32_t index) {
     return true;
 }
 
-// Shared by both apply ticks.
-void apply_pending(uint8_t kind, void* screen) {
-    if (!g.pending[kind]) return;
+void apply_pending_event(void* screen) {
+    if (!g.pending_evt || !screen) return;
 
-    // NODE IDENTITY FIRST, BEFORE THE COUNT AND BEFORE THE NAME.
-    //
-    // The count and the name describe a screen; this describes WHICH NODE the
-    // screen belongs to, and a choice about another node is not a choice about
-    // this one however well its shape happens to match. Checking it last would
-    // be checking it never: on 2026-08-25 a stale choice passed the count check
-    // (both events offered 2 options) and the name check reported the
-    // disagreement and obeyed it anyway.
-    //
-    // Both seeds must be known for this to mean anything. A zero on either side
-    // is "not stated" -- a peer that has not entered a node this session, or a
-    // pre-19 sender -- and unknown must not read as mismatched.
-    //
-    // A MISMATCH HOLDS, IT DOES NOT DROP, and the difference is the whole
-    // correctness of the common case. The host publishes its choice the instant
-    // it clicks, which is routinely BEFORE this peer has entered that node at
-    // all -- the client is still finishing the previous one. At that moment the
-    // seeds legitimately disagree and the choice is simply not due yet.
-    // Dropping here would throw away every choice that arrives early, which is
-    // most of them.
-    //
-    // Deciding a choice is stale needs the one fact this function does not
-    // have: that the run has MOVED PAST the node it was made on. That is
-    // choice_on_node_skipped's, and it is where the drop lives.
-    if (g.pending_seed[kind] && g.here_seed &&
-        g.pending_seed[kind] != g.here_seed) {
-        if (!g.pending_warned[kind]) {
-            g.pending_warned[kind] = true;
-            log_line("CHOICE", "holding the host's %s choice %u -- it was made on node"
+    if (g.pending_evt_seed && g.here_seed && g.pending_evt_seed != g.here_seed) {
+        if (!g.pending_evt_warned) {
+            g.pending_evt_warned = true;
+            log_line("CHOICE", "holding the host's event choice %u -- it was made on node"
                                " %016llx and this peer is still in %016llx",
-                     kind_name(kind), g.pending_index[kind],
-                     (unsigned long long)g.pending_seed[kind],
+                     g.pending_evt_index,
+                     (unsigned long long)g.pending_evt_seed,
                      (unsigned long long)g.here_seed);
         }
         return;
     }
 
-    if (kind == kChoiceLevelUp) {
-        // select_option no-ops once LevelUpScreen+792 is set, so injecting into a
-        // screen that already committed would be swallowed by the GAME rather than
-        // by us -- silently. Drop the held choice instead, and say so.
-        uint8_t committed = 0;
-        if (mem_read((const uint8_t*)screen + kLvl_Committed, &committed, 1) && committed) {
-            log_line("CHOICE", "!! a level-up choice arrived for a screen that has already"
-                               " committed -- dropping it");
-            g.pending[kChoiceLevelUp] = false;
-            g.pending_warned[kChoiceLevelUp] = false;
-            return;
-        }
-    }
-
-    const uintptr_t bo = (kind == kChoiceLevelUp) ? kLvl_OptBegin : kEvt_OptBegin;
-    const uintptr_t eo = (kind == kChoiceLevelUp) ? kLvl_OptEnd   : kEvt_OptEnd;
-
     uint8_t* begin = nullptr; uint32_t count = 0;
-    if (!read_options(screen, bo, eo, begin, count)) {
-        // The screen exists but its options are not built yet. Normal for a
-        // frame or two; only worth a line if it never resolves.
-        if (!g.pending_warned[kind]) {
-            g.pending_warned[kind] = true;
-            log_line("CHOICE", "holding the host's %s choice %u -- this peer's option"
-                               " list is not built yet",
-                     kind_name(kind), g.pending_index[kind]);
+    if (!read_options(screen, kEvt_OptBegin, kEvt_OptEnd, begin, count)) {
+        if (!g.pending_evt_warned) {
+            g.pending_evt_warned = true;
+            log_line("CHOICE", "holding the host's event choice %u -- this peer's option"
+                               " list is not built yet", g.pending_evt_index);
         }
         return;
     }
 
-    const uint32_t want  = g.pending_index[kind];
-    const uint32_t their = g.pending_count[kind];
-
-    // Count first: if the two lists are different lengths the index means
-    // nothing, and saying so beats picking the wrong option.
+    const uint32_t want  = g.pending_evt_index;
+    const uint32_t their = g.pending_evt_count;
     if (their && their != count) {
-        log_line("CHOICE", "!! host offered %u %s option(s), this peer built %u --"
+        log_line("CHOICE", "!! host offered %u event option(s), this peer built %u --"
                            " refusing to choose; the two screens are not the same screen",
-                 their, kind_name(kind), count);
-        g.pending[kind] = false;
+                 their, count);
+        g.pending_evt = false;
         return;
     }
     if (want >= count) {
-        log_line("CHOICE", "!! host chose %s option %u but this peer has only %u --"
-                           " refusing", kind_name(kind), want, count);
-        g.pending[kind] = false;
+        log_line("CHOICE", "!! host chose event option %u but this peer has only %u --"
+                           " refusing", want, count);
+        g.pending_evt = false;
         return;
     }
 
-    // Then the name. This is the cross-check that catches "same length,
-    // different content", which is the failure an index cannot survive. It is
-    // reported and then obeyed: the host DID press that button, and stalling
-    // here would be worse than proceeding loudly.
     char mine[48] = {};
-    option_name(kind, begin + (uintptr_t)want * kOptStride, mine, sizeof(mine));
-    if (g.pending_name[kind][0] && strcmp(mine, g.pending_name[kind]) != 0)
-        log_line("CHOICE", "!! %s option %u is '%s' here but '%s' on the host --"
+    option_name(kChoiceEvent, begin + (uintptr_t)want * kOptStride, mine, sizeof(mine));
+    if (g.pending_evt_name[0] && strcmp(mine, g.pending_evt_name) != 0)
+        log_line("CHOICE", "!! event option %u is '%s' here but '%s' on the host --"
                            " taking it anyway, the lists are the same length",
-                 kind_name(kind), want, mine, g.pending_name[kind]);
+                 want, mine, g.pending_evt_name);
 
-    if (kind == kChoiceLevelUp) {
-        const uint32_t mine_type = option_type(begin + (uintptr_t)want * kOptStride);
-        if (g.pending_aux[kind] && mine_type != g.pending_aux[kind])
-            log_line("CHOICE", "!! level-up option %u is type %u here but %u on the"
-                               " host -- taking it anyway",
-                     want, mine_type, g.pending_aux[kind]);
-    }
-
-    const bool ok = (kind == kChoiceLevelUp) ? inject_level(want) : inject_event(want);
-    g.pending[kind] = false;
-    g.pending_warned[kind] = false;
+    const bool ok = inject_event(want);
+    g.pending_evt = false;
+    g.pending_evt_warned = false;
+    clear_votes();
     if (ok) {
         ++g.applied;
-        log_line("CHOICE", "applied the host's %s choice: option %u/%u ('%s')",
-                 kind_name(kind), want, count, mine);
+        log_line("CHOICE", "applied the host's event choice: option %u/%u ('%s')",
+                 want, count, mine);
     } else {
-        log_line("CHOICE", "!! failed to apply the host's %s choice %u",
-                 kind_name(kind), want);
+        log_line("CHOICE", "!! failed to apply the host's event choice %u", want);
     }
 }
 
-} // namespace
+void apply_pending_level(void* screen) {
+    if (!g.lvl_q_count || !screen) return;
 
-// ---------------------------------------------------------------------------
+    const uint64_t screen_uid = read_screen_cat_uid(screen, kLvl_Cat);
 
-void choice_set_base(uintptr_t base) {
-    g.base = base;
-    g.resolved = false;
-    g.evt_commit = nullptr;
-    g.lvl_click  = nullptr;
+    for (;;) {
+        uint32_t match_idx = UINT32_MAX;
+        for (uint32_t i = 0; i < g.lvl_q_count; ++i) {
+            const ChoiceMsg& m = g.lvl_q[i].msg;
+            if (m.node_seed && g.here_seed && m.node_seed != g.here_seed) continue;
+            if (m.cat_uid && screen_uid && m.cat_uid != screen_uid) continue;
+            match_idx = i;
+            break;
+        }
+        if (match_idx == UINT32_MAX) return;
 
-    // An armed client that cannot inject is worse than a desync: it swallows
-    // clicks it has no way to replace and the screen is permanently dead with
-    // nothing to time out. So both call targets must resolve or the whole
-    // feature disarms.
-    const uintptr_t evt = addr_of(T_EventChoice);
-    const uintptr_t lvl = addr_of_call(C_LevelUpClick);
-    if (!evt || !lvl) {
-        log_line("CHOICE", "!! %s did not resolve by signature"
-                           " -- choice replication is OFF",
-                 !evt ? "WorldEvent option commit" : "LevelUpScreen button click");
+        uint8_t committed = 0;
+        if (mem_read((const uint8_t*)screen + kLvl_Committed, &committed, 1) && committed) {
+            log_line("CHOICE", "!! a %s arrived for a level-up screen that has already"
+                               " committed -- dropping it", kind_name(g.lvl_q[match_idx].msg.kind));
+            lvl_q_erase(match_idx);
+            return;
+        }
+
+        const ChoiceMsg m = g.lvl_q[match_idx].msg;
+        if (m.kind == kChoiceLevelUpReroll) {
+            lvl_q_erase(match_idx);
+            if (!g.lvl_reroll) {
+                log_line("CHOICE", "!! LevelUpScreen::Reroll not resolved -- cannot replay reroll");
+                continue;
+            }
+            clear_votes();
+            g.injecting = true;
+            g.lvl_reroll(screen);
+            g.injecting = false;
+            ++g.applied;
+            log_line("CHOICE", "applied peer's level-up reroll (cat=%016llx)",
+                     (unsigned long long)m.cat_uid);
+            continue;
+        }
+
+        uint8_t* begin = nullptr; uint32_t count = 0;
+        if (!read_options(screen, kLvl_OptBegin, kLvl_OptEnd, begin, count)) {
+            if (!g.lvl_q[match_idx].warned) {
+                g.lvl_q[match_idx].warned = true;
+                log_line("CHOICE", "holding peer's level-up choice %u -- option list not built yet",
+                         m.index);
+            }
+            return;
+        }
+
+        if (m.count && m.count != count) {
+            log_line("CHOICE", "!! peer offered %u level-up option(s), this peer built %u --"
+                               " refusing to choose", m.count, count);
+            lvl_q_erase(match_idx);
+            return;
+        }
+        if (m.index >= count) {
+            log_line("CHOICE", "!! peer chose level-up option %u but this peer has only %u --"
+                               " refusing", m.index, count);
+            lvl_q_erase(match_idx);
+            return;
+        }
+
+        char mine[48] = {};
+        option_name(kChoiceLevelUp, begin + (uintptr_t)m.index * kOptStride, mine, sizeof(mine));
+        if (m.name[0] && strcmp(mine, m.name) != 0)
+            log_line("CHOICE", "!! level-up option %u is '%s' here but '%s' on the peer --"
+                               " taking it anyway, the lists are the same length",
+                     m.index, mine, m.name);
+
+        const uint32_t mine_type = option_type(begin + (uintptr_t)m.index * kOptStride);
+        if (m.aux && mine_type != m.aux)
+            log_line("CHOICE", "!! level-up option %u is type %u here but %u on the"
+                               " peer -- taking it anyway", m.index, mine_type, m.aux);
+
+        const bool ok = inject_level(m.index);
+        lvl_q_erase(match_idx);
+        clear_votes();
+        if (ok) {
+            ++g.applied;
+            log_line("CHOICE", "applied peer's level-up choice: option %u/%u ('%s', cat=%016llx)",
+                     m.index, count, mine, (unsigned long long)m.cat_uid);
+        } else {
+            log_line("CHOICE", "!! failed to apply peer's level-up choice %u", m.index);
+        }
         return;
     }
-    g.evt_commit = (fn_cap)evt;
-    g.lvl_click  = (fn_cap)lvl;
-    g.resolved = true;
-}
-
-void choice_init() {
-    if (!g.cs_ready) { InitializeCriticalSection(&g.cs); g.cs_ready = true; }
-    g.on          = tune::kChoice;
-    g.is_client   = (net_role() == NetRole::Client);
-    g.world_event = nullptr;
-    g.level_screen = nullptr;
-    g.pending[0] = g.pending[1] = false;
-    g.injecting = false;
-    if (!g.on) { log_line("CHOICE", "choice replication disabled by net_choice = 0"); return; }
-    if (g.is_client && !g.resolved) {
-        // Refusing is the safe direction. An armed client SWALLOWS every local
-        // click on these screens, so one that cannot inject the host's choice
-        // would not desync -- it would sit on a dead screen forever with no
-        // way to press anything.
-        g.on = false;
-        log_line("CHOICE", "!! call targets unresolved -- choice replication is OFF."
-                           " This peer keeps its own event and level-up clicks; expect"
-                           " the two runs to diverge on the first event.");
-        return;
-    }
-    log_line_lvl(LogLevel::Trace, "CHOICE", "armed -- %s",
-             g.is_client ? "taking the host's event choices (local event clicks suppressed);"
-                           " level-up choices are shared"
-                         : "publishing event choices; level-up choices are shared");
-}
-
-void choice_shutdown() {
-    if (!g.on) return;
-    log_line_lvl(LogLevel::Trace, "CHOICE",
-             "done: %u sent, %u applied, %u local click(s) suppressed",
-             g.sent, g.applied, g.swallowed);
-    g.on = false;
-    if (g.cs_ready) { DeleteCriticalSection(&g.cs); g.cs_ready = false; }
 }
 
 // Helper: read CatData* at screen+offset -> cat_uid -> draft owner.
-// Returns true and writes *out_owner when the screen's subject cat has an
-// active connected owner from the adventure draft.
 bool screen_cat_owner(const void* screen, uintptr_t cat_ptr_off, uint8_t* out_owner) {
     if (!screen) return false;
     void* cd = nullptr;
@@ -425,11 +573,86 @@ bool screen_cat_owner(const void* screen, uintptr_t cat_ptr_off, uint8_t* out_ow
     return draft_lookup_owner(uid, out_owner);
 }
 
+} // namespace
+
+// ---------------------------------------------------------------------------
+
+void choice_set_base(uintptr_t base) {
+    g.base = base;
+    g.resolved = false;
+    g.evt_commit    = nullptr;
+    g.lvl_click     = nullptr;
+    g.lvl_reroll    = nullptr;
+    g.get_world_pos = nullptr;
+
+    const uintptr_t evt = addr_of(T_EventChoice);
+    const uintptr_t lvl = addr_of_call(C_LevelUpClick);
+    const uintptr_t rer = addr_of(T_LevelReroll);
+    if (!evt || !lvl) {
+        log_line("CHOICE", "!! %s did not resolve by signature"
+                           " -- choice replication is OFF",
+                 !evt ? "WorldEvent option commit" : "LevelUpScreen button click");
+        return;
+    }
+    g.evt_commit    = (fn_cap)evt;
+    g.lvl_click     = (fn_cap)lvl;
+    g.lvl_reroll    = (fn_cap)rer;
+    g.get_world_pos = (fn_get_world_pos)addr_of_call(C_RendererGetWorldPos);
+    g.resolved = true;
+}
+
+void choice_init() {
+    if (!g.cs_ready) { InitializeCriticalSection(&g.cs); g.cs_ready = true; }
+    g.on          = tune::kChoice;
+    g.is_client   = (net_role() == NetRole::Client);
+    g.world_event = nullptr;
+    g.level_screen = nullptr;
+    g.pending_evt = false;
+    g.pending_evt_warned = false;
+    g.lvl_q_count = 0;
+    g.here_seed   = 0;
+    memset(g.skipped, 0, sizeof(g.skipped));
+    g.skipped_next = 0;
+    clear_votes();
+    g.btn_rects_ms = 0;
+    g.injecting = false;
+    if (!g.on) { log_line("CHOICE", "choice replication disabled by net_choice = 0"); return; }
+    if (g.is_client && !g.resolved) {
+        g.on = false;
+        log_line("CHOICE", "!! call targets unresolved -- choice replication is OFF."
+                           " This peer keeps its own event and level-up clicks; expect"
+                           " the two runs to diverge on the first event.");
+        return;
+    }
+    log_line_lvl(LogLevel::Trace, "CHOICE", "armed -- %s",
+             g.is_client ? "taking the host's event choices (local event/shop/inv clicks guarded);"
+                           " level-up choices & rerolls are shared by cat owner"
+                         : "publishing event choices; level-up choices & rerolls are shared by cat owner");
+}
+
+void choice_shutdown() {
+    if (!g.on) return;
+    log_line_lvl(LogLevel::Trace, "CHOICE",
+             "done: %u sent, %u applied, %u local click(s) suppressed",
+             g.sent, g.applied, g.swallowed);
+    g.on = false;
+    g.world_event  = nullptr;
+    g.level_screen = nullptr;
+    g.pending_evt  = false;
+    g.lvl_q_count  = 0;
+    g.here_seed    = 0;
+    memset(g.skipped, 0, sizeof(g.skipped));
+    g.skipped_next = 0;
+    clear_votes();
+    g.btn_rects_ms = 0;
+    if (g.cs_ready) { DeleteCriticalSection(&g.cs); g.cs_ready = false; }
+}
+
 // --- the world event -------------------------------------------------------
 
 bool choice_on_event_commit(void* cap) {
     if (!g.on || !cap) return true;
-    if (g.injecting) return true;           // this is our own injected click
+    if (g.injecting) return true;
 
     Guard guard;
 
@@ -448,14 +671,18 @@ bool choice_on_event_commit(void* cap) {
 
     if (!local_owns_event) {
         ++g.swallowed;
-        log_line("CHOICE", "suppressed a local event click -- %s owns this event's"
-                           " choice (this peer had %u option(s))",
-                 has_cat_owner ? "another player (cat owner)" : "the host",
-                 have ? count : 0);
-        return false;                        // do NOT run the original
+        if (have) {
+            const uintptr_t delta = (uintptr_t)((uint8_t*)entry - begin);
+            if (delta % kOptStride == 0 && delta / kOptStride < count) {
+                const uint32_t idx = (uint32_t)(delta / kOptStride);
+                cast_local_vote(kChoiceEventVote, idx, follow_here_seed(), 0);
+            }
+        }
+        return false;
     }
 
-    // Owner: name the index, publish it, then let the click through.
+    clear_votes();
+
     if (!have) {
         log_line("CHOICE", "!! could not read this event's option array -- the peer will"
                            " not be told which option was picked");
@@ -485,10 +712,70 @@ void choice_on_event_update(void* world_event) {
     if (!g.on || !world_event) return;
     Guard guard;
     g.world_event = world_event;
-    apply_pending(kChoiceEvent, world_event);
+    if (net_active()) {
+        uint8_t cat_owner = kNoPeer;
+        const bool has_cat_owner = screen_cat_owner(world_event, kEvt_CatChoice, &cat_owner);
+        const bool local_owns = has_cat_owner ? (cat_owner == net_self()) : !g.is_client;
+        sync_choice_panel(world_event, kEvt_Panel, "choice", local_owns,
+                          kChoiceEventVote, follow_here_seed(), 0);
+    }
+    apply_pending_event(world_event);
 }
 
-// --- the level-up screen ---------------------------------------------------
+// --- the level-up screen & shop/inventory guards ---------------------------
+
+bool choice_on_level_reroll(void* screen) {
+    if (!g.on || !screen) return true;
+    if (g.injecting) return true;
+
+    Guard guard;
+    g.level_screen = screen;
+
+    uint8_t committed = 0;
+    if (mem_read((const uint8_t*)screen + kLvl_Committed, &committed, 1) && committed)
+        return true;
+
+    uint8_t cat_owner = kNoPeer;
+    const bool has_cat_owner = screen_cat_owner(screen, kLvl_Cat, &cat_owner);
+    const bool local_owns = has_cat_owner ? (cat_owner == net_self()) : !g.is_client;
+    if (!local_owns) {
+        ++g.swallowed;
+        log_line("CHOICE", "suppressed a local level-up reroll -- %s owns this cat",
+                 has_cat_owner ? "another player" : "the host");
+        return false;
+    }
+
+    clear_votes();
+
+    ChoiceMsg m{};
+    m.kind      = kChoiceLevelUpReroll;
+    m.node_seed = follow_here_seed();
+    m.cat_uid   = read_screen_cat_uid(screen, kLvl_Cat);
+    if (net_send_choice(m)) {
+        ++g.sent;
+        log_line("CHOICE", "-> level-up reroll (cat=%016llx)", (unsigned long long)m.cat_uid);
+    }
+    return true;
+}
+
+bool choice_on_shop_buy(void* shop, void* shop_item) {
+    (void)shop; (void)shop_item;
+    if (!g.on || !g.is_client || !net_active()) return true;
+    Guard guard;
+    ++g.swallowed;
+    log_line("CHOICE", "suppressed local shop purchase -- the host owns the run");
+    return false;
+}
+
+bool choice_on_inv_box_click(void* box_ptr) {
+    (void)box_ptr;
+    if (!g.on || !g.is_client || !net_active()) return true;
+    if (!savefile_adventure_is_loaded()) return true;
+    Guard guard;
+    ++g.swallowed;
+    log_line("CHOICE", "suppressed local adventure inventory click -- the host owns the run");
+    return false;
+}
 
 bool choice_on_level_select(void* screen, void* opt) {
     if (!g.on || !screen || !opt) return true;
@@ -502,19 +789,12 @@ bool choice_on_level_select(void* screen, void* opt) {
         return true;
 
     uint8_t cat_owner = kNoPeer;
-    if (screen_cat_owner(screen, kLvl_Cat, &cat_owner) && cat_owner != net_self()) {
-        ++g.swallowed;
-        log_line("CHOICE", "suppressed a local level-up click -- peer %u owns this cat",
-                 (unsigned)cat_owner);
-        return false;
-    }
+    const bool has_cat_owner = screen_cat_owner(screen, kLvl_Cat, &cat_owner);
+    const bool local_owns = has_cat_owner ? (cat_owner == net_self()) : !g.is_client;
 
-    // The option arrives as a COPY (the button callback copy-constructs it
-    // through sub_14037BBB0), so the index cannot come from pointer arithmetic
-    // the way the event's does. Match on content instead: type plus authored
-    // name, which is the same identity the wire carries.
     uint8_t* begin = nullptr; uint32_t count = 0;
     if (!read_options(screen, kLvl_OptBegin, kLvl_OptEnd, begin, count)) {
+        if (!local_owns) { ++g.swallowed; return false; }
         log_line("CHOICE", "!! could not read the level-up option array -- the peer will"
                            " not be told which option was picked");
         return true;
@@ -532,6 +812,18 @@ bool choice_on_level_select(void* screen, void* opt) {
         option_name(kChoiceLevelUp, e, nm, sizeof(nm));
         if (strcmp(nm, want_name) == 0) { found = i; break; }
     }
+
+    if (!local_owns) {
+        ++g.swallowed;
+        if (found != UINT32_MAX) {
+            cast_local_vote(kChoiceLevelUpVote, found, follow_here_seed(),
+                            read_screen_cat_uid(screen, kLvl_Cat));
+        }
+        return false;
+    }
+
+    clear_votes();
+
     if (found == UINT32_MAX) {
         log_line("CHOICE", "!! the chosen level-up option (type %u '%s') matches none of"
                            " the %u on offer -- not publishing",
@@ -540,16 +832,17 @@ bool choice_on_level_select(void* screen, void* opt) {
     }
 
     ChoiceMsg m{};
-    m.kind  = kChoiceLevelUp;
-    m.index = found;
-    m.count = count;
-    m.aux   = want_type;
+    m.kind      = kChoiceLevelUp;
+    m.index     = found;
+    m.count     = count;
+    m.aux       = want_type;
     m.node_seed = follow_here_seed();
+    m.cat_uid   = read_screen_cat_uid(screen, kLvl_Cat);
     memcpy(m.name, want_name, sizeof(m.name));
     if (net_send_choice(m)) {
         ++g.sent;
-        log_line("CHOICE", "-> level-up option %u/%u (type %u '%s')",
-                 m.index, m.count, m.aux, m.name);
+        log_line("CHOICE", "-> level-up option %u/%u (type %u '%s', cat=%016llx)",
+                 m.index, m.count, m.aux, m.name, (unsigned long long)m.cat_uid);
     }
     return true;
 }
@@ -558,58 +851,84 @@ void choice_on_level_update(void* level_screen) {
     if (!g.on || !level_screen) return;
     Guard guard;
     g.level_screen = level_screen;
-    apply_pending(kChoiceLevelUp, level_screen);
+    if (net_active()) {
+        uint8_t cat_owner = kNoPeer;
+        const bool has_cat_owner = screen_cat_owner(level_screen, kLvl_Cat, &cat_owner);
+        const bool local_owns = has_cat_owner ? (cat_owner == net_self()) : !g.is_client;
+        const uint64_t uid = read_screen_cat_uid(level_screen, kLvl_Cat);
+        sync_choice_panel(level_screen, kLvl_Panel, "opt", local_owns,
+                          kChoiceLevelUpVote, follow_here_seed(), uid);
+    }
+    apply_pending_level(level_screen);
 }
 
 // --- receiving -------------------------------------------------------------
 
-void choice_on_message(const ChoiceMsg& m) {
+void choice_on_message(uint8_t from, const ChoiceMsg& m) {
     if (!g.on) return;
     Guard guard;
 
-    const uint8_t kind = (m.kind == kChoiceLevelUp) ? kChoiceLevelUp : kChoiceEvent;
-
-    // Both level-up choices and cat-owned event choices can originate from
-    // whichever peer owns the subject cat, so accept incoming choices on both
-    // host and clients.
-
-    // A choice for a node mgmp_follow already gave up on. Refusing it here is
-    // the other half of choice_on_node_skipped: that one catches the choice
-    // that was already held when the node was discarded, this one catches the
-    // choice that arrives afterwards. Holding it would block the next real
-    // choice and eventually land on the wrong screen.
-    if (was_skipped(m.node_seed)) {
-        log_line("CHOICE", "!! a %s choice arrived for node %016llx, which this peer"
-                           " passed over without entering -- refusing it. The host"
-                           " resolved that node and this peer did not.",
-                 kind_name(kind), (unsigned long long)m.node_seed);
+    if (m.kind == kChoiceEventVote || m.kind == kChoiceLevelUpVote) {
+        if (from < kMaxPeers) {
+            VoteEntry& v = g.votes[from];
+            v.active    = (m.aux != 0);
+            v.kind      = m.kind;
+            v.index     = m.index;
+            v.node_seed = m.node_seed;
+            v.cat_uid   = m.cat_uid;
+            log_line("CHOICE", "<- peer %u %s %s option %u",
+                     (unsigned)from, v.active ? "voted for" : "cleared vote on",
+                     kind_name(m.kind), m.index);
+        }
         return;
     }
 
-    if (g.pending[kind])
-        log_line("CHOICE", "!! a %s choice was still held when another arrived --"
-                           " the older one (option %u) is dropped",
-                 kind_name(kind), g.pending_index[kind]);
+    if (was_skipped(m.node_seed)) {
+        log_line("CHOICE", "!! a %s choice arrived for node %016llx, which this peer"
+                           " passed over without entering -- refusing it.",
+                 kind_name(m.kind), (unsigned long long)m.node_seed);
+        return;
+    }
 
-    g.pending[kind]        = true;
-    g.pending_seed[kind]   = m.node_seed;
-    g.pending_index[kind]  = m.index;
-    g.pending_count[kind]  = m.count;
-    g.pending_aux[kind]    = m.aux;
-    g.pending_warned[kind] = false;
-    memcpy(g.pending_name[kind], m.name, sizeof(g.pending_name[kind]));
-    g.pending_name[kind][sizeof(g.pending_name[kind]) - 1] = '\0';
+    if (m.kind == kChoiceLevelUp || m.kind == kChoiceLevelUpReroll) {
+        if (g.lvl_q_count >= State::kMaxPendingLvl) {
+            log_line("CHOICE", "!! level-up choice queue full (%u) -- dropping oldest",
+                     g.lvl_q_count);
+            lvl_q_erase(0);
+        }
+        State::PendingLvl& slot = g.lvl_q[g.lvl_q_count++];
+        slot.msg = m;
+        slot.msg.name[sizeof(slot.msg.name) - 1] = '\0';
+        slot.warned = false;
 
-    log_line("CHOICE", "<- %s chose %s option %u/%u ('%s') on node %016llx",
-             (kind == kChoiceLevelUp) ? "peer" : "host",
-             kind_name(kind), m.index, m.count, g.pending_name[kind],
-             (unsigned long long)m.node_seed);
+        if (m.kind == kChoiceLevelUpReroll)
+            log_line("CHOICE", "<- peer rerolled level-up (cat=%016llx) on node %016llx",
+                     (unsigned long long)m.cat_uid, (unsigned long long)m.node_seed);
+        else
+            log_line("CHOICE", "<- peer chose level-up option %u/%u ('%s', cat=%016llx) on node %016llx",
+                     m.index, m.count, slot.msg.name,
+                     (unsigned long long)m.cat_uid, (unsigned long long)m.node_seed);
 
-    // Apply immediately if the screen is already up; otherwise the update tick
-    // takes it. Doing it here too is what makes the common case land in the
-    // same frame the message arrived.
-    void* screen = (kind == kChoiceLevelUp) ? g.level_screen : g.world_event;
-    if (screen) apply_pending(kind, screen);
+        if (g.level_screen) apply_pending_level(g.level_screen);
+        return;
+    }
+
+    if (g.pending_evt)
+        log_line("CHOICE", "!! an event choice was still held when another arrived --"
+                           " the older one (option %u) is dropped", g.pending_evt_index);
+
+    g.pending_evt        = true;
+    g.pending_evt_seed   = m.node_seed;
+    g.pending_evt_index  = m.index;
+    g.pending_evt_count  = m.count;
+    g.pending_evt_warned = false;
+    memcpy(g.pending_evt_name, m.name, sizeof(g.pending_evt_name));
+    g.pending_evt_name[sizeof(g.pending_evt_name) - 1] = '\0';
+
+    log_line("CHOICE", "<- host chose event option %u/%u ('%s') on node %016llx",
+             m.index, m.count, g.pending_evt_name, (unsigned long long)m.node_seed);
+
+    if (g.world_event) apply_pending_event(g.world_event);
 }
 
 void choice_on_node_entered(uint64_t node_seed) {
@@ -617,19 +936,16 @@ void choice_on_node_entered(uint64_t node_seed) {
     Guard guard;
     g.here_seed = node_seed;
 
-    // The cached screens belong to the node just left. Clearing them is not
-    // tidiness: choice_on_message applies straight into whichever pointer is
-    // held, so a stale one is both a wrong screen and a possible dead object.
-    // The update ticks re-cache a live pointer on their very next frame.
     g.world_event  = nullptr;
     g.level_screen = nullptr;
+    clear_votes();
+    g.btn_rects_ms = 0;
 
-    // A choice already waiting for THIS node becomes due the moment we arrive.
-    // Re-arm the "holding" line so the next one is reported afresh rather than
-    // suppressed by a warning about the node we just left.
-    for (uint8_t kind = 0; kind < 2; ++kind)
-        if (g.pending[kind] && g.pending_seed[kind] == node_seed)
-            g.pending_warned[kind] = false;
+    if (g.pending_evt && g.pending_evt_seed == node_seed)
+        g.pending_evt_warned = false;
+    for (uint32_t i = 0; i < g.lvl_q_count; ++i)
+        if (g.lvl_q[i].msg.node_seed == node_seed)
+            g.lvl_q[i].warned = false;
 }
 
 void choice_on_node_skipped(uint64_t node_seed) {
@@ -637,18 +953,48 @@ void choice_on_node_skipped(uint64_t node_seed) {
     Guard guard;
     remember_skipped(node_seed);
 
-    for (uint8_t kind = 0; kind < 2; ++kind) {
-        if (!g.pending[kind] || g.pending_seed[kind] != node_seed) continue;
-        log_line("CHOICE", "!! node %016llx was passed over without this peer"
-                           " entering it, and a %s choice for it (option %u '%s') was"
-                           " still held -- DROPPING it rather than letting it surface"
-                           " on a later node. The host resolved that node and this"
-                           " peer did not: the two runs have diverged.",
-                 (unsigned long long)node_seed, kind_name(kind),
-                 g.pending_index[kind], g.pending_name[kind]);
-        g.pending[kind]        = false;
-        g.pending_warned[kind] = false;
+    if (g.pending_evt && g.pending_evt_seed == node_seed) {
+        log_line("CHOICE", "!! node %016llx was skipped -- dropping held event choice %u ('%s')",
+                 (unsigned long long)node_seed, g.pending_evt_index, g.pending_evt_name);
+        g.pending_evt        = false;
+        g.pending_evt_warned = false;
     }
+    for (uint32_t i = 0; i < g.lvl_q_count; ) {
+        if (g.lvl_q[i].msg.node_seed == node_seed) {
+            log_line("CHOICE", "!! node %016llx was skipped -- dropping held %s (cat=%016llx)",
+                     (unsigned long long)node_seed, kind_name(g.lvl_q[i].msg.kind),
+                     (unsigned long long)g.lvl_q[i].msg.cat_uid);
+            lvl_q_erase(i);
+        } else {
+            ++i;
+        }
+    }
+}
+
+uint32_t choice_get_vote_badges(ChoiceVoteBadge* out, uint32_t cap) {
+    if (!g.on || !out || cap == 0 || !g.btn_rects_ms) return 0;
+    if (GetTickCount64() - g.btn_rects_ms > 200) return 0;
+
+    Guard guard;
+    uint32_t n = 0;
+    for (uint32_t idx = 0; idx < kMaxVoteButtons && n < cap; ++idx) {
+        const BtnRect& r = g.btn_rects[idx];
+        if (!r.valid) continue;
+
+        ChoiceVoteBadge b{};
+        b.nx0 = r.nx0; b.ny0 = r.ny0;
+        b.nx1 = r.nx1; b.ny1 = r.ny1;
+
+        for (uint8_t p = 0; p < kMaxPeers && b.voter_count < 4; ++p) {
+            const VoteEntry& v = g.votes[p];
+            if (!v.active || v.kind != g.btn_vote_kind || v.index != idx) continue;
+            if (v.node_seed && g.btn_node_seed && v.node_seed != g.btn_node_seed) continue;
+            if (v.cat_uid && g.btn_cat_uid && v.cat_uid != g.btn_cat_uid) continue;
+            b.voters[b.voter_count++] = p;
+        }
+        if (b.voter_count > 0) out[n++] = b;
+    }
+    return n;
 }
 
 } // namespace mgmp

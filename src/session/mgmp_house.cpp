@@ -1,6 +1,7 @@
 // mgmp_house.cpp -- host-authoritative House co-op implementation.
 
 #include "mgmp_house.h"
+#include "mgmp_ui.h"
 #include "mgmp_addresses.h"
 #include "mgmp_bytestream.h"
 #include "mgmp_catsync.h"
@@ -335,6 +336,19 @@ bool get_cached_list(void* scene, int comp_id, void*** out_data, uint32_t* out_c
     *out_data  = data;
     *out_count = count;
     return true;
+}
+
+// True while any glaiel::Transition component is live in the "Transition"
+// scene (e.g. MapScreen::EnterNode's HOME cutscene transition whose callback
+// lambda captures MewDirector* and MapScreen*). Destroying MewDirector while a
+// Transition is still ticking causes a use-after-free in DoTransitionCallback.
+bool has_active_transition() {
+    const void* ts = nullptr;
+    bool susp = false;
+    if (!leave_find_scene("Transition", &ts, &susp) || !ts) return false;
+    void** list = nullptr;
+    uint32_t count = 0;
+    return get_cached_list(const_cast<void*>(ts), kCompId_Transition, &list, &count) && count > 0;
 }
 
 const void* current_cat_registry() {
@@ -1070,8 +1084,13 @@ bool host_try_grant_grab(uint8_t peer, int64_t cat_id, uint32_t req_seq, float w
 void read_prep_equipment(const uint8_t* cat, HousePrepCat& summary) {
     size_t used = 0;
     for (size_t slot = 0; slot < 5; ++slot) {
+        const uint8_t* slot_ptr = cat + kCatData_Equipment + slot * kEquipment_Size;
+        int64_t uid = 0;
+        mem_read(slot_ptr, &uid, sizeof(uid));
+        summary.eq_uids[slot] = uid;
+
         char item[48]{};
-        const auto* name = cat + kCatData_Equipment + slot * kEquipment_Size + kEquipment_Name;
+        const auto* name = slot_ptr + kEquipment_Name;
         if (!mem_read_std_string(name, item, sizeof(item)) || !item[0]) continue;
         strncpy_s(summary.eq_slots[slot], item, _TRUNCATE);
         const int written = sprintf_s(summary.eq_summary + used,
@@ -1359,19 +1378,24 @@ void client_sync_storage_items() {
 
             for (uint8_t ci = 0; ci < prep.count; ++ci) {
                 if (prep.cats[ci].cat_id != eq_cat) continue;
-                if (strcmp(cur_name, prep.cats[ci].eq_slots[found_slot]) != 0) {
+                const int64_t want_uid = prep.cats[ci].eq_uids[found_slot];
+                const bool mismatch = (want_uid != 0)
+                    ? (uid != want_uid)
+                    : (strcmp(cur_name, prep.cats[ci].eq_slots[found_slot]) != 0);
+                if (mismatch) {
                     focus_cat(eq_cat, eq_cat == prep.focused_cat_id);
                     void* box_ptr = box;
                     g.inv_item_box_click_apply(&box_ptr);
-                    log_line("HOUSE", "client StorageItems unequip '%s' from cat %lld (slot %d)",
-                             cur_name, (long long)eq_cat, found_slot);
+                    log_line("HOUSE", "client StorageItems unequip '%s' (uid=%lld) from cat %lld (slot %d)",
+                             cur_name, (long long)uid, (long long)eq_cat, found_slot);
                 }
                 break;
             }
         }
     }
 
-    // Pass 2: equip missing items onto each cat's slots.
+    // Pass 2: equip missing items onto each cat's slots (matched by UID first,
+    // falling back to name only if the host did not provide a UID).
     if (boxes && box_count > 0 && reg && g.cat_by_id) {
         for (uint8_t ci = 0; ci < prep.count; ++ci) {
             const int64_t cid = prep.cats[ci].cat_id;
@@ -1380,13 +1404,20 @@ void client_sync_storage_items() {
             if (!cat) continue;
 
             for (int s = 0; s < 5; ++s) {
+                const int64_t desired_uid = prep.cats[ci].eq_uids[s];
                 const char* desired = prep.cats[ci].eq_slots[s];
-                if (!desired[0]) continue;
+                if (desired_uid == 0 && !desired[0]) continue;
 
-                char cur_name[48]{};
-                mem_read_std_string(cat + kCatData_Equipment + s * kEquipment_Size + kEquipment_Name,
-                                    cur_name, sizeof(cur_name));
-                if (strcmp(cur_name, desired) == 0) continue;
+                const uint8_t* slot_ptr = cat + kCatData_Equipment + s * kEquipment_Size;
+                int64_t cur_uid = 0;
+                mem_read(slot_ptr, &cur_uid, sizeof(cur_uid));
+                if (desired_uid != 0) {
+                    if (cur_uid == desired_uid) continue;
+                } else {
+                    char cur_name[48]{};
+                    mem_read_std_string(slot_ptr + kEquipment_Name, cur_name, sizeof(cur_name));
+                    if (strcmp(cur_name, desired) == 0) continue;
+                }
 
                 for (uint32_t bi = 0; bi < box_count; ++bi) {
                     void* box = boxes[bi];
@@ -1395,16 +1426,22 @@ void client_sync_storage_items() {
                     if (!mem_read((const uint8_t*)box + kInvItemBox_ItemUid, &uid, sizeof(uid)) || uid == 0)
                         continue;
                     if (g.inv_screen_item_eq(screen, uid) != -1) continue;
-                    const auto* eq = static_cast<const uint8_t*>(g.inv_screen_lookup(screen, uid));
-                    if (!eq) continue;
-                    char eq_name[48]{};
-                    mem_read_std_string(eq + kEquipment_Name, eq_name, sizeof(eq_name));
-                    if (strcmp(eq_name, desired) == 0) {
+                    bool matched = false;
+                    if (desired_uid != 0) {
+                        matched = (uid == desired_uid);
+                    } else {
+                        const auto* eq = static_cast<const uint8_t*>(g.inv_screen_lookup(screen, uid));
+                        if (!eq) continue;
+                        char eq_name[48]{};
+                        mem_read_std_string(eq + kEquipment_Name, eq_name, sizeof(eq_name));
+                        matched = (strcmp(eq_name, desired) == 0);
+                    }
+                    if (matched) {
                         focus_cat(cid, cid == prep.focused_cat_id);
                         void* box_ptr = box;
                         g.inv_item_box_click_apply(&box_ptr);
-                        log_line("HOUSE", "client StorageItems equip '%s' on cat %lld (slot %d)",
-                                 desired, (long long)cid, s);
+                        log_line("HOUSE", "client StorageItems equip '%s' (uid=%lld) on cat %lld (slot %d)",
+                                 desired, (long long)uid, (long long)cid, s);
                         break;
                     }
                 }
@@ -2255,13 +2292,37 @@ void house_pump() {
                 host_poll_prep_state();
             }
         }
-        if (g.phase == HostPhase::Prep && g.prep_stage != PrepStage::ActSelection) {
-            const void* asc = nullptr;
-            bool asusp = false;
-            if (leave_find_scene("ActSelection", &asc, &asusp) && asc) {
-                g.prep_stage = PrepStage::ActSelection;
+        if (g.phase == HostPhase::Prep) {
+            const void* psc = nullptr;
+            bool psusp = false;
+            PrepStage detected = PrepStage::None;
+            if (leave_find_scene("ActSelection", &psc, &psusp) && psc && !psusp)
+                detected = PrepStage::ActSelection;
+            else if (leave_find_scene("StorageItems", &psc, &psusp) && psc && !psusp)
+                detected = PrepStage::StorageItems;
+            else if (leave_find_scene("ClassChooser", &psc, &psusp) && psc && !psusp)
+                detected = PrepStage::ClassChooser;
+
+            if (detected != PrepStage::None && detected != g.prep_stage) {
+                g.prep_stage = detected;
                 host_poll_prep_state();
-                log_line("HOUSE", "host entered ActSelection (gen=%u)", g.generation);
+                log_line("HOUSE", "host prep stage -> %u (gen=%u)",
+                         (unsigned)detected, g.generation);
+            } else if (detected == PrepStage::None && has_house && !suspended) {
+                // Host pressed Back out of Prep and returned to House.
+                g.phase      = HostPhase::House;
+                g.prep_stage = PrepStage::None;
+                g.have_prep  = false;
+                HousePrepMsg clear_prep{};
+                clear_prep.generation = g.generation;
+                clear_prep.active     = 0;
+                clear_prep.stage      = (uint8_t)PrepStage::None;
+                net_send_house_prep(clear_prep);
+                HousePhaseMsg pm{ g.generation, (uint8_t)HostPhase::House, 0 };
+                net_send_house_phase(pm);
+                rebuild_actor_map();
+                send_baseline(kNoPeer, true);
+                log_line("HOUSE", "host backed out of Prep back to House (gen=%u)", g.generation);
             }
         }
         if (g.need_baseline && has_house && !suspended && !g.in_pass_day &&
@@ -2414,45 +2475,90 @@ void house_pump() {
         client_sync_class_chooser();
         client_sync_storage_items();
 
-        // Client: transition StorageItems -> ActSelection when host opens ActSelection.
-        if (g.phase == HostPhase::Prep && g.have_prep &&
-            g.last_prep.stage == (uint8_t)PrepStage::ActSelection &&
-            g.reload_stage == 0 && !savefile_has_pending()) {
-            const void* st = nullptr;
-            bool st_susp = false;
-            const void* act = nullptr;
-            bool act_susp = false;
-            if (leave_find_scene("StorageItems", &st, &st_susp) && st &&
-                !leave_find_scene("ActSelection", &act, &act_susp)) {
-                void* client_md = nullptr;
-                if (g.director_slot)
-                    mem_read(g.director_slot, &client_md, sizeof(client_md));
-                void* dir = nullptr;
-                if (client_md)
-                    mem_read((const uint8_t*)client_md + kDir_SceneDirector, &dir, sizeof(dir));
-                if (dir && g.dir_add_scene && g.create_entity && g.create_act_sel) {
-                    *(uint8_t*)((uintptr_t)st + kScene_Destroying) = 1;
-                    uint8_t s_act[32];
-                    memset(s_act, 0, sizeof(s_act));
-                    const char* kAct = "ActSelection";
-                    uint64_t len = 12, cap = 15;
-                    memcpy(s_act, kAct, len + 1);
-                    memcpy(s_act + 16, &len, 8);
-                    memcpy(s_act + 24, &cap, 8);
-                    void* asc = g.dir_add_scene(dir, s_act);
-                    if (asc && !*(uint8_t*)((uintptr_t)asc + kScene_DoingDestruction)) {
-                        void* ent = g.create_entity(asc);
-                        g.create_act_sel(asc, ent);
-                        *(uint8_t*)((uintptr_t)asc + kScene_ControlsPrevented) = 1;
+        // Client: handle forward and backward Prep scene transitions.
+        if (g.reload_stage == 0 && !savefile_has_pending()) {
+            const void* act = nullptr; bool act_susp = false;
+            const void* st  = nullptr; bool st_susp  = false;
+            const void* cc  = nullptr; bool cc_susp  = false;
+            const bool has_act = leave_find_scene("ActSelection", &act, &act_susp) && act;
+            const bool has_st  = leave_find_scene("StorageItems", &st, &st_susp) && st;
+            const bool has_cc  = leave_find_scene("ClassChooser", &cc, &cc_susp) && cc;
+
+            if (g.phase == HostPhase::House) {
+                // Host cancelled Prep back to House: tear down any Prep scenes
+                // and unsuspend House.
+                if (has_act) *(uint8_t*)((uintptr_t)act + kScene_Destroying) = 1;
+                if (has_st)  *(uint8_t*)((uintptr_t)st  + kScene_Destroying) = 1;
+                if (has_cc)  *(uint8_t*)((uintptr_t)cc  + kScene_Destroying) = 1;
+                if (has_act || has_st || has_cc) {
+                    g.have_prep = false;
+                    g.has_pending_class_chooser = false;
+                    g.entered_class_chooser_gen = 0;
+                    const void* hs = nullptr; bool hs_susp = false;
+                    if (leave_find_scene(kScene_House, &hs, &hs_susp) && hs)
+                        *(uint8_t*)((uintptr_t)hs + kScene_Suspended) = 0;
+                    log_line("HOUSE", "client backed out of Prep back to House");
+                }
+            } else if (g.phase == HostPhase::Prep && g.have_prep) {
+                const uint8_t want = g.last_prep.stage;
+                if (want == (uint8_t)PrepStage::ActSelection) {
+                    // Forward: StorageItems -> ActSelection (suspend StorageItems
+                    // instead of destroying it so Back -> StorageItems is instant).
+                    if (has_st && !has_act) {
+                        void* client_md = nullptr;
+                        if (g.director_slot)
+                            mem_read(g.director_slot, &client_md, sizeof(client_md));
+                        void* dir = nullptr;
+                        if (client_md)
+                            mem_read((const uint8_t*)client_md + kDir_SceneDirector, &dir, sizeof(dir));
+                        if (dir && g.dir_add_scene && g.create_entity && g.create_act_sel) {
+                            *(uint8_t*)((uintptr_t)st + kScene_Suspended) = 1;
+                            uint8_t s_act[32];
+                            memset(s_act, 0, sizeof(s_act));
+                            const char* kAct = "ActSelection";
+                            uint64_t len = 12, cap = 15;
+                            memcpy(s_act, kAct, len + 1);
+                            memcpy(s_act + 16, &len, 8);
+                            memcpy(s_act + 24, &cap, 8);
+                            void* asc = g.dir_add_scene(dir, s_act);
+                            if (asc && !*(uint8_t*)((uintptr_t)asc + kScene_DoingDestruction)) {
+                                void* ent = g.create_entity(asc);
+                                g.create_act_sel(asc, ent);
+                                *(uint8_t*)((uintptr_t)asc + kScene_ControlsPrevented) = 1;
+                            }
+                            log_line("HOUSE", "client entered ActSelection");
+                        }
                     }
-                    log_line("HOUSE", "client entered ActSelection");
+                } else if (want == (uint8_t)PrepStage::StorageItems) {
+                    // Backward: ActSelection -> StorageItems.
+                    if (has_act) {
+                        *(uint8_t*)((uintptr_t)act + kScene_Destroying) = 1;
+                        if (has_st && st_susp)
+                            *(uint8_t*)((uintptr_t)st + kScene_Suspended) = 0;
+                        log_line("HOUSE", "client backed out of ActSelection -> StorageItems");
+                    }
+                } else if (want == (uint8_t)PrepStage::ClassChooser) {
+                    // Backward: ActSelection / StorageItems -> ClassChooser.
+                    if (has_act) *(uint8_t*)((uintptr_t)act + kScene_Destroying) = 1;
+                    if (has_st)  *(uint8_t*)((uintptr_t)st  + kScene_Destroying) = 1;
+                    if ((has_act || has_st) && !has_cc && g.last_prep.map_name[0]) {
+                        g.entered_class_chooser_gen = 0;
+                        g.pending_class_chooser     = g.last_prep;
+                        g.pending_class_chooser_gen = g.client_gen;
+                        g.has_pending_class_chooser = true;
+                        log_line("HOUSE", "client backed out to ClassChooser");
+                    } else if (has_cc && cc_susp) {
+                        *(uint8_t*)((uintptr_t)cc + kScene_Suspended) = 0;
+                    }
                 }
             }
         }
 
         // Client: reload the mirror in-place when a fresh House/Prep/Adventure
-        // save arrives while in House or any Prep scene.
-        if (g.reload_stage == 0 && savefile_has_pending()) {
+        // save arrives while in House or any Prep scene. Defer while a
+        // Transition is active so we never destroy MewDirector out from under a
+        // pending Transition callback (e.g. MapScreen::EnterNode's HOME lambda).
+        if (g.reload_stage == 0 && savefile_has_pending() && !has_active_transition()) {
             const void* ss = nullptr;
             bool ss_susp = false;
             if (!leave_find_scene(kScene_SaveSelect, &ss, &ss_susp)) {
@@ -2817,15 +2923,17 @@ void house_on_message(uint8_t from, const NetMsg& m) {
             break;
         }
         case MSG_HOUSE_PREP: {
-            if (!g.is_client || from != kHostPeer || m.house_prep.generation != g.client_gen)
+            if (!m.house_prep) break;
+            const auto& hp = *m.house_prep;
+            if (!g.is_client || from != kHostPeer || hp.generation != g.client_gen)
                 break;
-            g.last_prep = m.house_prep;
-            g.have_prep = (m.house_prep.active != 0);
-            if (m.house_prep.active && m.house_prep.map_name[0] &&
-                m.house_prep.stage == (uint8_t)PrepStage::ClassChooser &&
-                g.entered_class_chooser_gen != m.house_prep.generation) {
-                g.pending_class_chooser     = m.house_prep;
-                g.pending_class_chooser_gen = m.house_prep.generation;
+            g.last_prep = hp;
+            g.have_prep = (hp.active != 0);
+            if (hp.active && hp.map_name[0] &&
+                hp.stage == (uint8_t)PrepStage::ClassChooser &&
+                g.entered_class_chooser_gen != hp.generation) {
+                g.pending_class_chooser     = hp;
+                g.pending_class_chooser_gen = hp.generation;
                 g.has_pending_class_chooser = true;
             }
             break;
@@ -3195,7 +3303,12 @@ bool house_on_click_manager_update(void* click_mgr) {
 
     if (g.is_client) {
         const uint32_t t = now_ms();
-        const bool left_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        HWND fg = GetForegroundWindow();
+        DWORD fg_pid = 0;
+        if (fg) GetWindowThreadProcessId(fg, &fg_pid);
+        const bool focused = (fg != nullptr && fg_pid == GetCurrentProcessId());
+        const bool left_down = focused && !ui_captures_input() &&
+                               ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
         // Handle pending release-before-grant if LBUTTON was released while
         // waiting for the host's GRAB_RESP.
         if (g.client_pending_cat != 0) {

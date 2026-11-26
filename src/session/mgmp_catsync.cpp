@@ -10,6 +10,7 @@
 #include "mgmp_net.h"
 #include "mgmp_proto.h"
 #include "mgmp_lockstep.h"   // lockstep_in_battle
+#include "mgmp_savefile.h"   // savefile_adventure_is_loaded
 
 #include <windows.h>
 #include <cstdio>
@@ -529,13 +530,13 @@ void catsync_on_message(const CatDataMsg& m) {
     // already lands. That is still before EnterNode, so it is in time for the
     // battle or shop the node opens, and it is off the battle screen, so it
     // never writes into a live fight.
-    if (!lockstep_in_battle()) {
+    const bool must_defer = lockstep_in_battle() || !savefile_adventure_is_loaded();
+    if (!must_defer) {
         g.declined_in_battle = false;   // re-arms the line for the next battle
     } else if (defer_applies()) {
         if (!stash_pending(m)) {
             log_line("CATSYNC", "!! could not hold cat %016llx for the map tick "
-                                "(%u already held) -- applying it here instead, "
-                                "into a live battle",
+                                "(%u already held) -- applying it here instead",
                      (unsigned long long)m.id, g.pend_count);
             apply_now(m, "on arrival, deferral failed");
             return;
@@ -543,9 +544,10 @@ void catsync_on_message(const CatDataMsg& m) {
         ++g.deferred;
         if (!g.held_in_battle) {
             g.held_in_battle = true;
-            log_line("CATSYNC", "holding cat pushes while a battle is in progress "
+            log_line("CATSYNC", "holding cat pushes (%s) "
                                 "-- they will be applied on the map, just before "
-                                "this peer enters the next node");
+                                "this peer enters the next node",
+                     lockstep_in_battle() ? "battle in progress" : "adventure not loaded yet");
         }
         return;
     } else {

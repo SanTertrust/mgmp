@@ -97,6 +97,10 @@ enum Target : int {
     T_FurniturePoopPop,  // glaiel::FurniturePiece::PoopPop()
     T_MewDirAutoSaveHouse,// glaiel::MewDirector::AutoSaveHouse()
     T_TurnOrderPortraitUpdate, // glaiel::TurnOrderPortrait::update()
+    T_PlayerOnRequestAction,   // glaiel::PlayerBrain::OnRequestAction() -> TurnAction
+    T_LevelReroll,             // glaiel::LevelUpScreen::Reroll()
+    T_ShopBuyItem,             // glaiel::Shop::BuyItem(ShopItem&)
+    T_InvItemBoxClick,         // glaiel::InventoryItemBox::click::lambda_1
     T_COUNT
 };
 
@@ -485,6 +489,10 @@ static const TargetDesc kTargets[T_COUNT] = {
     { 0x002EF9D0, "HPOOPPOP",    "glaiel::FurniturePiece::PoopPop" },
     { 0x003BDCF0, "HAUTOSAVE",   "glaiel::MewDirector::AutoSaveHouse" },
     { 0x008EBCE0, "TURNPORT",    "glaiel::TurnOrderPortrait::update" },
+    { 0x007789C0, "PCHOICE",     "glaiel::PlayerBrain::OnRequestAction" },
+    { 0x00383FE0, "LVLREROLL",   "glaiel::LevelUpScreen::Reroll" },
+    { 0x0079A600, "SHOPBUY",     "glaiel::Shop::BuyItem" },
+    { 0x0034F0A0, "INVBOXCLK",   "glaiel::InventoryItemBox::click::lambda_1" },
 };
 
 // Coarse module guard, checked before the per-target signatures.
@@ -614,6 +622,7 @@ enum Call : int {
     C_DynamicTextBoxSetColor,  // void(swf::DynamicTextBox*, Color*)
     C_MovieClipGotoAndStop,    // void(swf::MovieClip*, int frame)
     C_CatTempStatsClear,       // void(CatTemporaryStats*) -- clears passives_next_fight before unpack
+    C_RendererGetWorldPos,     // Vec2D*(Renderer*, Vec2D* out, const Vec2D* local, DisplayObject*, double scale)
     C_COUNT
 };
 
@@ -891,6 +900,7 @@ static const CallDesc kCalls[C_COUNT] = {
     { 0x0098E640, "glaiel::swf::DynamicTextBox::SetColor" },
     { 0x009A8A20, "glaiel::swf::MovieClip::gotoAndStop(int)" },
     { 0x000B6F30, "glaiel::CatTemporaryStats::clear" },
+    { 0x0097B400, "glaiel::Renderer::get_world_position" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only
@@ -1357,6 +1367,7 @@ constexpr uintptr_t kEquipment_Flags         = 80;   // int32_t (6)
 constexpr uintptr_t kEquipment_SortOrder     = 84;   // int32_t (9999999)
 constexpr uintptr_t kEquipment_QuestDest     = 88;   // int32_t (-1)
 constexpr uintptr_t kEquipment_Condition     = 92;   // int32_t (0 = BRAND_NEW)
+constexpr int       kCompId_Transition        = 13;
 constexpr int       kCompId_ClassChooser      = 520;
 constexpr uintptr_t kClassChooser_Selector    = 0x48;  // CatSelector*
 constexpr uintptr_t kClassChooser_CurrentCat  = 0xD0;  // int64_t

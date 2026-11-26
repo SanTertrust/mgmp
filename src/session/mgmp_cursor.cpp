@@ -15,6 +15,7 @@
 
 #include <windows.h>
 
+#include <cmath>
 #include <cstring>
 
 namespace mgmp {
@@ -114,9 +115,13 @@ const float kPeerRGB[kMaxPeers][3] = {
 // process. It surfaces with no mgmp.dll frame on the stack, because the lookup
 // happens in the UI consumer pass long after our submit has returned. That cost
 // a session; see the crash write-up in CLAUDE.md.
-const char* kAnimName = "TargetCursor";   // 12 chars -- still inside the SSO budget
-constexpr int kLayer  = 6;
-constexpr int kFrame  = -1;
+const char* kAnimName     = "TargetCursor";    // 12 chars -- inside 15-byte SSO budget
+const char* kPingBgAnim   = "AreaIndicator";   // 13 chars -- inside 15-byte SSO budget
+constexpr int kLayer      = 6;
+constexpr int kPingBgLayer = 6;
+constexpr int kPingFgLayer = 7;
+constexpr int kFrame      = -1;
+constexpr uint64_t kTilePingDurationMs = 3000;
 
 // The pointer itself is NOT drawn here, and that is the whole lesson of this
 // file. It lives in mgmp_overlay.cpp, in screen space, drawn with GL.
@@ -148,6 +153,14 @@ struct Peer {
     bool      have = false;
 };
 
+struct TilePing {
+    bool     active    = false;
+    uint64_t battle_id = 0;
+    int32_t  tx        = 0;
+    int32_t  ty        = 0;
+    uint64_t start_ms  = 0;
+};
+
 struct State {
     bool on = false;
 
@@ -156,12 +169,21 @@ struct State {
     fn_im_game_ui im_game_ui = nullptr;
     fn_tile_piece tile_piece = nullptr;
 
-    Peer peers[kMaxPeers];
+    Peer     peers[kMaxPeers];
+    TilePing pings[kMaxPeers];
 
-    // Outbound throttle.
+    // Latest local hover tile, for camera-independent MMB tile pings.
+    bool     local_on_board = false;
+    int32_t  local_tx       = 0;
+    int32_t  local_ty       = 0;
+    uint64_t local_battle   = 0;
+
+    // Outbound throttle (QPC-based to avoid GetTickCount64's 15.6 ms quantization).
     CursorMsg last_sent;
-    uint64_t  last_send_at = 0;
-    bool      have_sent    = false;
+    int64_t   qpc_freq      = 0;
+    int64_t   last_send_qpc = 0;
+    uint64_t  last_board_at = 0;
+    bool      have_sent     = false;
 
     // Whether we have written ANY alpha onto the game's own pips, so they can
     // be put back exactly once when the overlay stops. Without this a session
@@ -246,7 +268,8 @@ void set_local_pip_alpha(const void* sm, double a) {
 // submission rather than cached: handing the same image over twice would be a
 // double free the moment one of them is a heap string.
 void submit(void* ui, uint8_t peer, const char* id_prefix, const char* anim_name,
-            int layer, uint64_t tile, const PieceColour& rgba) {
+            int layer, uint64_t tile, const PieceColour& rgba,
+            double sc = 1.0, int frame = kFrame) {
     char id_text[16] = {};
     size_t n = strlen(id_prefix);
     if (n > 14) return;
@@ -256,15 +279,30 @@ void submit(void* ui, uint8_t peer, const char* id_prefix, const char* anim_name
 
     GameStr id{}, anim{};
     if (!make_str(id, id_text)) return;
-    // Only fails on a name longer than the small-string buffer, which is a
-    // constant in this file and therefore a build-time mistake, not a runtime
-    // condition. The id above was built but never handed over; it is a small
-    // string by construction, so there is nothing to release.
     if (!make_str(anim, anim_name)) return;
 
-    const PieceScale scale = { { 1.0, 1.0, 1.0 } };   // native size
-    g.tile_piece(ui, &id, layer, &anim, tile, rgba.v, kFrame, scale.v);
+    const PieceScale scale = { { sc, sc, 1.0 } };
+    g.tile_piece(ui, &id, layer, &anim, tile, rgba.v, frame, scale.v);
+}
 
+void draw_tile_ping(void* ui, uint8_t peer, const TilePing& p, uint64_t now) {
+    const uint64_t age = now - p.start_ms;
+    if (age >= kTilePingDurationMs) return;
+
+    const float age_s = (float)age * 0.001f;
+    const float t     = (float)age / (float)kTilePingDurationMs;
+    const float fade  = (t > 0.82f) ? (1.0f - t) / 0.18f : 1.0f;
+    // Smooth, steady breathing pulse (~0.8 Hz) with frame locked to 0 so
+    // AreaIndicator / TargetCursor never blink or disappear on SWF timeline wraps.
+    const float wave   = 0.5f + 0.5f * std::sin(age_s * 5.0f);
+    const double pulse = 0.96 + 0.16 * (double)wave;
+    const float* rgb   = kPeerRGB[peer % kMaxPeers];
+    const uint64_t tile = ((uint64_t)(uint32_t)p.ty << 32) | (uint32_t)p.tx;
+
+    const PieceColour bg = { { rgb[0], rgb[1], rgb[2], (0.62f + 0.30f * wave) * fade } };
+    const PieceColour fg = { { rgb[0], rgb[1], rgb[2], 1.00f * fade } };
+    submit(ui, peer, "MGMPBg", kPingBgAnim, kPingBgLayer, tile, bg, 1.0,   0);
+    submit(ui, peer, "MGMPPg", kAnimName,   kPingFgLayer, tile, fg, pulse, 0);
 }
 
 void draw_peer(void* ui, uint8_t peer, const CursorMsg& c) {
@@ -318,8 +356,14 @@ void cursor_set_base(uintptr_t base) {
 
 void cursor_init() {
     for (auto& p : g.peers) p = Peer{};
-    g.have_sent    = false;
-    g.last_send_at = 0;
+    for (auto& tp : g.pings) tp = TilePing{};
+    g.local_on_board = false;
+    g.local_tx       = 0;
+    g.local_ty       = 0;
+    g.local_battle   = 0;
+    g.have_sent     = false;
+    g.last_send_qpc = 0;
+    g.last_board_at = 0;
     g.touched_pips = false;
     g.said_no_ui   = false;
     g.said_epoch_skew = false;
@@ -338,7 +382,33 @@ void cursor_init() {
 
 void cursor_shutdown() {
     g.on = false;
+    g.last_board_at  = 0;
+    g.local_on_board = false;
     for (auto& p : g.peers) p = Peer{};
+    for (auto& tp : g.pings) tp = TilePing{};
+}
+
+uint64_t cursor_last_board_ms() {
+    return g.last_board_at;
+}
+
+bool cursor_local_hover_tile(int32_t* tx, int32_t* ty, uint64_t* battle_id) {
+    if (!g.on || !g.local_on_board) return false;
+    if (GetTickCount64() - g.last_board_at > 250) return false;
+    if (tx) *tx = g.local_tx;
+    if (ty) *ty = g.local_ty;
+    if (battle_id) *battle_id = g.local_battle;
+    return true;
+}
+
+void cursor_on_tile_ping(uint8_t from, uint64_t battle_id, int32_t tx, int32_t ty) {
+    if (from >= kMaxPeers) return;
+    TilePing& tp = g.pings[from];
+    tp.active    = true;
+    tp.battle_id = battle_id;
+    tp.tx        = tx;
+    tp.ty        = ty;
+    tp.start_ms  = GetTickCount64();
 }
 
 void cursor_on_message(uint8_t from, const CursorMsg& c) {
@@ -367,6 +437,7 @@ void cursor_on_status_menu(void* sm) {
     const uint64_t battle = lockstep_battle_id();
     const bool     mine   = lockstep_local_actor();
     const uint64_t now    = GetTickCount64();
+    g.last_board_at = now;
 
     // --- our own cursor: fade it when the turn is not ours ------------------
     set_local_pip_alpha(sm, alpha_for(mine));
@@ -386,8 +457,13 @@ void cursor_on_status_menu(void* sm) {
     if (read_hover_tile(sm, hx, hy) &&
         hx >= 0 && hy >= 0 && (uint32_t)hx < w && (uint32_t)hy < h) {
         out.x = hx; out.y = hy; out.on_board = 1;
+        g.local_on_board = true;
+        g.local_tx       = hx;
+        g.local_ty       = hy;
+        g.local_battle   = battle;
     } else {
         out.on_board = 0;
+        g.local_on_board = false;
     }
 
     // EVERY FIELD OF THE MESSAGE, and `mode` is the one that used to be left
@@ -404,12 +480,18 @@ void cursor_on_status_menu(void* sm) {
                        out.nx != g.last_sent.nx || out.ny != g.last_sent.ny ||
                        out.mode != g.last_sent.mode ||
                        out.battle_id != g.last_sent.battle_id;
-    const uint64_t since = now - g.last_send_at;
-    if ((moved && since >= kMinSendGapMs) || since >= kHeartbeatMs) {
+    if (!g.qpc_freq) {
+        LARGE_INTEGER f; QueryPerformanceFrequency(&f); g.qpc_freq = f.QuadPart;
+    }
+    LARGE_INTEGER qpc_now; QueryPerformanceCounter(&qpc_now);
+    const double since_ms = (g.have_sent && g.qpc_freq)
+        ? (double)(qpc_now.QuadPart - g.last_send_qpc) * 1000.0 / (double)g.qpc_freq
+        : 1000.0;
+    if ((moved && since_ms >= 14.0) || since_ms >= (double)kHeartbeatMs) {
         if (net_send_cursor(out)) {
-            g.last_sent    = out;
-            g.have_sent    = true;
-            g.last_send_at = now;
+            g.last_sent     = out;
+            g.have_sent     = true;
+            g.last_send_qpc = qpc_now.QuadPart;
         }
     }
 
@@ -456,6 +538,16 @@ void cursor_on_status_menu(void* sm) {
 
         draw_peer(ui, i, p.msg);
         ++g.drawn_frames;
+    }
+
+    // --- draw active 3s camera-independent tile pings (all peers incl. self) ---
+    for (uint8_t i = 0; i < kMaxPeers; ++i) {
+        TilePing& tp = g.pings[i];
+        if (!tp.active) continue;
+        if (now - tp.start_ms >= kTilePingDurationMs) { tp.active = false; continue; }
+        if (tp.battle_id != battle) continue;
+        if (tp.tx < 0 || tp.ty < 0 || (uint32_t)tp.tx >= w || (uint32_t)tp.ty >= h) continue;
+        draw_tile_ping(ui, i, tp, now);
     }
 }
 

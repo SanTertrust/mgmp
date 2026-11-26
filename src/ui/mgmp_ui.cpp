@@ -418,8 +418,11 @@ void draw_connect() {
                           " torn down first -- 'host' means start over.");
     ImGui::SameLine();
 
-    if (ImGui::Button("join")) session_request_join(g.addr, (uint16_t)g.port);
-    ImGui::SetItemTooltip("Dial addr:port. A client that only lost its socket"
+    const NetState ns = net_state();
+    const bool disconnected = (ns == NetState::Closed || ns == NetState::Failed);
+    if (ImGui::Button(disconnected && net_role() == NetRole::Client ? "reconnect" : "join"))
+        session_request_join(g.addr, (uint16_t)g.port);
+    ImGui::SetItemTooltip("Dial addr:port (non-blocking, supports hostnames). A client that only lost its socket"
                           " keeps its run and declines the host's save.");
     ImGui::SameLine();
 

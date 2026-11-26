@@ -7,6 +7,7 @@
 #include "mgmp_config.h"
 #include "mgmp_tuning.h"
 #include "mgmp_lockstep.h"   // lockstep_in_battle
+#include "mgmp_savefile.h"   // savefile_adventure_is_loaded
 #include "mgmp_log.h"
 #include "mgmp_mem.h"
 #include "mgmp_net.h"
@@ -361,21 +362,23 @@ void runhist_on_message(const RunHistMsg& m) {
     // object the event roller reads, so a lost push is a run that rolls
     // different events from then on. Measured 2026-08-26: exactly that, with
     // NODEHASH naming the history as the first component to diverge.
-    if (!lockstep_in_battle()) {
+    const bool must_defer = lockstep_in_battle() || !savefile_adventure_is_loaded();
+    if (!must_defer) {
         g.declined_in_battle = false;
     } else if (defer_applies()) {
         if (!stash_pending(m)) {
             log_line("RUNHIST", "!! could not hold the run history for the map tick "
-                                "-- applying it here instead, into a live battle");
+                                "-- applying it here instead");
             apply_now(m, "on arrival, deferral failed");
             return;
         }
         ++g.deferred;
         if (!g.held_in_battle) {
             g.held_in_battle = true;
-            log_line("RUNHIST", "holding run-history pushes while a battle is in "
-                                "progress -- the newest will be applied on the map, "
-                                "just before this peer enters the next node");
+            log_line("RUNHIST", "holding run-history pushes (%s) -- the newest will "
+                                "be applied on the map, just before this peer enters "
+                                "the next node",
+                     lockstep_in_battle() ? "battle in progress" : "adventure not loaded yet");
         }
         return;
     } else {

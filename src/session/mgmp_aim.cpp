@@ -120,6 +120,7 @@ constexpr uint32_t kHeartbeatMs = 500;
 
 struct Held {
     bool     have  = false;
+    uint8_t  from  = kNoPeer;
     uint64_t battle_id = 0;
     uint8_t  cat   = 0;
     uint8_t  slot_kind = 0, slot_index = 0;
@@ -526,11 +527,18 @@ void aim_shutdown() {
              lockstep_state_fence_hits(), g.refused_name);
 }
 
-void aim_on_message(const AimMsg& m) {
+void aim_on_message(uint8_t from, const AimMsg& m) {
     if (!g.on) return;
-    if (!m.active) { g.held.have = false; return; }
+    if (!m.active) {
+        if (g.held.have && g.held.from == from &&
+            g.held.cat == m.cat && g.held.battle_id == m.battle_id) {
+            g.held.have = false;
+        }
+        return;
+    }
 
     g.held.have       = true;
+    g.held.from       = from;
     g.held.battle_id  = m.battle_id;
     g.held.cat        = m.cat;
     g.held.slot_kind  = m.slot_kind;
@@ -538,6 +546,11 @@ void aim_on_message(const AimMsg& m) {
     g.held.target.x   = m.tx; g.held.target.y = m.ty;
     g.held.dir.x      = m.dx; g.held.dir.y    = m.dy;
     strncpy_s(g.held.gon, m.gon, _TRUNCATE);
+}
+
+void aim_on_peer_disconnected(uint8_t peer) {
+    if (g.held.have && g.held.from == peer)
+        g.held.have = false;
 }
 
 void aim_on_update_decision(void* brain) {

@@ -195,6 +195,14 @@ void follow_init() {
     g.on        = config().net_follow;
     g.is_client = (net_role() == NetRole::Client);
     g.map       = nullptr;
+    g.have_here = false;
+    g.here_index = 0;
+    g.here_count = 0;
+    g.here_type  = 0;
+    g.here_seed  = 0;
+    g.first_node_pending = false;
+    g.jump_pending = false;
+    g.map_tick   = 0;
     pending_clear();
     if (!g.on) { log_line("FOLLOW", "map following disabled by net_follow = 0"); return; }
     log_line_lvl(LogLevel::Trace, "FOLLOW", "armed -- %s",
@@ -217,6 +225,16 @@ void follow_shutdown() {
              "done: %u published, %u followed, %u local click(s) suppressed",
              g.published, g.entered, g.suppressed);
     g.on = false;
+    g.have_here = false;
+    g.here_index = 0;
+    g.here_count = 0;
+    g.here_type  = 0;
+    g.here_seed  = 0;
+    g.first_node_pending = false;
+    g.jump_pending = false;
+    g.map_tick   = 0;
+    g.map        = nullptr;
+    pending_clear();
     if (g.cs_ready) { DeleteCriticalSection(&g.cs); g.cs_ready = false; }
 }
 
@@ -495,8 +513,8 @@ void follow_catchup(uint8_t peer) {
     if (!g.on || g.is_client || !net_active()) return;
 
     Guard guard;
-    if (!g.have_here) {
-        log_line("FOLLOW", "peer %u joined before this peer entered any node --"
+    if (!g.have_here || follow_on_map()) {
+        log_line("FOLLOW", "peer %u joined while host is on the map (between nodes) --"
                            " nothing to catch it up to; the next node is published"
                            " normally", (unsigned)peer);
         return;

@@ -220,9 +220,10 @@ bool build_ui() {
     }
 
     // Header & status text in native game font.
-    gameui_add_label(g.ov, L"CHOOSE YOUR CATS", 640.0, 145.0, 1.35, 20,
+    // Note: HouseNametag renders its text ~40*scale px above its transform y.
+    gameui_add_label(g.ov, L"CHOOSE YOUR CATS", 640.0, 185.0, 2.05, 20,
                      { 1.0f, 1.0f, 1.0f, 1.0f }, g.title_lbl);
-    gameui_add_label(g.ov, L"", 640.0, 195.0, 0.90, 20,
+    gameui_add_label(g.ov, L"", 640.0, 240.0, 1.40, 20,
                      { 1.0f, 0.95f, 0.65f, 1.0f }, g.status_lbl);
 
     // Lay out 1..N cat cards evenly across the center.
@@ -231,7 +232,7 @@ bool build_ui() {
     const double gap    = (n <= 4) ? 36.0 : 18.0;
     const double total_w = n * card_w + (n > 1 ? (n - 1) * gap : 0.0);
     const double start_x = 640.0 - total_w * 0.5 + card_w * 0.5;
-    const double card_y  = 395.0;
+    const double card_y  = 420.0;
 
     g.card_count = 0;
     for (uint8_t i = 0; i < n; ++i) {
@@ -247,7 +248,7 @@ bool build_ui() {
         wchar_t name_buf[64] = L"Cat";
         wchar_t cls_buf[64]  = L"";
         if (cd) {
-            gameui_add_cat(g.ov, cd, c.cx, c.cy + 32.0, 1.10, 22, c.cat);
+            gameui_add_cat(g.ov, cd, c.cx, c.cy + 40.0, 1.10, 22, c.cat);
 
             wchar_t raw_name[48] = {};
             if (gameui_read_wstring((const uint8_t*)cd + kCatData_Name, raw_name, 48) && raw_name[0])
@@ -272,11 +273,11 @@ bool build_ui() {
             }
         }
 
-        gameui_add_label(g.ov, name_buf, c.cx, c.cy - 98.0, 0.95, 25,
+        gameui_add_label(g.ov, name_buf, c.cx, c.cy - 92.0, 1.50, 25,
                          { 1.0f, 1.0f, 1.0f, 1.0f }, c.name_lbl);
-        gameui_add_label(g.ov, cls_buf, c.cx, c.cy - 66.0, 0.76, 25,
-                         { 0.82f, 0.82f, 0.82f, 1.0f }, c.class_lbl);
-        gameui_add_label(g.ov, L"", c.cx, c.cy + 104.0, 0.88, 25,
+        gameui_add_label(g.ov, cls_buf, c.cx, c.cy - 38.0, 1.15, 25,
+                         { 0.90f, 0.90f, 0.90f, 1.0f }, c.class_lbl);
+        gameui_add_label(g.ov, L"", c.cx, c.cy + 124.0, 1.35, 25,
                          { 0.85f, 0.85f, 0.85f, 1.0f }, c.owner_lbl);
 
         ++g.card_count;

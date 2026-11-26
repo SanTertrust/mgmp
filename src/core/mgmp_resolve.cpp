@@ -30,10 +30,11 @@ static_assert(sizeof(kSigData) / sizeof(kSigData[0]) == (size_t)D_COUNT,
 // lockstep is built on, so they refuse.
 bool is_critical(Target t) {
     switch (t) {
-    case T_NextTurn:     // the turn barrier and the hash exchange
-    case T_GetChoice:    // the injection seam for remote decisions
-    case T_ApplyAction:  // the command boundary
-    case T_FrameBegin:   // the socket pump
+    case T_NextTurn:               // the turn barrier and the hash exchange
+    case T_GetChoice:              // local actor tracking & choice logging
+    case T_PlayerOnRequestAction:  // the injection seam for remote human decisions
+    case T_ApplyAction:            // the command boundary
+    case T_FrameBegin:             // the socket pump
         return true;
     default:
         return false;

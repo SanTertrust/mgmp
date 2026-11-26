@@ -96,4 +96,17 @@ void cursor_on_status_menu(void* status_menu);
 // happens on the next StatusMenu::update, not here.
 void cursor_on_message(uint8_t from, const CursorMsg& c);
 
+// Timestamp (GetTickCount64) of the last battle-board frame processed by
+// cursor_on_status_menu. Used by mgmp_overlay to know when a battle is not
+// actively publishing CursorMsg so it can publish screen-space cursors on
+// every other screen (map, shop, events, level-up, menus, etc.).
+uint64_t cursor_last_board_ms();
+
+// Returns true and writes the local player's hovered battle tile + battle_id
+// when the battle board is currently active and the cursor is over a valid tile.
+bool cursor_local_hover_tile(int32_t* tx, int32_t* ty, uint64_t* battle_id);
+
+// Record a 3-second camera-independent tile ping from `from` (or local self).
+void cursor_on_tile_ping(uint8_t from, uint64_t battle_id, int32_t tx, int32_t ty);
+
 } // namespace mgmp

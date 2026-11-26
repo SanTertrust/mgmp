@@ -37,8 +37,8 @@ struct State {
 
     const void** director_slot = nullptr;
 
-    HashRing<Entry> mine;        // what this peer sent, awaiting a counterpart
-    HashRing<Entry> theirs;      // what arrived before we reached that point
+    HashRing<Entry> mine;                  // what this peer sent (kept for all 3-4p peers)
+    HashRing<Entry> theirs[kMaxPeers];     // per-peer entries that arrived before we reached that point
 
     // The screen last sampled, so one event is measured once rather than every
     // frame its update runs.
@@ -228,18 +228,19 @@ void report(uint8_t from, const NodeHashMsg& a, const NodeHashMsg& b) {
 }
 
 void match(uint8_t from, const NodeHashMsg& theirs) {
-    Entry mine{};
-    if (g.mine.take(theirs.node_seed, theirs.point, mine)) {
-        report(from, mine.m, theirs);
+    if (from >= kMaxPeers) return;
+    // Non-destructive lookup: in 3-4p sessions, every other peer needs to
+    // compare against our entry at (node_seed, point).
+    if (const Entry* mine = g.mine.find(theirs.node_seed, theirs.point)) {
+        report(from, mine->m, theirs);
         return;
     }
-    // Their sample for a point we have not reached. Hold it -- the peers walk
-    // the same nodes but not at the same moment, exactly as with turns.
+    // Their sample for a point we have not reached. Hold it per-peer.
     Entry e{};
     e.battle_id = theirs.node_seed;
     e.turn      = theirs.point;
     e.m         = theirs;
-    if (!g.theirs.push_refusing(e))
+    if (!g.theirs[from].push_refusing(e))
         log_line("NODEHASH", "!! holding %u node hashes from peer %u already and "
                              "refusing more -- those nodes go unchecked",
                  kHashRing, (unsigned)from);
@@ -251,13 +252,15 @@ void publish(const NodeHashMsg& m) {
     e.turn      = m.point;
     e.m         = m;
 
-    // Did the peer already send its counterpart? Then compare now rather than
-    // storing something nothing will ever come for.
-    Entry theirs{};
-    if (g.theirs.take(m.node_seed, m.point, theirs)) {
-        report(kNoPeer, m, theirs.m);
-    } else {
-        g.mine.push_evicting(e);
+    // Always retain our sample so every peer (2..4) that arrives later can
+    // compare against it.
+    g.mine.push_evicting(e);
+
+    for (uint32_t p = 0; p < kMaxPeers; ++p) {
+        if (p == net_self()) continue;
+        Entry theirs{};
+        if (g.theirs[p].take(m.node_seed, m.point, theirs))
+            report((uint8_t)p, m, theirs.m);
     }
 
     if (net_send_nodehash(m)) ++g.sent;
@@ -286,7 +289,7 @@ void nodehash_init() {
     g.on   = tune::kNodeHash;
     g.halt = tune::kNodeHashHalt;
     g.mine.clear();
-    g.theirs.clear();
+    for (uint32_t p = 0; p < kMaxPeers; ++p) g.theirs[p].clear();
     g.sampled_screen = nullptr;
     if (!g.on) { log_line("NODEHASH", "meta-layer hashing disabled by net_nodehash = 0"); return; }
     log_line_lvl(LogLevel::Trace, "NODEHASH",

@@ -98,9 +98,9 @@ bool aim_highlight_suppressed();
 // happen is calling the highlight unguarded, which is what cost a run.
 void aim_on_hooks_installed();
 
-// A held aim belongs to one battle and one cat. Both are dropped when the
-// battle changes, so a stale preview cannot survive into the next fight.
-void aim_on_message(const AimMsg& m);
+// A held aim belongs to one battle, one peer, and one cat.
+void aim_on_message(uint8_t from, const AimMsg& m);
+void aim_on_peer_disconnected(uint8_t peer);
 
 uint32_t aim_sent();
 uint32_t aim_drawn();

@@ -62,13 +62,29 @@ void lockstep_pump();
 
 // --- the seam ---------------------------------------------------------------
 
-// Mirror of replay_fill_choice. Returns true if `out` was overwritten.
+// Called from h_GetChoice before the original runs. Updates local_actor for
+// cursor/HUD fading, and returns true (with `out` zero-initialized to TA_None)
+// only when lockstep is halted after a desync so no brain (human, AI, or
+// status override) advances further.
+bool lockstep_on_brain_poll(void* brain, void* out);
+
+// Called from h_PlayerOnRequestAction BEFORE the original runs.
 //
-//   locally-controlled cat -> false, but the brain's own decision is captured
-//                             and sent if it is a real one (type 2 or 3);
-//   remote cat             -> true, always: either the peer's decision, or
-//                             type=1 to keep waiting.
-bool lockstep_fill_choice(void* brain, void* out);
+// Intercepting at PlayerBrain::OnRequestAction instead of Brain::GetChoice
+// ensures that status/passive/aura overrides (Fear, Charm, Madness, BaitAura,
+// etc.) run natively and deterministically inside Brain::GetChoice on BOTH
+// peers without being polled/discarded while waiting on the wire (which
+// otherwise desynced the sim RNG stream), and that remote human actions go
+// through Brain::GetChoice's post-processing (intentional=true,
+// Passive::OnChoiceMade, moved_this_turn).
+//
+// Returns true if `out` was filled (TA_None while waiting/blocked, or a
+// remote/replayed TurnAction) and the original must NOT be called.
+bool lockstep_pre_player_choice(void* brain, void* out);
+
+// Called from h_PlayerOnRequestAction AFTER the original runs for a local cat.
+// Captures and publishes real human decisions (ability or end-turn).
+void lockstep_post_player_choice(void* brain, void* out);
 
 // Called from the ApplyTurnAction hook, before the original runs. Clears the
 // outstanding-send guard and validates that what landed is what we expected.

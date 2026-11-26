@@ -114,6 +114,14 @@ static const SigTargetDesc kTargetSigs[] = {
       "48 89 5C 24 18 48 89 74 24 20 55 57 41 56 48 8D AC 24 60 FF FF FF" },
     { 0x008EBCE0, "TURNPORT",
       "40 53 48 83 EC 30 48 8B 41 18 48 8B D9" },
+    { 0x007789C0, "PCHOICE",
+      "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 4C 89 64 24 20 55 41 56 41 57 48 8D 6C 24 B9 48 81 EC D0 00 00 00" },
+    { 0x00383FE0, "LVLREROLL",
+      "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 54 41 55 41 56 41 57 48 8D 6C 24 C9 48 81 EC 00 01 00 00 48 8B F1" },
+    { 0x0079A600, "SHOPBUY",
+      "48 83 EC 68 80 79 7B 00 74 10 48 8B 05 ? ? ? ? 44 8B 80 B4 00 00 00" },
+    { 0x0034F0A0, "INVBOXCLK",
+      "48 8B C4 48 89 58 20 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 38 FF FF FF" },
 };
 
 // INDEXED BY enum Call -- order is load-bearing.
@@ -244,6 +252,8 @@ static const SigTargetDesc kCallSigs[] = {
       "40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 80 63 09 FD" },
     { 0x000B6F30, "glaiel::CatTemporaryStats::clear",
       "40 57 48 83 EC 50 33 C0 48 C7 44 24 20 FF FF FF 3F" },
+    { 0x0097B400, "glaiel::Renderer::get_world_position",
+      "48 8B C4 48 89 58 08 57 48 81 EC 20 01 00 00" },
 };
 
 // Globals, recovered from a referencing instruction's own

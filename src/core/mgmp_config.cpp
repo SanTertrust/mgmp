@@ -231,6 +231,9 @@ void hooks_implied_by(bool net_configured) {
             g_cfg.hook[T_EventUpdate] = true;
             g_cfg.hook[T_LevelSelect] = true;
             g_cfg.hook[T_LevelUpdate] = true;
+            g_cfg.hook[T_LevelReroll] = true;
+            g_cfg.hook[T_ShopBuyItem] = true;
+            g_cfg.hook[T_InvItemBoxClick] = true;
         }
 
         // The node hash's second sample point is taken on WorldEvent::update --

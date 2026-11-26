@@ -124,12 +124,26 @@ void choice_shutdown();
 bool choice_on_event_commit(void* cap);
 // `screen` / `opt` are select_option's two arguments.
 bool choice_on_level_select(void* screen, void* opt);
+// `screen` is LevelUpScreen* for Reroll().
+bool choice_on_level_reroll(void* screen);
+// Non-owner client input guards for Shop and Adventure Inventory.
+bool choice_on_shop_buy(void* shop, void* shop_item);
+bool choice_on_inv_box_click(void* box_ptr);
 
 // Per-frame ticks. Both cache the screen pointer and apply a held choice.
 void choice_on_event_update(void* world_event);
 void choice_on_level_update(void* level_screen);
 
-void choice_on_message(const ChoiceMsg& m);
+void choice_on_message(uint8_t from, const ChoiceMsg& m);
+
+// Active teammate vote badges on the currently visible WorldEvent or LevelUpScreen,
+// in normalized 16:9 content coordinates [0..1] for mgmp_overlay.cpp.
+struct ChoiceVoteBadge {
+    float   nx0 = 0.0f, ny0 = 0.0f, nx1 = 0.0f, ny1 = 0.0f;
+    uint8_t voter_count = 0;
+    uint8_t voters[4]   = {};
+};
+uint32_t choice_get_vote_badges(ChoiceVoteBadge* out, uint32_t cap);
 
 // This peer has ENTERED the node with this seed. Called by mgmp_follow from
 // remember_node, on both peers, whenever the node actually changes.

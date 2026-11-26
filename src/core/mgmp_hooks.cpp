@@ -43,6 +43,7 @@
 #include "mgmp_timedelay.h"
 #include "mgmp_hooks.h"
 #include "mgmp_log.h"
+#include "mgmp_rng.h"
 #include "mgmp_mem.h"
 #include "mgmp_resolve.h"
 #include "mgmp_session.h"
@@ -82,6 +83,7 @@ typedef char  (__fastcall* fn_this_c)(void* self);
 fn_this       o_InitSystems = nullptr;
 fn_this       o_NextTurn    = nullptr;
 fn_two_ptr    o_GetChoice   = nullptr;
+fn_two_ptr    o_PlayerOnRequestAction = nullptr;
 fn_this_ptr_b o_DoAction    = nullptr;
 fn_this_ptr   o_Trigger     = nullptr;
 fn_this_i32   o_BeginTurn   = nullptr;
@@ -104,6 +106,9 @@ fn_this       o_EventChoice   = nullptr;   // sub_140937F30(capture*)
 fn_this       o_EventUpdate   = nullptr;
 fn_this_ptr   o_LevelSelect   = nullptr;   // select_option(this, LevelUpOption*)
 fn_this       o_LevelUpdate   = nullptr;
+fn_this       o_LevelReroll   = nullptr;
+fn_this_ptr   o_ShopBuyItem   = nullptr;
+fn_this       o_InvItemBoxClick = nullptr;
 fn_this       o_CombatMenu    = nullptr;
 fn_this       o_ButtonUpdate  = nullptr;
 fn_this       o_TurnOrderPortrait = nullptr;
@@ -190,30 +195,61 @@ void __fastcall h_NextTurn(void* self) {
 }
 
 void* __fastcall h_GetChoice(void* self, void* out) {
-    void* ret = o_GetChoice(self, out);
-
     if (lockstep_active()) {
-        if (lockstep_fill_choice(self, ret)) return ret;
+        if (lockstep_on_brain_poll(self, out)) return out;
     }
+
+    uint64_t* rng = lockstep_active() ? rng_global_stream() : nullptr;
+    uint64_t  rng_before[4] = {};
+    if (rng) memcpy(rng_before, rng, sizeof(rng_before));
+
+    void* ret = o_GetChoice(self, out);
 
     // Suppress the poll. Without this a single tutorial battle produced 3422
     // CHOICE lines against 12 real actions.
     static LONG volatile polls = 0;
+    static LONG volatile rng_restored = 0;
     TurnAction a{};
-    bool       decided = mem_read(ret, &a, sizeof(a)) && a.type != TA_None;
+    bool       decided = mem_read(ret, &a, sizeof(a)) && a.type != TA_None && a.type != 0;
 
     if (!decided) {
+        // A WAITING poll (no decision taken) must NEVER advance the simulation
+        // RNG stream: passive brain overrides like Fear::OnCharacterRequestAction
+        // call glaiel::random(TLS+0x178) on every frame while waiting for human
+        // input even when they return NONE and fall through to PlayerBrain, so
+        // any poll-count difference between peers permanently diverges TLS+0x178.
+        if (rng && memcmp(rng, rng_before, sizeof(rng_before)) != 0) {
+            memcpy(rng, rng_before, sizeof(rng_before));
+            InterlockedIncrement(&rng_restored);
+        }
         InterlockedIncrement(&polls);
         return ret;
     }
 
     LONG suppressed = InterlockedExchange(&polls, 0);
+    LONG restored   = InterlockedExchange(&rng_restored, 0);
     Who    w(self, "brain");
     TaDump d(ret);
-    if (suppressed)
+    if (suppressed && restored)
+        log_line("CHOICE", "%s %s (after %ld polls; fenced %ld poll RNG leak(s))",
+                 w.text, d.text, suppressed, restored);
+    else if (suppressed)
         log_line("CHOICE", "%s %s (after %ld polls)", w.text, d.text, suppressed);
     else
         log_line("CHOICE", "%s %s", w.text, d.text);
+    return ret;
+}
+
+void* __fastcall h_PlayerOnRequestAction(void* self, void* out) {
+    if (lockstep_active()) {
+        if (lockstep_pre_player_choice(self, out)) return out;
+    }
+
+    void* ret = o_PlayerOnRequestAction(self, out);
+
+    if (lockstep_active()) {
+        lockstep_post_player_choice(self, ret);
+    }
     return ret;
 }
 
@@ -246,9 +282,21 @@ void __fastcall h_EndTurn(void* self) {
     o_EndTurn(self);
 }
 
+uint64_t rng_fingerprint() {
+    uint64_t* s = rng_global_stream();
+    if (!s) return 0;
+    uint64_t h = 0xcbf29ce484222325ull;
+    const uint8_t* p = (const uint8_t*)s;
+    for (size_t i = 0; i < 32; ++i) {
+        h ^= p[i];
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
 void __fastcall h_ApplyAction(void* self, void* ta) {
     TaDump d(ta);
-    log_line("APPLY", "%s", d.text);
+    log_line("APPLY", "%s rng=%016llx", d.text, (unsigned long long)rng_fingerprint());
 
     if (lockstep_active()) lockstep_on_applied(ta, current_actor(self));
 
@@ -430,6 +478,18 @@ void __fastcall h_LevelSelect(void* self, void* option) {
 void __fastcall h_LevelUpdate(void* self) {
     o_LevelUpdate(self);
     choice_on_level_update(self);
+}
+
+void __fastcall h_LevelReroll(void* self) {
+    if (choice_on_level_reroll(self)) o_LevelReroll(self);
+}
+
+void __fastcall h_ShopBuyItem(void* self, void* shop_item) {
+    if (choice_on_shop_buy(self, shop_item)) o_ShopBuyItem(self, shop_item);
+}
+
+void __fastcall h_InvItemBoxClick(void* box_ptr) {
+    if (choice_on_inv_box_click(box_ptr)) o_InvItemBoxClick(box_ptr);
 }
 
 // --- peer cursors ----------------------------------------------------------
@@ -711,6 +771,7 @@ const Binding kBindings[] = {
     { T_InitSystems, (void*)&h_InitSystems, (void**)&o_InitSystems },
     { T_NextTurn,    (void*)&h_NextTurn,    (void**)&o_NextTurn    },
     { T_GetChoice,   (void*)&h_GetChoice,   (void**)&o_GetChoice   },
+    { T_PlayerOnRequestAction, (void*)&h_PlayerOnRequestAction, (void**)&o_PlayerOnRequestAction },
     { T_DoAction,    (void*)&h_DoAction,    (void**)&o_DoAction    },
     { T_Trigger,     (void*)&h_Trigger,     (void**)&o_Trigger     },
     { T_BeginTurn,   (void*)&h_BeginTurn,   (void**)&o_BeginTurn   },
@@ -731,6 +792,9 @@ const Binding kBindings[] = {
     { T_EventUpdate,  (void*)&h_EventUpdate, (void**)&o_EventUpdate },
     { T_LevelSelect,  (void*)&h_LevelSelect, (void**)&o_LevelSelect },
     { T_LevelUpdate,  (void*)&h_LevelUpdate, (void**)&o_LevelUpdate },
+    { T_LevelReroll,  (void*)&h_LevelReroll, (void**)&o_LevelReroll },
+    { T_ShopBuyItem,  (void*)&h_ShopBuyItem, (void**)&o_ShopBuyItem },
+    { T_InvItemBoxClick, (void*)&h_InvItemBoxClick, (void**)&o_InvItemBoxClick },
 
     { T_SaveSelUpdate,  (void*)&h_SaveSelUpdate,  (void**)&o_SaveSelUpdate  },
     { T_SaveSlotClick,  (void*)&h_SaveSlotClick,  (void**)&o_SaveSlotClick  },

@@ -30,7 +30,7 @@
 namespace mgmp {
 namespace {
 
-enum class Phase { Off, Waiting, HelloSent, Ready, Refused };
+enum class Phase { Off, Waiting, HelloSent, Ready, Refused, Disconnected };
 
 // A runtime host/join/disconnect asked for by the debug panel, applied at the
 // top of session_update. See the note on session_request_host in the header for
@@ -489,7 +489,7 @@ void session_update() {
     // that return exists to skip.
     apply_request();
 
-    if (g.phase == Phase::Off || g.phase == Phase::Refused) return;
+    if (g.phase == Phase::Off || g.phase == Phase::Refused || g.phase == Phase::Disconnected) return;
 
     // Send our HELLO as soon as the socket is up. Both sides do this
     // unconditionally, so neither has to know who speaks first.
@@ -506,6 +506,18 @@ void session_update() {
         // Watches the loaded-scene list on both roles: the host for its own
         // departure, the client for its arrival back on the menu.
         leave_pump();
+
+        const NetState ns = net_state();
+        if (ns == NetState::Closed || ns == NetState::Failed) {
+            g.phase = Phase::Disconnected;
+            if (ns == NetState::Failed) {
+                set_status("failed: %s", net_error());
+                log_line("SESSION", "!! connection failed in Ready phase: %s", net_error());
+            } else {
+                set_status("disconnected -- press Join to reconnect");
+                log_line("SESSION", "!! connection closed in Ready phase -- ready to reconnect");
+            }
+        }
         return;
     }
 

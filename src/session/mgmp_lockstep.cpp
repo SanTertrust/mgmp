@@ -621,14 +621,14 @@ bool read_cat_state(const void* chr, CatState& out, bool in_battle = true) {
     // board and still be in the live character list, which is exactly the
     // battle that exposed this.
     uint32_t el[2] = { 0, 0 };
-    if (in_battle && !off_board(out) && read_affecting_elements(chr, el)) {
+    if (in_battle && out.linked && !off_board(out) && read_affecting_elements(chr, el)) {
         out.e0 = el[0];
         out.e1 = el[1];
         out.elems = 1;
     }
     uint64_t ph = 0;
     uint16_t pc = 0;
-    if (in_battle && !off_board(out) && read_cat_passives(chr, ph, pc)) {
+    if (in_battle && out.linked && !off_board(out) && read_cat_passives(chr, ph, pc)) {
         out.passive_hash  = ph;
         out.passive_count = pc;
         out.passives_ok   = 1;
@@ -2072,6 +2072,7 @@ void lockstep_init() {
         // Resetting to 0 while standing on turn 2 would compare our turn 2
         // against the peer's turn 0 for the rest of the fight.
         g.turn = 0;
+        g.state_hash_on = false;
     }
     for (uint32_t p = 0; p < kMaxPeers; ++p) {
         g.peer_hash[p].clear();
@@ -2082,7 +2083,6 @@ void lockstep_init() {
     g.stale_drops       = 0;
     g.said_stale        = false;
     g.local_actor       = false;
-    g.state_hash_on     = false;
 
     // The control split and the barrier go with the battle, not the session,
     // for the same reason the roster does -- and for one more.
@@ -2437,8 +2437,18 @@ void lockstep_state_fence_begin() {
     g_sf.armed = false;
     if (!g.active || !g.snapped || g.halted) return;
     g_sf.count = g.cat_count > kMaxCats ? kMaxCats : g.cat_count;
-    for (uint32_t i = 0; i < g_sf.count; ++i)
-        g_sf.got[i] = read_cat_state(g.cats[i], g_sf.snap[i]);
+
+    uint32_t live = 0, appeared = 0;
+    bool still_in[kMaxCats] = {};
+    const bool have_mem = snapshot_membership(g.snapped_list, live, still_in, appeared);
+
+    for (uint32_t i = 0; i < g_sf.count; ++i) {
+        if (have_mem && !still_in[i]) {
+            g_sf.got[i] = false;
+            continue;
+        }
+        g_sf.got[i] = read_cat_state(g.cats[i], g_sf.snap[i], true);
+    }
     g_sf.armed = true;
 }
 
@@ -2446,11 +2456,16 @@ uint32_t lockstep_state_fence_end(const char* what) {
     if (!g_sf.armed) return 0;
     g_sf.armed = false;
 
+    uint32_t live = 0, appeared = 0;
+    bool still_in[kMaxCats] = {};
+    const bool have_mem = snapshot_membership(g.snapped_list, live, still_in, appeared);
+
     uint32_t moved = 0;
     for (uint32_t i = 0; i < g_sf.count; ++i) {
         if (!g_sf.got[i]) continue;
+        if (have_mem && !still_in[i]) continue;
         CatState now{};
-        if (!read_cat_state(g.cats[i], now)) continue;
+        if (!read_cat_state(g.cats[i], now, true)) continue;
 
         const CatState& was = g_sf.snap[i];
         const bool face_moved = (now.fx != was.fx || now.fy != was.fy);
@@ -2492,6 +2507,70 @@ uint32_t lockstep_state_fence_end(const char* what) {
 
 uint32_t lockstep_state_fence_hits() { return g_sf.hits; }
 
+// Handle a peer leaving mid-battle: transfer its human cats deterministically
+// to the host (kHostPeer) so the battle never stalls waiting on a disconnected
+// player, clear its aim preview, and keep the Join Barrier / control table in sync.
+static void handle_peer_left_battle(uint8_t departed) {
+    if (departed >= kMaxPeers || departed == kHostPeer) return;
+    aim_on_peer_disconnected(departed);
+    if (!g.snapped || g.halted) {
+        g.have_peer_control[departed] = false;
+        return;
+    }
+
+    const bool had_ctrl = g.have_peer_control[departed] &&
+                          g.peer_control[departed].battle_id == g.battles.current;
+    ControlMsg lost = g.peer_control[departed];
+    g.have_peer_control[departed] = false;
+
+    if (had_ctrl && lost.count > 0) {
+        uint32_t reassigned = 0;
+        if (net_role() == NetRole::Host) {
+            for (uint8_t i = 0; i < lost.count; ++i) {
+                uint8_t cat = lost.cats[i];
+                if (cat < g.cat_count && g.human_cat[cat] && !g.local_cat[cat]) {
+                    g.local_cat[cat] = true;
+                    ++reassigned;
+                }
+            }
+            uint32_t local = 0;
+            ControlMsg c{};
+            c.battle_id = g.battles.current;
+            c.humans    = g.humans;
+            for (uint32_t i = 0; i < g.cat_count; ++i) {
+                if (g.local_cat[i]) {
+                    ++local;
+                    if (c.count < 32) c.cats[c.count++] = (uint8_t)i;
+                }
+            }
+            g.stats.local_cats = local;
+            g.peer_control[kHostPeer]      = c;
+            g.have_peer_control[kHostPeer] = true;
+            net_send_control(c);
+            log_line("LOCKSTEP", "peer %u left mid-battle -- host took over %u cat(s) (%u local now)",
+                     (unsigned)departed, reassigned, local);
+        } else {
+            // Remaining clients in 3-4p: host owns those cats now; update our
+            // cached host ControlMsg so verify_control stays consistent.
+            if (g.have_peer_control[kHostPeer] &&
+                g.peer_control[kHostPeer].battle_id == g.battles.current) {
+                ControlMsg& hc = g.peer_control[kHostPeer];
+                for (uint8_t i = 0; i < lost.count && hc.count < 32; ++i) {
+                    uint8_t cat = lost.cats[i];
+                    bool already = false;
+                    for (uint8_t j = 0; j < hc.count; ++j)
+                        if (hc.cats[j] == cat) { already = true; break; }
+                    if (!already) hc.cats[hc.count++] = cat;
+                }
+            }
+            log_line("LOCKSTEP", "peer %u left mid-battle -- host took over its %u cat(s)",
+                     (unsigned)departed, (unsigned)lost.count);
+        }
+    }
+
+    if (!g.control_checked) verify_control();
+}
+
 void lockstep_pump() {
     if (!g.active) return;
 
@@ -2501,6 +2580,18 @@ void lockstep_pump() {
         switch (m.type) {
             case MSG_ACTION:
                 if (stale_battle(m.action.battle_id, "an action")) break;
+                // A socket-reconnecting client already at turn T must not
+                // re-queue past turns replayed by the host's catch-up burst.
+                // Never dedupe actions on the current turn (m.action.turn == g.turn):
+                // a cat can legitimately cast the exact same spell on the exact
+                // same target multiple times in one turn (e.g. Inspire x2).
+                if (g.snapped && m.action.battle_id == g.battles.current &&
+                    m.action.turn < g.turn) {
+                    log_line_lvl(LogLevel::Trace, "LOCKSTEP",
+                                 "ignoring catch-up action for turn %u cat %u (already at turn %u)",
+                                 m.action.turn, (unsigned)m.action.actor, g.turn);
+                    break;
+                }
                 pend_push(m.action);
                 break;
 
@@ -2547,7 +2638,7 @@ void lockstep_pump() {
             // node, not to a battle, and the epoch counter does not advance on
             // an event node at all.
             case MSG_CHOICE:
-                choice_on_message(m.choice);
+                choice_on_message(m.from, m.choice);
                 break;
 
             case MSG_SAVEFILE:
@@ -2564,7 +2655,21 @@ void lockstep_pump() {
             case kNetPeerDisconnected:
                 house_on_peer_disconnect(m.from);
                 draft_on_peer_disconnected(m.from);
+                handle_peer_left_battle(m.from);
                 break;
+
+            case MSG_PEERS: {
+                // Detect any peer that dropped out of the membership list (this
+                // fires on remaining clients in 3-4p as well as the host).
+                for (uint8_t p = kHostPeer + 1; p < kMaxPeers; ++p) {
+                    if (!g.have_peer_control[p]) continue;
+                    bool present = false;
+                    for (uint8_t i = 0; i < m.peers.count; ++i)
+                        if (m.peers.ids[i] == p) { present = true; break; }
+                    if (!present) handle_peer_left_battle(p);
+                }
+                break;
+            }
 
             case MSG_HOUSE_BASELINE:
             case MSG_HOUSE_POSE:
@@ -2622,7 +2727,15 @@ void lockstep_pump() {
                 break;
 
             case MSG_SCREEN_PING:
-                overlay_on_ping(m.from, m.screen_ping);
+                if (m.screen_ping.in_house == 2) {
+                    cursor_on_tile_ping(m.from, m.screen_ping.battle_id,
+                                        (int32_t)m.screen_ping.wx, (int32_t)m.screen_ping.wy);
+                    ScreenPingMsg sp = m.screen_ping;
+                    sp.in_house = 0;
+                    overlay_on_ping(m.from, sp);
+                } else {
+                    overlay_on_ping(m.from, m.screen_ping);
+                }
                 break;
 
             case MSG_DRAFT_PICK:
@@ -2637,7 +2750,7 @@ void lockstep_pump() {
             // mgmp_aim checks the battle id itself, at the moment it would
             // draw, for the same reason the overlay does.
             case MSG_AIM:
-                aim_on_message(m.aim);
+                aim_on_message(m.from, m.aim);
                 break;
 
             case MSG_CONTROL:
@@ -2709,14 +2822,33 @@ void lockstep_pump() {
 // Defined just below, after its first caller.
 static void apply_remote(const ActionMsg& msg, const void* actor, void* out);
 
-bool lockstep_fill_choice(void* brain, void* out) {
+static void write_ta_none(void* out) {
+    TurnAction empty{};
+    empty.type = TA_None;
+    mem_write(out, &empty, sizeof(empty));
+}
+
+bool lockstep_on_brain_poll(void* brain, void* out) {
     if (!g.active || !brain || !out) return false;
     if (g.halted) {
-        // Freeze both peers rather than let one run on. Forcing type=1 parks
-        // the game in its normal "waiting for a decision" state, which is a
-        // far kinder failure than a crash or a silently diverged battle.
-        uint32_t none = TA_None;
-        mem_write(out, &none, sizeof(none));
+        write_ta_none(out);
+        return true;
+    }
+    if (!g.snapped) return false;
+
+    const void* actor = nullptr;
+    if (!mem_read((const uint8_t*)brain + kBrain_Owner, &actor, sizeof(actor)) || !actor)
+        return false;
+
+    uint8_t cat = cat_index_of(actor);
+    g.local_actor = (cat != kNoCat) && g.local_cat[cat];
+    return false;
+}
+
+bool lockstep_pre_player_choice(void* brain, void* out) {
+    if (!g.active || !brain || !out) return false;
+    if (g.halted) {
+        write_ta_none(out);
         return true;
     }
 
@@ -2727,80 +2859,26 @@ bool lockstep_fill_choice(void* brain, void* out) {
         return false;
 
     uint8_t cat = cat_index_of(actor);
-    // Recorded before the AI and barrier branches below, so it tracks every
-    // turn rather than only the ones this function goes on to act upon. A
-    // summon (kNoCat) is nobody's, same as an AI cat.
     g.local_actor = (cat != kNoCat) && g.local_cat[cat];
-    if (cat == kNoCat) return false;      // a summon: not in the snapshot, so
-                                          // neither peer treats it as owned and
-                                          // both let their own AI drive it.
-
-    // An AI cat is decided locally on BOTH peers -- never sent, never injected,
-    // never suppressed. Getting this wrong is a deadlock, not a desync: a cat
-    // that neither side sends for is a cat both sides sit and wait for.
-    //
-    // "Never suppressed" includes the join barrier below, and that is NOT an
-    // oversight -- it is the whole reason the barrier works. Measured
-    // 2026-08-24, and it cost a run to learn:
-    //
-    //   host:    RangedAttackAbility target=(3,8) dir=(-1,0)
-    //   client:  RangedAttackAbility target=(7,3) dir=(0,-1)   <- the right one
-    //
-    // An earlier version of the barrier held AI cats too, on the theory that
-    // letting one peer take AI turns the other had not reached was divergence
-    // by a quieter door. The opposite is true, twice over:
-    //
-    //   - Holding an AI brain is NOT free. Brain::UpdateDecision calls GetChoice
-    //     only when nothing is cached, so overwriting the decision it just
-    //     released makes the AI DERIVE A NEW ONE next frame -- and deriving
-    //     draws from the simulation stream. The host sat at the barrier for 529
-    //     polls, re-derived that many times, and by the time the barrier opened
-    //     its stream had run far past the client's. turn 0 hashes matched
-    //     exactly; turn 1 disagreed on rng with state_hash still identical,
-    //     which is precisely what "extra draws, same outcome so far" looks like.
-    //   - Letting the AI run ahead IS safe, for the reason the control split
-    //     already depends on: AI decisions are deterministic and re-derived
-    //     identically on both peers (phase 2B left 12 of 29 decisions to
-    //     PatternBrain and all 12 matched). A peer ahead on AI turns walks the
-    //     same turns with the same draws, and the other peer catches up.
-    //
-    // Holding a HUMAN brain, by contrast, really is free: GetChoice returns
-    // type=1 by itself while waiting on a person and did so for 1695 of 1711
-    // calls in one tutorial battle, so suppressing it changes nothing it was
-    // going to do anyway. That asymmetry is the whole design.
+    if (cat == kNoCat) return false;
     if (!g.human_cat[cat]) return false;
 
-    // The join barrier -- human cats only, per the note above. This is what the
-    // late-join gap actually needed: the host must not take HUMAN decisions and
-    // send them while the client is not in the battle to receive them.
+    // The join barrier -- human input only. AI cats and passive/aura overrides
+    // (Fear, Charm, etc.) run deterministically in Brain::GetChoice before
+    // PlayerBrain::OnRequestAction is ever reached.
     {
         Guard guard;
         if (const char* why = barrier_blocking()) {
             barrier_wait_tick(why);
-            uint32_t none = TA_None;
-            mem_write(out, &none, sizeof(none));
+            write_ta_none(out);
             return true;
         }
     }
 
     Guard guard;
 
-    // --- our cat: let the brain decide, then publish the decision -----------
+    // --- our cat: replay catch-up if queued, otherwise let PlayerBrain run --
     if (g.local_cat[cat]) {
-        // ...UNLESS a decision for this cat is already sitting in the queue.
-        //
-        // In a normal battle that never happens: nobody sends us decisions for
-        // cats we own, so this branch is inert. It fires only when we have
-        // JOINED A BATTLE ALREADY UNDER WAY and the host replayed its history
-        // to us -- and then it is the whole reason the catch-up works. Our own
-        // human cats already acted in the turns we are fast-forwarding through,
-        // and a human decision cannot be re-derived the way an AI one can, so
-        // without this the replay would stall on the first turn one of our cats
-        // was due to act and wait for a click that already happened.
-        //
-        // Not gated on a "catching up" flag on purpose: "there is a decision
-        // for this cat that we did not make" IS the condition, and a flag would
-        // just be a less direct way of asking the same question.
         ActionMsg replayed{};
         if (pend_take(cat, replayed)) {
             log_line("LOCKSTEP", "<= catch-up: replaying our own cat %u's turn-%u "
@@ -2809,83 +2887,84 @@ bool lockstep_fill_choice(void* brain, void* out) {
             apply_remote(replayed, actor, out);
             return true;
         }
-
-        if (g.outstanding) return false;
-
-        TurnAction a{};
-        if (!mem_read(out, &a, sizeof(a))) return false;
-        if (a.type != TA_Ability && a.type != TA_EndTurn) return false;
-
-        ActionMsg msg{};
-        msg.battle_id = g.battles.current;
-        msg.turn  = g.turn;
-        msg.actor = cat;
-        msg.type  = (uint8_t)a.type;
-        msg.tx = a.target_x; msg.ty = a.target_y;
-        msg.dx = a.dir_x;    msg.dy = a.dir_y;
-        msg.b30 = a.tail[0x30 - 0x28];
-        msg.b31 = a.tail[0x31 - 0x28];
-
-        // PlayerBrain::update lets the active player click a tile to turn their
-        // cat without generating a TurnAction. Carry Character+0x388 in the
-        // otherwise-unused dir fields of endturn so the peer matches before
-        // EndTurn / enemy turns evaluate backstabs.
-        if (a.type == TA_EndTurn && actor) {
-            int32_t fx = 0, fy = 0;
-            if (mem_read((const uint8_t*)actor + kChar_Facing,     &fx, sizeof(fx)) &&
-                mem_read((const uint8_t*)actor + kChar_Facing + 4, &fy, sizeof(fy))) {
-                msg.dx = fx;
-                msg.dy = fy;
-            }
-        }
-
-        if (a.type == TA_Ability) {
-            AbilitySlot slot = ability_slot_of(actor, a.ability);
-            msg.slot_kind  = slot.kind;
-            msg.slot_index = slot.index;
-            ability_gon_name(a.ability, msg.gon, sizeof(msg.gon));
-            if (slot.kind == SLOT_UNKNOWN) {
-                // Unreproducible on the peer: it has no way to name this
-                // ability. Say so loudly rather than send an action the other
-                // side will resolve to nullptr and silently skip.
-                log_line("LOCKSTEP", "!! cat %u used an ability in no known slot "
-                                     "(gon='%s') -- peer cannot resolve it",
-                         (unsigned)cat, msg.gon[0] ? msg.gon : "?");
-            }
-        }
-
-        // Logged BEFORE the send, and logged whether or not the send succeeds.
-        // The log is what a peer joining mid-battle replays to catch up, so it
-        // has to describe what this peer DID, not what it managed to transmit
-        // -- a decision that failed to send is exactly the one a joining peer
-        // most needs, and a peer that was not connected yet cannot have been
-        // sent anything at all.
-        sent_log_push(msg);
-
-        if (net_send_action(msg)) {
-            g.outstanding = true;
-            ++g.stats.sent;
-            log_line("LOCKSTEP", "-> cat %u %s slot=%u:%u target=(%d,%d) gon=%s",
-                     (unsigned)cat, a.type == TA_EndTurn ? "endturn" : "ability",
-                     msg.slot_kind, msg.slot_index, msg.tx, msg.ty,
-                     msg.gon[0] ? msg.gon : "-");
-        }
-        return false;    // the local brain's own decision proceeds unchanged
+        return false;
     }
 
-    // --- the peer's cat: overwrite unconditionally --------------------------
-    //
-    // Unconditionally, because this is also what suppresses local input on a
-    // cat we do not own: a stray click produces a decision that we replace
-    // here, so it can never reach QueueDecision.
+    // --- the peer's cat: never run local PlayerBrain::OnRequestAction -------
     ActionMsg msg{};
     if (!pend_take(cat, msg)) {
-        uint32_t none = TA_None;
-        mem_write(out, &none, sizeof(none));
-        return true;                       // nothing yet -- keep waiting, free
+        write_ta_none(out);
+        return true;
     }
     apply_remote(msg, actor, out);
     return true;
+}
+
+void lockstep_post_player_choice(void* brain, void* out) {
+    if (!g.active || g.halted || !g.snapped || !brain || !out) return;
+
+    const void* actor = nullptr;
+    if (!mem_read((const uint8_t*)brain + kBrain_Owner, &actor, sizeof(actor)) || !actor)
+        return;
+
+    uint8_t cat = cat_index_of(actor);
+    if (cat == kNoCat || !g.human_cat[cat] || !g.local_cat[cat]) return;
+
+    Guard guard;
+    if (g.outstanding) return;
+
+    TurnAction a{};
+    if (!mem_read(out, &a, sizeof(a))) return;
+    // PlayerBrain::OnRequestAction returns kind=4 (END_TURN_MANUAL) when the
+    // player clicks End Turn; Brain::GetChoice normalizes 4 -> 3 (TA_EndTurn).
+    const bool is_end = (a.type == TA_EndTurn || a.type == 4);
+    if (a.type != TA_Ability && !is_end) return;
+
+    ActionMsg msg{};
+    msg.battle_id = g.battles.current;
+    msg.turn  = g.turn;
+    msg.actor = cat;
+    msg.type  = is_end ? (uint8_t)TA_EndTurn : (uint8_t)a.type;
+    msg.tx = a.target_x; msg.ty = a.target_y;
+    msg.dx = a.dir_x;    msg.dy = a.dir_y;
+    msg.b30 = a.tail[0x30 - 0x28];
+    msg.b31 = a.tail[0x31 - 0x28];
+
+    // PlayerBrain::update lets the active player click a tile to turn their
+    // cat without generating a TurnAction. Carry Character+0x388 in the
+    // otherwise-unused dir fields of endturn so the peer matches before
+    // EndTurn / enemy turns evaluate backstabs.
+    if (is_end && actor) {
+        int32_t fx = 0, fy = 0;
+        if (mem_read((const uint8_t*)actor + kChar_Facing,     &fx, sizeof(fx)) &&
+            mem_read((const uint8_t*)actor + kChar_Facing + 4, &fy, sizeof(fy))) {
+            msg.dx = fx;
+            msg.dy = fy;
+        }
+    }
+
+    if (a.type == TA_Ability) {
+        AbilitySlot slot = ability_slot_of(actor, a.ability);
+        msg.slot_kind  = slot.kind;
+        msg.slot_index = slot.index;
+        ability_gon_name(a.ability, msg.gon, sizeof(msg.gon));
+        if (slot.kind == SLOT_UNKNOWN) {
+            log_line("LOCKSTEP", "!! cat %u used an ability in no known slot "
+                                 "(gon='%s') -- peer cannot resolve it",
+                     (unsigned)cat, msg.gon[0] ? msg.gon : "?");
+        }
+    }
+
+    sent_log_push(msg);
+
+    if (net_send_action(msg)) {
+        g.outstanding = true;
+        ++g.stats.sent;
+        log_line("LOCKSTEP", "-> cat %u %s slot=%u:%u target=(%d,%d) gon=%s",
+                 (unsigned)cat, is_end ? "endturn" : "ability",
+                 msg.slot_kind, msg.slot_index, msg.tx, msg.ty,
+                 msg.gon[0] ? msg.gon : "-");
+    }
 }
 
 // Turn a decision that came off the wire into the TurnAction the brain was
@@ -3219,6 +3298,23 @@ void lockstep_enter_battle(uint64_t seed0) {
 void lockstep_catchup(uint8_t peer) {
     Guard guard;
     if (!g.active || g.battles.current == kNoBattle) return;
+
+    // Resend every connected peer's ControlMsg for the current battle so a
+    // mid-battle joiner/rejoiner can satisfy verify_control() and pass the
+    // Join Barrier (in 2p and 3-4p alike).
+    if (g.snapped) {
+        uint32_t ctrl_sent = 0;
+        for (uint8_t p = 0; p < kMaxPeers; ++p) {
+            if (p == peer) continue;
+            if (!g.have_peer_control[p]) continue;
+            if (g.peer_control[p].battle_id != g.battles.current) continue;
+            if (net_send_control_from(peer, p, g.peer_control[p])) ++ctrl_sent;
+        }
+        if (ctrl_sent)
+            log_line("LOCKSTEP", "-> resent %u ControlMsg(s) of battle %016llx to peer %u",
+                     ctrl_sent, (unsigned long long)g.battles.current, (unsigned)peer);
+    }
+
     if (g.sent_log_n == 0) {
         log_line("LOCKSTEP", "peer %u joined battle %016llx -- nothing to replay,"
                              " it can derive this battle from the node seed alone",

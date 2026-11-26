@@ -19,6 +19,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include "mgmp_proto.h"
 
 namespace mgmp {
@@ -42,53 +43,58 @@ enum class NetState {
 constexpr uint8_t kNetPeerDisconnected = 0xFF;
 
 struct NetMsg {
-    uint8_t   type = 0;
+    uint8_t   type;
     // Which peer AUTHORED this, from the frame envelope -- not which socket it
     // arrived on. The two differ for anything the host relays between clients,
     // and the difference is the whole point: with four players, "an action
     // arrived" is not enough, you need to know whose.
-    uint8_t   from = kNoPeer;
-    uint64_t  received_ms = 0;
-    Hello     hello;
-    PeersMsg  peers;
-    Welcome   welcome;
-    ActionMsg action;
-    HashMsg   hash;
-    ControlMsg control;
-    CursorMsg cursor;
-    AimMsg    aim;
-    EnterNodeMsg enter_node;
-    ChoiceMsg    choice;
-    // The two messages that do not fit the "flat, no allocation" rule above.
-    // Their `data` is heap-allocated by the decoder and owned by whoever pops
-    // the frame, so EVERY net_poll caller must pass the frame to
-    // net_msg_release when it is done with it -- including the ones that
-    // ignored it.
-    SaveFileMsg savefile;
-    CatDataMsg  catdata;
-    InventoryMsg inventory;   // owns up to kInvBuckets buffers
-    RunHistMsg   runhist;     // owns its buffer, same contract as catdata
-    StateDumpMsg statedump;   // owns its buffer, same contract as catdata
-    NodeHashMsg  nodehash;
-    HostLeftMsg  hostleft;
-    HouseBaselineMsg house_baseline;
-    HousePoseMsg     house_pose;
-    HouseGrabReqMsg  house_grab_req;
-    HouseGrabRespMsg house_grab_resp;
-    HouseDragMoveMsg house_drag_move;
-    HouseDropReqMsg  house_drop_req;
-    HouseDropRespMsg house_drop_resp;
-    HouseCursorMsg   house_cursor;
-    HousePrepMsg     house_prep;
-    HousePhaseMsg    house_phase;
-    HouseInterstitialsMsg house_interstitials;
-    HousePoopPopMsg  house_poop_pop;
-    HouseFurnitureMsg house_furniture;
-    ScreenPingMsg    screen_ping;
-    DraftPickMsg     draft_pick;
-    DraftStateMsg    draft_state;
-    HaltMsg   halt;
-    char      refuse[192] = {};
+    uint8_t   from;
+    uint64_t  received_ms;
+    union {
+        Hello     hello;
+        PeersMsg  peers;
+        Welcome   welcome;
+        ActionMsg action;
+        HashMsg   hash;
+        ControlMsg control;
+        CursorMsg cursor;
+        AimMsg    aim;
+        EnterNodeMsg enter_node;
+        ChoiceMsg    choice;
+        // Messages whose payload is heap-allocated by the decoder and owned by
+        // whoever pops the frame. EVERY net_poll caller must pass the frame to
+        // net_msg_release when done with it.
+        SaveFileMsg savefile;
+        CatDataMsg  catdata;
+        InventoryMsg inventory;   // owns up to kInvBuckets buffers
+        RunHistMsg   runhist;     // owns its buffer, same contract as catdata
+        StateDumpMsg statedump;   // owns its buffer, same contract as catdata
+        NodeHashMsg  nodehash;
+        HostLeftMsg  hostleft;
+        HouseBaselineMsg house_baseline;
+        HousePoseMsg     house_pose;
+        HouseGrabReqMsg  house_grab_req;
+        HouseGrabRespMsg house_grab_resp;
+        HouseDragMoveMsg house_drag_move;
+        HouseDropReqMsg  house_drop_req;
+        HouseDropRespMsg house_drop_resp;
+        HouseCursorMsg   house_cursor;
+        HousePrepMsg*    house_prep;   // heap-allocated (~5.5 KB) to keep NetMsg small
+        HousePhaseMsg    house_phase;
+        HouseInterstitialsMsg house_interstitials;
+        HousePoopPopMsg  house_poop_pop;
+        HouseFurnitureMsg house_furniture;
+        ScreenPingMsg    screen_ping;
+        DraftPickMsg     draft_pick;
+        DraftStateMsg    draft_state;
+        HaltMsg   halt;
+        char      refuse[192];
+    };
+
+    NetMsg() {
+        std::memset(this, 0, sizeof(*this));
+        from = kNoPeer;
+    }
 };
 
 // Frees anything the frame owns and nulls it, so calling it twice is safe and
@@ -186,6 +192,7 @@ bool net_send_hello_to(uint8_t peer, const Hello& h);
 // One peer only -- replaying a battle in progress to a joiner. See the note on
 // the definition for why this must not be a broadcast.
 bool net_send_action_to(uint8_t peer, const ActionMsg& a);
+bool net_send_control_from(uint8_t to_peer, uint8_t from_peer, const ControlMsg& c);
 bool net_send_enter_node_to(uint8_t peer, const EnterNodeMsg& m);
 bool net_send_welcome_to(uint8_t peer, const Welcome& w);
 bool net_send_refuse_to(uint8_t peer, const char* reason);

@@ -52,7 +52,7 @@ namespace mgmp {
 // So: if the value a peer puts in a message changes meaning, that is a protocol
 // change even when every byte stays where it was. Refusing at connect is free;
 // diagnosing it from a turn-0 halt is not.
-constexpr uint32_t kProtoVersion = 38;  // Adventure cat ownership draft overlay
+constexpr uint32_t kProtoVersion = 40;  // Battle tile pings + choice vote markers
 
 // A frame's payload may not exceed this. RUNSTATE (phase 5) is the only message
 // that will ever approach it; everything in phase 4 is under 128 bytes.
@@ -142,7 +142,7 @@ enum MsgType : uint8_t {
 };
 
 // A save file is a plain sqlite3 database (the shipped ones start with the
-// literal "SQLite format 3 ") and the campaign save measures about 45 KB. The
+// literal "SQLite format 3\\0") and the campaign save measures about 45 KB. The
 // cap is generous but bounded: a garbled length must not make the receiver
 // allocate wildly, and there is no legitimate save anywhere near this size.
 constexpr uint32_t kMaxSaveBytes = 4u << 20;   // 4 MiB
@@ -651,7 +651,7 @@ struct EnterNodeMsg {
 // already read MapNode+0x118 to agree on battle_id -- and it makes "is this
 // choice about the screen in front of me" answerable instead of assumed.
 struct ChoiceMsg {
-    uint8_t  kind  = 0;     // kChoiceEvent or kChoiceLevelUp
+    uint8_t  kind  = 0;     // kChoiceEvent, kChoiceLevelUp, or kChoiceLevelUpReroll
     uint32_t index = 0;     // option index into that screen's array
     uint32_t count = 0;     // options the sender had, so a bad index is caught
     uint32_t aux   = 0;     // level-up: the LevelUpOption type at +0. event: 0.
@@ -659,12 +659,18 @@ struct ChoiceMsg {
                             // in. 0 means "the sender did not know", which is
                             // treated as "do not check" rather than as a
                             // mismatch -- see choice_on_message.
+    uint64_t cat_uid   = 0; // level-up: CatData+0x00 persistent UID of the cat
+                            // being levelled up, so back-to-back level-ups and
+                            // rerolls queue per-cat without overwriting each other.
     char     name[48] = {}; // event: the stat key at entry+64 ("con", "coins",
                             // "none"...). level-up: the option name at +200.
 };
 
-constexpr uint8_t kChoiceEvent   = 0;
-constexpr uint8_t kChoiceLevelUp = 1;
+constexpr uint8_t kChoiceEvent         = 0;
+constexpr uint8_t kChoiceLevelUp       = 1;
+constexpr uint8_t kChoiceLevelUpReroll = 2;
+constexpr uint8_t kChoiceEventVote     = 3;
+constexpr uint8_t kChoiceLevelUpVote   = 4;
 
 // Host -> client, once the host has committed to a save file.
 //
@@ -848,6 +854,7 @@ struct HousePrepCat {
     char    cat_class[48]  = {};
     char    eq_summary[256] = {};
     char    eq_slots[5][48] = {};
+    int64_t eq_uids[5]     = {};
 };
 
 constexpr uint8_t  kMaxPrepCollars = 24;
@@ -900,12 +907,13 @@ struct HouseFurnitureMsg {
 };
 
 struct ScreenPingMsg {
-    uint8_t kind     = 0;   // 0 = click ripple (LMB), 1 = 3s screen ping (MMB)
-    uint8_t in_house = 0;
-    float   nx       = 0.0f;
-    float   ny       = 0.0f;
-    float   wx       = 0.0f;
-    float   wy       = 0.0f;
+    uint8_t  kind      = 0;   // 0 = click ripple (LMB), 1 = 3s ping (MMB)
+    uint8_t  in_house  = 0;   // 0 = screen space, 1 = house world, 2 = battle tile (wx=tx, wy=ty)
+    float    nx        = 0.0f;
+    float    ny        = 0.0f;
+    float    wx        = 0.0f;
+    float    wy        = 0.0f;
+    uint64_t battle_id = 0;   // battle id when in_house == 2
 };
 
 constexpr uint32_t kMaxDraftCats = 8;
@@ -1284,6 +1292,7 @@ inline uint32_t enc_choice(uint8_t* p, uint32_t cap, const ChoiceMsg& m) {
     w.u8v(MSG_CHOICE);
     w.u8v(m.kind); w.u32v(m.index); w.u32v(m.count); w.u32v(m.aux);
     w.u64v(m.node_seed);
+    w.u64v(m.cat_uid);
     w.str(m.name);
     return w.ok ? w.len : 0;
 }
@@ -1456,8 +1465,10 @@ inline uint32_t enc_house_prep(uint8_t* p, uint32_t cap, const HousePrepMsg& m) 
         w.u64v((uint64_t)m.cats[i].cat_id);
         w.str(m.cats[i].cat_class);
         w.str(m.cats[i].eq_summary);
-        for (uint8_t s = 0; s < 5; ++s)
+        for (uint8_t s = 0; s < 5; ++s) {
             w.str(m.cats[i].eq_slots[s]);
+            w.u64v((uint64_t)m.cats[i].eq_uids[s]);
+        }
     }
     return w.ok ? w.len : 0;
 }
@@ -1512,6 +1523,7 @@ inline uint32_t enc_screen_ping(uint8_t* p, uint32_t cap, const ScreenPingMsg& m
     w.f32v(m.ny);
     w.f32v(m.wx);
     w.f32v(m.wy);
+    w.u64v(m.battle_id);
     return w.ok ? w.len : 0;
 }
 
@@ -1719,6 +1731,7 @@ inline bool dec_choice(Reader& r, ChoiceMsg& m) {
     m.count = r.u32v();
     m.aux   = r.u32v();
     m.node_seed = r.u64v();
+    m.cat_uid   = r.u64v();
     r.str(m.name, sizeof(m.name));
     return r.ok;
 }
@@ -1907,8 +1920,10 @@ inline bool dec_house_prep(Reader& r, HousePrepMsg& m) {
         m.cats[i].cat_id = (int64_t)r.u64v();
         r.str(m.cats[i].cat_class, sizeof(m.cats[i].cat_class));
         r.str(m.cats[i].eq_summary, sizeof(m.cats[i].eq_summary));
-        for (uint8_t s = 0; s < 5; ++s)
+        for (uint8_t s = 0; s < 5; ++s) {
             r.str(m.cats[i].eq_slots[s], sizeof(m.cats[i].eq_slots[s]));
+            m.cats[i].eq_uids[s] = (int64_t)r.u64v();
+        }
     }
     return r.ok;
 }
@@ -1955,12 +1970,13 @@ inline bool dec_house_furniture(Reader& r, HouseFurnitureMsg& m) {
 }
 
 inline bool dec_screen_ping(Reader& r, ScreenPingMsg& m) {
-    m.kind     = r.u8v();
-    m.in_house = r.u8v();
-    m.nx       = r.f32v();
-    m.ny       = r.f32v();
-    m.wx       = r.f32v();
-    m.wy       = r.f32v();
+    m.kind      = r.u8v();
+    m.in_house  = r.u8v();
+    m.nx        = r.f32v();
+    m.ny        = r.f32v();
+    m.wx        = r.f32v();
+    m.wy        = r.f32v();
+    m.battle_id = r.u64v();
     return r.ok;
 }
 

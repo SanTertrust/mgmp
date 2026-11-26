@@ -7,6 +7,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <cstdio>
+#include <vector>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -33,11 +34,22 @@ static_assert(kMaxFrame <= kMaxPayload, "frame cap must fit the protocol cap");
 // and a thread per link keeps the per-link byte stream strictly ordered with no
 // interleaving logic to get wrong -- which matters because the relay runs on
 // this thread.
+// Per-peer outbound queue cap. If a stalled client falls 8 MiB behind, we drop
+// that link rather than growing memory unboundedly or blocking other peers.
+constexpr size_t kMaxSendQueueBytes = 8u << 20;
+
 struct Link {
     SOCKET        sock   = INVALID_SOCKET;
     HANDLE        thread = nullptr;
     uint8_t       id     = kNoPeer;
     volatile LONG live   = 0;
+
+    CRITICAL_SECTION     send_cs{};
+    bool                 send_cs_ready = false;
+    HANDLE               send_event    = nullptr;
+    HANDLE               send_thread   = nullptr;
+    volatile LONG        send_stop     = 0;
+    std::vector<uint8_t> send_buf;
 };
 
 struct State {
@@ -49,7 +61,11 @@ struct State {
     Link     links[kMaxPeers];
     uint8_t  self     = kNoPeer;     // our own peer id; kHostPeer on the host
 
-    HANDLE   accept_thread = nullptr;
+    HANDLE   accept_thread  = nullptr;
+    HANDLE   connect_thread = nullptr;
+    SOCKET   dial_sock      = INVALID_SOCKET;
+    char     dial_addr[128] = {};
+    uint16_t dial_port      = 0;
     volatile LONG stop = 0;
 
     CRITICAL_SECTION cs;
@@ -57,9 +73,6 @@ struct State {
 
     NetMsg   queue[kQueueCap];
     uint32_t head = 0, count = 0;
-
-    CRITICAL_SECTION send_cs;
-    bool     send_cs_ready = false;
 
     // Membership, host-side. Rebroadcast to everyone whenever it changes.
     PeersMsg roster;
@@ -205,7 +218,16 @@ bool decode_into(const uint8_t* buf, uint32_t len, NetMsg& m) {
         case MSG_HOUSE_DROP_REQ: return dec_house_drop_req(r, m.house_drop_req);
         case MSG_HOUSE_DROP_RESP:return dec_house_drop_resp(r, m.house_drop_resp);
         case MSG_HOUSE_CURSOR:   return dec_house_cursor(r, m.house_cursor);
-        case MSG_HOUSE_PREP:     return dec_house_prep(r, m.house_prep);
+        case MSG_HOUSE_PREP: {
+            m.house_prep = (HousePrepMsg*)calloc(1, sizeof(HousePrepMsg));
+            if (!m.house_prep) return false;
+            if (!dec_house_prep(r, *m.house_prep)) {
+                free(m.house_prep);
+                m.house_prep = nullptr;
+                return false;
+            }
+            return true;
+        }
         case MSG_HOUSE_PHASE:    return dec_house_phase(r, m.house_phase);
         case MSG_HOUSE_INTERSTITIALS: return dec_house_interstitials(r, m.house_interstitials);
         case MSG_HOUSE_POOP_POP: return dec_house_poop_pop(r, m.house_poop_pop);
@@ -221,29 +243,125 @@ bool decode_into(const uint8_t* buf, uint32_t len, NetMsg& m) {
     }
 }
 
-// Write one framed message on one socket. `from` is stamped into the envelope:
-// our own id when we author a message, the ORIGINATOR's id when the host relays
-// one.
-bool send_framed(SOCKET s, uint8_t from, const uint8_t* payload, uint32_t len) {
+// Direct blocking send for a single unlinked socket (used only for the
+// "session is full" REFUSE in accept_thread).
+bool send_framed_direct(SOCKET s, uint8_t from, const uint8_t* payload, uint32_t len) {
     if (s == INVALID_SOCKET || len == 0) return false;
-
     uint32_t n = len + kEnvelopeBytes;
-    EnterCriticalSection(&g.send_cs);
-    bool ok = true;
     const char* parts[3] = { (const char*)&n, (const char*)&from, (const char*)payload };
     int         sizes[3] = { 4, (int)kEnvelopeBytes, (int)len };
-    for (int i = 0; i < 3 && ok; ++i) {
+    for (int i = 0; i < 3; ++i) {
         int off = 0;
         while (off < sizes[i]) {
             int r = send(s, parts[i] + off, sizes[i] - off, 0);
-            if (r <= 0) { ok = false; break; }
+            if (r <= 0) return false;
             off += r;
         }
     }
-    if (ok) { ++g.stats.sent; g.stats.bytes_sent += n + 4; }
-    else shutdown(s, SD_BOTH); // A partial frame cannot be retried on this stream.
-    LeaveCriticalSection(&g.send_cs);
-    return ok;
+    return true;
+}
+
+// Enqueue one framed message onto a link's non-blocking outbound buffer.
+// Never blocks on socket I/O, so a stalled client cannot slow down the game
+// thread or any other peer's relay.
+bool send_framed_link(Link& l, uint8_t from, const uint8_t* payload, uint32_t len) {
+    if (len == 0 || !l.send_cs_ready) return false;
+    if (!InterlockedCompareExchange(&l.live, 0, 0)) return false;
+
+    const uint32_t n = len + kEnvelopeBytes;
+    const size_t total = 4u + (size_t)kEnvelopeBytes + (size_t)len;
+
+    EnterCriticalSection(&l.send_cs);
+    if (!InterlockedCompareExchange(&l.live, 0, 0) ||
+        InterlockedCompareExchange(&l.send_stop, 0, 0) ||
+        l.sock == INVALID_SOCKET) {
+        LeaveCriticalSection(&l.send_cs);
+        return false;
+    }
+    if (l.send_buf.size() + total > kMaxSendQueueBytes) {
+        SOCKET s = l.sock;
+        LeaveCriticalSection(&l.send_cs);
+        log_line("NET", "!! send queue overflow (>%u B) for peer %u -- closing",
+                 (unsigned)kMaxSendQueueBytes, (unsigned)l.id);
+        if (s != INVALID_SOCKET) shutdown(s, SD_BOTH);
+        return false;
+    }
+    const size_t old = l.send_buf.size();
+    l.send_buf.resize(old + total);
+    uint8_t* dst = l.send_buf.data() + old;
+    std::memcpy(dst, &n, 4);
+    dst[4] = from;
+    std::memcpy(dst + 4 + kEnvelopeBytes, payload, len);
+    if (l.send_event) SetEvent(l.send_event);
+    LeaveCriticalSection(&l.send_cs);
+
+    if (g.cs_ready) {
+        EnterCriticalSection(&g.cs);
+        ++g.stats.sent;
+        g.stats.bytes_sent += n + 4;
+        LeaveCriticalSection(&g.cs);
+    }
+    return true;
+}
+
+DWORD WINAPI send_thread_proc(LPVOID param) {
+    Link& l = *(Link*)param;
+    std::vector<uint8_t> batch;
+    for (;;) {
+        EnterCriticalSection(&l.send_cs);
+        if (!l.send_buf.empty()) {
+            batch.swap(l.send_buf);
+        }
+        const bool stopping = InterlockedCompareExchange(&l.send_stop, 0, 0) != 0 ||
+                              InterlockedCompareExchange(&g.stop, 0, 0) != 0;
+        LeaveCriticalSection(&l.send_cs);
+
+        if (!batch.empty()) {
+            size_t off = 0;
+            bool ok = true;
+            while (off < batch.size()) {
+                if (InterlockedCompareExchange(&l.send_stop, 0, 0) ||
+                    InterlockedCompareExchange(&g.stop, 0, 0)) {
+                    ok = false;
+                    break;
+                }
+                const int chunk = (batch.size() - off > 65536u) ? 65536 : (int)(batch.size() - off);
+                int r = send(l.sock, (const char*)(batch.data() + off), chunk, 0);
+                if (r <= 0) { ok = false; break; }
+                off += (size_t)r;
+            }
+            batch.clear();
+            if (!ok) {
+                if (l.sock != INVALID_SOCKET) shutdown(l.sock, SD_BOTH);
+                break;
+            }
+            continue;
+        }
+        if (stopping) break;
+        if (l.send_event) WaitForSingleObject(l.send_event, 100);
+        else break;
+    }
+    return 0;
+}
+
+void stop_link_sender(Link& l) {
+    InterlockedExchange(&l.send_stop, 1);
+    if (l.send_event) SetEvent(l.send_event);
+    if (l.send_thread) {
+        if (WaitForSingleObject(l.send_thread, 2000) == WAIT_TIMEOUT)
+            log_line("NET", "!! send thread for peer %u did not exit in 2 s", (unsigned)l.id);
+        CloseHandle(l.send_thread);
+        l.send_thread = nullptr;
+    }
+    if (l.send_event) {
+        CloseHandle(l.send_event);
+        l.send_event = nullptr;
+    }
+    if (l.send_cs_ready) {
+        EnterCriticalSection(&l.send_cs);
+        l.send_buf.clear();
+        LeaveCriticalSection(&l.send_cs);
+    }
 }
 
 // Which messages the host passes on to the other clients.
@@ -262,6 +380,9 @@ bool relayed(uint8_t type) {
         // everyone else to look at.
         case MSG_AIM:
         case MSG_HALT:
+        // STATEDUMP is authored by whichever peer hit a desync; in 3-4p every
+        // other client needs it too for full diagnostics.
+        case MSG_STATEDUMP:
         // NODEHASH is symmetric -- every peer authors its own -- so with more
         // than two players a client's has to reach the other clients, exactly
         // like the per-turn HASH above it.
@@ -280,7 +401,7 @@ void host_relay(uint8_t from, const uint8_t* payload, uint32_t len) {
         Link& l = g.links[i];
         if (!InterlockedCompareExchange(&l.live, 0, 0)) continue;
         if (l.id == from) continue;              // not back to its author
-        send_framed(l.sock, from, payload, len);
+        send_framed_link(l, from, payload, len);
     }
 }
 
@@ -316,7 +437,7 @@ void host_publish_roster() {
         mine.you = l.id;
         uint8_t p[64];
         uint32_t n = enc_peers(p, sizeof(p), mine);
-        if (n) send_framed(l.sock, kHostPeer, p, n);
+        if (n) send_framed_link(l, kHostPeer, p, n);
     }
 
     NetMsg self{};
@@ -378,6 +499,9 @@ void recv_loop(Link& link) {
     free(buf);
 
     const uint8_t departed = link.id;
+    InterlockedExchange(&link.live, 0);
+    if (link.sock != INVALID_SOCKET) shutdown(link.sock, SD_BOTH);
+    stop_link_sender(link);
     if (g.role == NetRole::Host && !InterlockedCompareExchange(&g.stop, 0, 0)) {
         NetMsg event{};
         event.type = kNetPeerDisconnected;
@@ -385,7 +509,6 @@ void recv_loop(Link& link) {
         queue_push(event);
     }
     if (link.sock != INVALID_SOCKET) { closesocket(link.sock); link.sock = INVALID_SOCKET; }
-    InterlockedExchange(&link.live, 0);
 
     if (!InterlockedCompareExchange(&g.stop, 0, 0)) {
         log_line("NET", "peer %u disconnected", (unsigned)departed);
@@ -419,13 +542,43 @@ void nodelay_on(SOCKET s) {
 
 bool start_link(int slot, SOCKET s, uint8_t id) {
     Link& l = g.links[slot];
+    // Reap a previous link's exited thread handle if this slot is being reused.
+    if (l.thread) {
+        WaitForSingleObject(l.thread, 2000);
+        CloseHandle(l.thread);
+        l.thread = nullptr;
+    }
     l.sock = s;
     l.id   = id;
-    InterlockedExchange(&l.live, 1);
+    InterlockedExchange(&l.send_stop, 0);
+    if (l.send_cs_ready) {
+        EnterCriticalSection(&l.send_cs);
+        l.send_buf.clear();
+        LeaveCriticalSection(&l.send_cs);
+    }
+    l.send_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!l.send_event) {
+        closesocket(s);
+        l.sock = INVALID_SOCKET;
+        fail("CreateEvent", (int)GetLastError());
+        return false;
+    }
     nodelay_on(s);
+    InterlockedExchange(&l.live, 1);
+    l.send_thread = CreateThread(nullptr, 0, send_thread_proc, &l, 0, nullptr);
+    if (!l.send_thread) {
+        InterlockedExchange(&l.live, 0);
+        CloseHandle(l.send_event);
+        l.send_event = nullptr;
+        closesocket(s);
+        l.sock = INVALID_SOCKET;
+        fail("CreateThread(send)", (int)GetLastError());
+        return false;
+    }
     l.thread = CreateThread(nullptr, 0, link_thread, &l, 0, nullptr);
     if (!l.thread) {
         InterlockedExchange(&l.live, 0);
+        stop_link_sender(l);
         closesocket(s);
         l.sock = INVALID_SOCKET;
         fail("CreateThread", (int)GetLastError());
@@ -465,7 +618,7 @@ DWORD WINAPI accept_thread(LPVOID) {
             // connect that appears to succeed and then does nothing.
             uint8_t p[128];
             uint32_t n = enc_refuse(p, sizeof(p), "session is full");
-            if (n) send_framed(c, kHostPeer, p, n);
+            if (n) send_framed_direct(c, kHostPeer, p, n);
             log_line("NET", "!! refused a connection -- the session already has "
                             "%u peer(s), the maximum", (unsigned)kMaxPeers);
             closesocket(c);
@@ -482,8 +635,82 @@ DWORD WINAPI accept_thread(LPVOID) {
 }
 
 void ensure_cs() {
-    if (!g.cs_ready)      { InitializeCriticalSection(&g.cs);      g.cs_ready = true; }
-    if (!g.send_cs_ready) { InitializeCriticalSection(&g.send_cs); g.send_cs_ready = true; }
+    if (!g.cs_ready) { InitializeCriticalSection(&g.cs); g.cs_ready = true; }
+    for (int i = 0; i < kMaxPeers; ++i) {
+        if (!g.links[i].send_cs_ready) {
+            InitializeCriticalSection(&g.links[i].send_cs);
+            g.links[i].send_cs_ready = true;
+        }
+    }
+}
+
+DWORD WINAPI connect_thread_proc(LPVOID) {
+    char port_str[16];
+    _snprintf_s(port_str, sizeof(port_str), _TRUNCATE, "%u", (unsigned)g.dial_port);
+
+    addrinfo hints{};
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* res = nullptr;
+    int rc = getaddrinfo(g.dial_addr, port_str, &hints, &res);
+    if (rc != 0 || !res) {
+        if (!InterlockedCompareExchange(&g.stop, 0, 0)) {
+            _snprintf_s(g.error, sizeof(g.error), _TRUNCATE,
+                        "could not resolve '%s' (WSA %d)", g.dial_addr, rc);
+            set_state(NetState::Failed);
+            log_line("NET", "!! %s", g.error);
+        }
+        return 0;
+    }
+
+    SOCKET connected = INVALID_SOCKET;
+    int last_err = 0;
+    for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+        if (InterlockedCompareExchange(&g.stop, 0, 0)) break;
+        SOCKET s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s == INVALID_SOCKET) { last_err = WSAGetLastError(); continue; }
+
+        EnterCriticalSection(&g.cs);
+        if (InterlockedCompareExchange(&g.stop, 0, 0)) {
+            LeaveCriticalSection(&g.cs);
+            closesocket(s);
+            break;
+        }
+        g.dial_sock = s;
+        LeaveCriticalSection(&g.cs);
+
+        if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) {
+            EnterCriticalSection(&g.cs);
+            g.dial_sock = INVALID_SOCKET;
+            LeaveCriticalSection(&g.cs);
+            connected = s;
+            break;
+        }
+        last_err = WSAGetLastError();
+        EnterCriticalSection(&g.cs);
+        if (g.dial_sock == s) {
+            g.dial_sock = INVALID_SOCKET;
+            closesocket(s);
+        }
+        LeaveCriticalSection(&g.cs);
+    }
+    freeaddrinfo(res);
+
+    if (InterlockedCompareExchange(&g.stop, 0, 0)) {
+        if (connected != INVALID_SOCKET) closesocket(connected);
+        return 0;
+    }
+    if (connected == INVALID_SOCKET) {
+        fail("connect", last_err);
+        return 0;
+    }
+
+    set_state(NetState::Connected);
+    log_line("NET", "connected");
+    start_link(0, connected, kHostPeer);
+    return 0;
 }
 
 } // namespace
@@ -528,41 +755,32 @@ bool net_host(uint16_t port, bool loopback_only) {
 
 bool net_join(const char* addr, uint16_t port) {
     if (g.role != NetRole::None) return false;
+    if (!addr || !addr[0]) {
+        _snprintf_s(g.error, sizeof(g.error), _TRUNCATE, "empty address");
+        set_state(NetState::Failed);
+        log_line("NET", "!! %s", g.error);
+        return false;
+    }
     ensure_cs();
     if (!wsa_init()) return false;
 
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) { fail("socket", WSAGetLastError()); return false; }
-
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_port   = htons(port);
-    if (inet_pton(AF_INET, addr, &a.sin_addr) != 1) {
-        _snprintf_s(g.error, sizeof(g.error), _TRUNCATE, "bad address '%s'", addr);
-        set_state(NetState::Failed);
-        log_line("NET", "!! %s", g.error);
-        closesocket(s);
-        return false;
-    }
-
-    set_state(NetState::Connecting);
-    log_line("NET", "connecting to %s:%u", addr, (unsigned)port);
-    if (connect(s, (sockaddr*)&a, sizeof(a)) == SOCKET_ERROR) {
-        fail("connect", WSAGetLastError());
-        closesocket(s);
-        return false;
-    }
+    _snprintf_s(g.dial_addr, sizeof(g.dial_addr), _TRUNCATE, "%s", addr);
+    g.dial_port = port;
+    g.dial_sock = INVALID_SOCKET;
 
     g.role = NetRole::Client;
-    // Our own id is not known until PEERS arrives; until then we can still send,
-    // because the host overwrites the envelope's `from` with the id it handed
-    // this socket regardless of what we put there.
     g.self = kNoPeer;
-
     InterlockedExchange(&g.stop, 0);
-    set_state(NetState::Connected);
-    log_line("NET", "connected");
-    return start_link(0, s, kHostPeer);
+    set_state(NetState::Connecting);
+    log_line("NET", "connecting to %s:%u (async)", g.dial_addr, (unsigned)port);
+
+    g.connect_thread = CreateThread(nullptr, 0, connect_thread_proc, nullptr, 0, nullptr);
+    if (!g.connect_thread) {
+        fail("CreateThread(connect)", (int)GetLastError());
+        g.role = NetRole::None;
+        return false;
+    }
+    return true;
 }
 
 // The transport learns our own id from the same PEERS message the session layer
@@ -594,15 +812,33 @@ void net_shutdown() {
     if (g.role == NetRole::None) return;
     InterlockedExchange(&g.stop, 1);
 
+    // Abort any in-progress async connect().
+    if (g.cs_ready) {
+        EnterCriticalSection(&g.cs);
+        if (g.dial_sock != INVALID_SOCKET) {
+            closesocket(g.dial_sock);
+            g.dial_sock = INVALID_SOCKET;
+        }
+        LeaveCriticalSection(&g.cs);
+    }
+
     // Shut the sockets down before waiting: every receive thread is parked in
     // recv() and will not notice a flag until the call returns. Closing the
     // listener is what releases the accept thread.
     if (g.listener != INVALID_SOCKET) { closesocket(g.listener); g.listener = INVALID_SOCKET; }
     for (int i = 0; i < kMaxPeers; ++i) {
         Link& l = g.links[i];
-        if (l.sock != INVALID_SOCKET) { shutdown(l.sock, SD_BOTH); closesocket(l.sock); l.sock = INVALID_SOCKET; }
+        InterlockedExchange(&l.send_stop, 1);
+        if (l.send_event) SetEvent(l.send_event);
+        if (l.sock != INVALID_SOCKET) shutdown(l.sock, SD_BOTH);
     }
 
+    if (g.connect_thread) {
+        if (WaitForSingleObject(g.connect_thread, 2000) == WAIT_TIMEOUT)
+            log_line("NET", "!! connect thread did not exit in 2 s");
+        CloseHandle(g.connect_thread);
+        g.connect_thread = nullptr;
+    }
     if (g.accept_thread) {
         if (WaitForSingleObject(g.accept_thread, 2000) == WAIT_TIMEOUT)
             log_line("NET", "!! accept thread did not exit in 2 s");
@@ -611,12 +847,15 @@ void net_shutdown() {
     }
     for (int i = 0; i < kMaxPeers; ++i) {
         Link& l = g.links[i];
-        if (!l.thread) continue;
-        if (WaitForSingleObject(l.thread, 2000) == WAIT_TIMEOUT)
-            log_line("NET", "!! receive thread for peer %u did not exit in 2 s",
-                     (unsigned)l.id);
-        CloseHandle(l.thread);
-        l.thread = nullptr;
+        if (l.thread) {
+            if (WaitForSingleObject(l.thread, 2000) == WAIT_TIMEOUT)
+                log_line("NET", "!! receive thread for peer %u did not exit in 2 s",
+                         (unsigned)l.id);
+            CloseHandle(l.thread);
+            l.thread = nullptr;
+        }
+        stop_link_sender(l);
+        if (l.sock != INVALID_SOCKET) { closesocket(l.sock); l.sock = INVALID_SOCKET; }
         InterlockedExchange(&l.live, 0);
     }
 
@@ -625,21 +864,26 @@ void net_shutdown() {
              s.sent, s.received, s.dropped,
              (unsigned long long)s.bytes_sent, (unsigned long long)s.bytes_received);
 
-    // Anything still queued is ours to free. Only SAVEFILE owns memory, but
-    // draining unconditionally keeps that fact in one place.
+    // Anything still queued is ours to free.
     if (g.cs_ready) {
         EnterCriticalSection(&g.cs);
         while (g.count) {
             net_msg_release(g.queue[g.head]);
+            g.queue[g.head].type = 0;
             g.head = (g.head + 1) % kQueueCap;
             --g.count;
         }
         LeaveCriticalSection(&g.cs);
     }
 
-    if (g.cs_ready)      { DeleteCriticalSection(&g.cs);      g.cs_ready = false; }
-    if (g.send_cs_ready) { DeleteCriticalSection(&g.send_cs); g.send_cs_ready = false; }
-    if (g.wsa_up)        { WSACleanup(); g.wsa_up = false; }
+    for (int i = 0; i < kMaxPeers; ++i) {
+        if (g.links[i].send_cs_ready) {
+            DeleteCriticalSection(&g.links[i].send_cs);
+            g.links[i].send_cs_ready = false;
+        }
+    }
+    if (g.cs_ready) { DeleteCriticalSection(&g.cs); g.cs_ready = false; }
+    if (g.wsa_up)   { WSACleanup(); g.wsa_up = false; }
 
     g.role = NetRole::None;
     g.self = kNoPeer;
@@ -672,10 +916,10 @@ bool net_send(const uint8_t* payload, uint32_t len) {
     for (int i = 0; i < kMaxPeers; ++i) {
         Link& l = g.links[i];
         if (!InterlockedCompareExchange(&l.live, 0, 0)) continue;
-        if (send_framed(l.sock, g.self, payload, len)) any = true;
+        if (send_framed_link(l, g.self, payload, len)) any = true;
         else failed = true;
     }
-    if (failed) log_line("NET", "!! send failed (WSA %d)", WSAGetLastError());
+    if (failed) log_line("NET", "!! send enqueue failed");
     return any;
 }
 
@@ -688,7 +932,7 @@ void net_disconnect_peer(uint8_t peer) {
 bool net_send_peer(uint8_t peer, const uint8_t* payload, uint32_t len) {
     int slot = link_slot_of(peer);
     if (slot < 0) return false;
-    return send_framed(g.links[slot].sock, g.self, payload, len);
+    return send_framed_link(g.links[slot], g.self, payload, len);
 }
 
 // Every encoder writes into a stack buffer and hands the result to net_send.
@@ -730,6 +974,14 @@ bool net_send_action_to(uint8_t peer, const ActionMsg& a) {
     uint8_t p[512];
     uint32_t n = enc_action(p, sizeof(p), a);
     return n && net_send_peer(peer, p, n);
+}
+
+bool net_send_control_from(uint8_t to_peer, uint8_t from_peer, const ControlMsg& c) {
+    int slot = link_slot_of(to_peer);
+    if (slot < 0) return false;
+    uint8_t p[512];
+    uint32_t n = enc_control(p, sizeof(p), c);
+    return n && send_framed_link(g.links[slot], from_peer, p, n);
 }
 
 // To one peer: telling a joiner where the run is standing. A broadcast would
@@ -1022,16 +1274,41 @@ bool net_send_inventory(const InventoryMsg& m) {
 }
 
 void net_msg_release(NetMsg& m) {
-    if (m.savefile.data) { free(m.savefile.data); m.savefile.data = nullptr; }
-    if (m.catdata.data)  { free(m.catdata.data);  m.catdata.data  = nullptr; }
-    if (m.runhist.data)  { free(m.runhist.data);  m.runhist.data  = nullptr; }
-    if (m.statedump.data){ free(m.statedump.data);m.statedump.data= nullptr; }
-    if (m.house_baseline.cats) { free(m.house_baseline.cats); m.house_baseline.cats = nullptr; }
-    if (m.house_pose.cats)     { free(m.house_pose.cats);     m.house_pose.cats     = nullptr; }
-    if (m.house_interstitials.data) { free(m.house_interstitials.data); m.house_interstitials.data = nullptr; }
-    if (m.house_furniture.data)     { free(m.house_furniture.data);     m.house_furniture.data     = nullptr; }
-    for (uint32_t i = 0; i < kInvBuckets; ++i)
-        if (m.inventory.data[i]) { free(m.inventory.data[i]); m.inventory.data[i] = nullptr; }
+    switch (m.type) {
+        case MSG_SAVEFILE:
+            if (m.savefile.data) { free(m.savefile.data); m.savefile.data = nullptr; }
+            break;
+        case MSG_CATDATA:
+            if (m.catdata.data) { free(m.catdata.data); m.catdata.data = nullptr; }
+            break;
+        case MSG_RUNHIST:
+            if (m.runhist.data) { free(m.runhist.data); m.runhist.data = nullptr; }
+            break;
+        case MSG_STATEDUMP:
+            if (m.statedump.data) { free(m.statedump.data); m.statedump.data = nullptr; }
+            break;
+        case MSG_HOUSE_BASELINE:
+            if (m.house_baseline.cats) { free(m.house_baseline.cats); m.house_baseline.cats = nullptr; }
+            break;
+        case MSG_HOUSE_POSE:
+            if (m.house_pose.cats) { free(m.house_pose.cats); m.house_pose.cats = nullptr; }
+            break;
+        case MSG_HOUSE_PREP:
+            if (m.house_prep) { free(m.house_prep); m.house_prep = nullptr; }
+            break;
+        case MSG_HOUSE_INTERSTITIALS:
+            if (m.house_interstitials.data) { free(m.house_interstitials.data); m.house_interstitials.data = nullptr; }
+            break;
+        case MSG_HOUSE_FURNITURE:
+            if (m.house_furniture.data) { free(m.house_furniture.data); m.house_furniture.data = nullptr; }
+            break;
+        case MSG_INVENTORY:
+            for (uint32_t i = 0; i < kInvBuckets; ++i)
+                if (m.inventory.data[i]) { free(m.inventory.data[i]); m.inventory.data[i] = nullptr; }
+            break;
+        default:
+            break;
+    }
 }
 
 bool net_poll(NetMsg& out) {
@@ -1045,19 +1322,9 @@ bool net_poll(NetMsg& out) {
             if (age > g.stats.house_sample_max_queue_ms)
                 g.stats.house_sample_max_queue_ms = age;
         }
-        // Hand the allocation over rather than sharing it: the queue slot is
-        // reused, and two owners of one pointer is a double free waiting for a
-        // busy session.
-        g.queue[g.head].savefile.data = nullptr;
-        g.queue[g.head].catdata.data  = nullptr;
-        g.queue[g.head].runhist.data  = nullptr;
-        g.queue[g.head].statedump.data = nullptr;
-        g.queue[g.head].house_baseline.cats = nullptr;
-        g.queue[g.head].house_pose.cats = nullptr;
-        g.queue[g.head].house_interstitials.data = nullptr;
-        g.queue[g.head].house_furniture.data = nullptr;
-        for (uint32_t i = 0; i < kInvBuckets; ++i)
-            g.queue[g.head].inventory.data[i] = nullptr;
+        // Hand ownership over to `out`; clearing `type` ensures net_shutdown
+        // will never double-free a slot that has already been popped.
+        g.queue[g.head].type = 0;
         g.head = (g.head + 1) % kQueueCap;
         --g.count;
     }

@@ -8,6 +8,7 @@
 #include "mgmp_tuning.h"
 #include "mgmp_gpak.h"
 #include "mgmp_cursor.h"
+#include "mgmp_choice.h"
 #include "mgmp_house.h"
 #include "mgmp_log.h"
 #include "mgmp_mem.h"
@@ -391,6 +392,13 @@ struct State {
     float    last_traced_y = -9;
     uint8_t mode = 0;
     bool    have_local = false;
+
+    // Outbound screen-space cursor publisher for all non-battle screens
+    // (QPC-paced to avoid GetTickCount64's 15.6 ms quantization stutter).
+    float    sent_nx = -1.0f, sent_ny = -1.0f;
+    uint8_t  sent_mode = 0;
+    int64_t  last_send_qpc = 0;
+    bool     have_sent = false;
     // One bit per kArt entry: which cursor states this session has already
     // named in the log. A bitmask rather than a "changed since last frame"
     // test because the states TOGGLE -- hovering one button walks
@@ -1026,6 +1034,23 @@ void draw_ring(float nx, float ny, float r_in_px, float r_out_px,
     gl.DrawArrays(GL_TRIANGLES, 0, n);
 }
 
+void draw_quad_norm(float nx0, float ny0, float nx1, float ny1,
+                    const float rgb[3], float alpha) {
+    if (alpha <= 0.005f || nx1 <= nx0 || ny1 <= ny0) return;
+    const float x0 = nx0 * 2.0f - 1.0f;
+    const float x1 = nx1 * 2.0f - 1.0f;
+    const float y0 = 1.0f - ny0 * 2.0f;
+    const float y1 = 1.0f - ny1 * 2.0f;
+    const float verts[6][4] = {
+        { x0, y1, 0, 0 }, { x1, y1, 0, 0 }, { x1, y0, 0, 0 },
+        { x0, y1, 0, 0 }, { x1, y0, 0, 0 }, { x0, y0, 0, 0 },
+    };
+    gl.BufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+    gl.Uniform1f(g.u_usetex, 0.0f);
+    gl.Uniform4f(g.u_colour, rgb[0], rgb[1], rgb[2], alpha);
+    gl.DrawArrays(GL_TRIANGLES, 0, 6);
+}
+
 void add_mark(uint8_t peer, uint8_t kind, uint8_t in_house,
               float nx, float ny, float wx, float wy, uint64_t now) {
     int slot = -1;
@@ -1113,6 +1138,8 @@ void overlay_init() {
     g.built = false;
     g.prog = g.vao = g.vbo = 0;
     g.have_local = false;
+    g.have_sent  = false;
+    g.last_send_qpc = 0;
     g.said_fail = false;
     g.drawn = 0;
 
@@ -1367,16 +1394,53 @@ void overlay_on_swap(void* window) {
     if (!g.qpc_freq) {
         LARGE_INTEGER f; QueryPerformanceFrequency(&f); g.qpc_freq = f.QuadPart;
     }
+    int64_t qpc_now = 0;
     {
         LARGE_INTEGER t; QueryPerformanceCounter(&t);
+        qpc_now = t.QuadPart;
         if (g.qpc_last && g.qpc_freq)
-            dt = (double)(t.QuadPart - g.qpc_last) / (double)g.qpc_freq;
-        g.qpc_last = t.QuadPart;
+            dt = (double)(qpc_now - g.qpc_last) / (double)g.qpc_freq;
+        g.qpc_last = qpc_now;
     }
     const float k = smoothing_alpha(dt);
 
     const uint8_t self = net_self();
     const uint64_t now = GetTickCount64();
+
+    // Always publish our screen-space cursor when a battle board is not
+    // actively publishing CursorMsg (mgmp_cursor handles battle boards with
+    // tile reticles and turn-ownership dimming). In House, HouseCursorMsg
+    // takes priority on the receiver when the live House scene is active,
+    // while this keeps peer cursors visible on every other screen (map, shop,
+    // events, level-up, menus, transitions).
+    if (tune::kCursors && net_active() && g.have_local) {
+        const uint64_t board_at = cursor_last_board_ms();
+        const bool in_battle = (board_at != 0 && now >= board_at && (now - board_at) < 150);
+        if (!in_battle) {
+            const bool moved = !g.have_sent ||
+                               g.nx != g.sent_nx || g.ny != g.sent_ny ||
+                               g.mode != g.sent_mode;
+            const double since_ms = (g.have_sent && g.qpc_freq)
+                ? (double)(qpc_now - g.last_send_qpc) * 1000.0 / (double)g.qpc_freq
+                : 1000.0;
+            if ((moved && since_ms >= 14.0) || since_ms >= 500.0) {
+                CursorMsg out{};
+                out.battle_id = 0;
+                out.on_board  = 0;
+                out.owns_turn = 1;
+                out.nx        = g.nx;
+                out.ny        = g.ny;
+                out.mode      = g.mode;
+                if (net_send_cursor(out)) {
+                    g.sent_nx       = g.nx;
+                    g.sent_ny       = g.ny;
+                    g.sent_mode     = g.mode;
+                    g.last_send_qpc = qpc_now;
+                    g.have_sent     = true;
+                }
+            }
+        }
+    }
 
     // Determine which peer cursors are currently visible. Click ripples and
     // screen pings are gated on cursor visibility so they never leak onto
@@ -1407,6 +1471,19 @@ void overlay_on_swap(void* window) {
                     pm.kind = kind;
                     pm.nx   = g.nx;
                     pm.ny   = g.ny;
+                    int32_t tx = 0, ty = 0;
+                    uint64_t bid = 0;
+                    if (kind == 1 && cursor_local_hover_tile(&tx, &ty, &bid)) {
+                        pm.in_house  = 2;
+                        pm.wx        = (float)tx;
+                        pm.wy        = (float)ty;
+                        pm.battle_id = bid;
+                        net_send_screen_ping(pm);
+                        cursor_on_tile_ping(self, bid, tx, ty);
+                        // Also show the regular 3s GL screen-space radar ping.
+                        add_mark(self, 1, 0, pm.nx, pm.ny, 0.0f, 0.0f, now);
+                        return;
+                    }
                     float wx = 0.0f, wy = 0.0f;
                     if (house_local_mouse_world(&wx, &wy)) {
                         pm.in_house = 1;
@@ -1439,7 +1516,10 @@ void overlay_on_swap(void* window) {
         }
     }
 
-    if (!any_peer_cursor && !test) {
+    ChoiceVoteBadge vote_badges[16];
+    const uint32_t vote_badge_count = choice_get_vote_badges(vote_badges, 16);
+
+    if (!any_peer_cursor && !test && vote_badge_count == 0) {
         if (!g.said_quiet) {
             trace("no peer position has arrived yet -- nothing to draw."
                   " Set net_cursor_gl_test = 1 to draw a marker anyway");
@@ -1529,9 +1609,61 @@ void overlay_on_swap(void* window) {
         draw_cursor(0, 0.58f, 0.5f, cyan, 1.0f, w, h);
     }
 
-    // Draw active click ripples and 3-second ping markers underneath peer arrows.
     static const float kBlack[3] = { 0.0f, 0.0f, 0.0f };
     static const float kWhite[3] = { 1.0f, 1.0f, 1.0f };
+
+    // Draw teammate vote outlines + corner pips on active Event / LevelUpScreen options.
+    if (vote_badge_count > 0 && w > 0 && h > 0) {
+        const float ref  = (float)tune::kCursorRefH;
+        const float grow = (ref > 1.0f) ? (float)h / ref : 1.0f;
+        const float tx   = (3.5f * grow) / (float)w;
+        const float ty   = (3.5f * grow) / (float)h;
+        const float pad_x = (2.0f * grow) / (float)w;
+        const float pad_y = (2.0f * grow) / (float)h;
+        const float pulse = 0.78f + 0.22f * sinf((float)now * 0.006f);
+
+        for (uint32_t bi = 0; bi < vote_badge_count; ++bi) {
+            const ChoiceVoteBadge& b = vote_badges[bi];
+            const float x0 = b.nx0 - pad_x, y0 = b.ny0 - pad_y;
+            const float x1 = b.nx1 + pad_x, y1 = b.ny1 + pad_y;
+            const uint8_t vc = b.voter_count;
+            if (vc == 0) continue;
+
+            // Dark backing frame for contrast on any UI background.
+            draw_quad_norm(x0 - tx * 0.5f, y0 - ty * 0.5f, x1 + tx * 0.5f, y0 + ty * 1.3f, kBlack, 0.55f);
+            draw_quad_norm(x0 - tx * 0.5f, y1 - ty * 1.3f, x1 + tx * 0.5f, y1 + ty * 0.5f, kBlack, 0.55f);
+            draw_quad_norm(x0 - tx * 0.5f, y0,             x0 + tx * 1.3f, y1,             kBlack, 0.55f);
+            draw_quad_norm(x1 - tx * 1.3f, y0,             x1 + tx * 0.5f, y1,             kBlack, 0.55f);
+
+            // Colored outline: solid for 1 voter, cleanly segmented per voter for 2-4 players.
+            for (uint8_t k = 0; k < vc; ++k) {
+                const float* rgb = kPeerRGB[b.voters[k] % kMaxPeers];
+                const float f0 = (float)k / (float)vc;
+                const float f1 = (float)(k + 1) / (float)vc;
+                const float sx0 = x0 + (x1 - x0) * f0;
+                const float sx1 = x0 + (x1 - x0) * f1;
+                const float sy0 = y0 + (y1 - y0) * f0;
+                const float sy1 = y0 + (y1 - y0) * f1;
+                draw_quad_norm(sx0, y0,      sx1, y0 + ty, rgb, 0.92f * pulse); // top
+                draw_quad_norm(sx0, y1 - ty, sx1, y1,      rgb, 0.92f * pulse); // bottom
+                draw_quad_norm(x0,  sy0,     x0 + tx, sy1, rgb, 0.92f * pulse); // left
+                draw_quad_norm(x1 - tx, sy0, x1,      sy1, rgb, 0.92f * pulse); // right
+            }
+
+            // Side-by-side colored voter pips in the top-right corner of the option.
+            const float step_x = (16.0f * grow) / (float)w;
+            const float pip_y  = y0 + (10.0f * grow) / (float)h;
+            for (uint8_t k = 0; k < vc; ++k) {
+                const float* rgb = kPeerRGB[b.voters[k] % kMaxPeers];
+                const float pip_x = x1 - (10.0f * grow) / (float)w - (float)k * step_x;
+                draw_ring(pip_x, pip_y, 0.0f, 7.2f, kBlack, 0.85f, w, h);
+                draw_ring(pip_x, pip_y, 0.0f, 5.4f, rgb,    0.98f, w, h);
+                draw_ring(pip_x, pip_y, 0.0f, 2.0f, kWhite, 0.85f, w, h);
+            }
+        }
+    }
+
+    // Draw active click ripples and 3-second ping markers underneath peer arrows.
     for (const auto& m : g.marks) {
         if (!m.active) continue;
         if (m.peer == self) {
