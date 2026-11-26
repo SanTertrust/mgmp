@@ -28,6 +28,7 @@ typedef void  (__fastcall* fn_bs_dtor)(void* stream);
 typedef void* (__fastcall* fn_ofstream_ctor)(void* self);
 typedef void* (__fastcall* fn_cat_by_id)(void* registry, uint64_t id);
 typedef void  (__fastcall* fn_temp_stats_clear)(void* temp_stats);
+typedef void  (__fastcall* fn_str_dtor)(void* s);
 
 struct State {
     uintptr_t base = 0;
@@ -38,6 +39,7 @@ struct State {
     fn_ofstream_ctor    of_ctor          = nullptr;
     fn_cat_by_id        by_id            = nullptr;
     fn_temp_stats_clear temp_stats_clear = nullptr;
+    fn_str_dtor         str_dtor         = nullptr;
     const void**        director_slot    = nullptr;
 
     bool on        = false;
@@ -103,6 +105,29 @@ bool safe_by_id(void* registry, uint64_t id, void** out) {
 bool safe_temp_stats_clear(void* temp_stats) {
     if (!g.temp_stats_clear || !temp_stats) return false;
     __try { g.temp_stats_clear(temp_stats); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+bool safe_equipment_clear(void* cat_equipment) {
+    if (!g.str_dtor || !cat_equipment) return false;
+    __try {
+        // Matches glaiel::CatEquipment::~CatEquipment + CatEquipment::CatEquipment
+        // (0x14005d5b0 / 0x14005e480): tidy both std::strings via the game's
+        // _Tidy_deallocate and restore empty-slot defaults on all 5 inline slots.
+        for (uint32_t i = 0; i < kCatData_EquipmentSlots; ++i) {
+            uint8_t* eq = (uint8_t*)cat_equipment + (size_t)i * kEquipment_Size;
+            g.str_dtor(eq + kEquipment_Name);
+            g.str_dtor(eq + kEquipment_StrAux);
+            *(int64_t*)(eq + kEquipment_Uid)        = -1;
+            *(int32_t*)(eq + kEquipment_Durability) = -1;
+            *(int32_t*)(eq + kEquipment_Aux)        = 0;
+            *(int32_t*)(eq + kEquipment_Flags)      = 6;
+            *(int32_t*)(eq + kEquipment_SortOrder)  = 9999999;
+            *(int32_t*)(eq + kEquipment_QuestDest)  = -1;
+            *(int32_t*)(eq + kEquipment_Condition)  = 0;
+        }
+        return true;
+    }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
@@ -228,7 +253,7 @@ void catsync_set_base(uintptr_t base) {
     // convention mgmp_invsync already states.
     static const int kNeed[] = { C_SerializeCatData, C_ByteStreamDtor,
                                  C_OfstreamCtor,     C_CatDataById,
-                                 C_CatTempStatsClear };
+                                 C_CatTempStatsClear, C_GameStrDtor };
     for (int idx : kNeed) {
         if (!addr_of_call((Call)idx)) {
             log_line("CATSYNC", "!! %s did not resolve by signature "
@@ -242,6 +267,7 @@ void catsync_set_base(uintptr_t base) {
     g.of_ctor          = (fn_ofstream_ctor)   addr_of_call(C_OfstreamCtor);
     g.by_id            = (fn_cat_by_id)       addr_of_call(C_CatDataById);
     g.temp_stats_clear = (fn_temp_stats_clear)addr_of_call(C_CatTempStatsClear);
+    g.str_dtor         = (fn_str_dtor)        addr_of_call(C_GameStrDtor);
     g.director_slot = (const void**)    addr_of_data(D_MewDirectorPtr);
     if (!g.director_slot) {
         log_line("CATSYNC", "!! the MewDirector* global did not resolve -- cat sync is OFF");
@@ -357,6 +383,12 @@ bool catsync_unpack_cat(void* cat, const CatDataMsg& m) {
     // client then unpacks the host's CatData on top of its live CatData, every
     // PassiveNextFight entry would be duplicated and desync turn 0.
     safe_temp_stats_clear((uint8_t*)cat + kCatData_TempStats);
+    // SerializeItem (0x14022d2a0) reads a 1-byte occupied flag (`v18`) and
+    // simply returns when false, without clearing the destination Equipment
+    // slot. Unpacking a CatData with an empty slot (e.g. an item unequipped or
+    // broken on the host) over a live CatData that still holds an item in that
+    // slot leaves the stale item equipped on the client and desyncs turn 0.
+    safe_equipment_clear((uint8_t*)cat + kCatData_Equipment);
     const bool ok = safe_serialize(cat, bs);
     safe_bs_dtor(bs);
     return ok;

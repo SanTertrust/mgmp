@@ -1346,8 +1346,17 @@ constexpr uintptr_t kAnimState_Substate      = 40;   // std::string
 constexpr uintptr_t kRenderer_Visible        = 81;   // bool
 
 constexpr uintptr_t kCatData_Equipment       = 2480; // CatEquipment, five inline slots
+constexpr uint32_t  kCatData_EquipmentSlots  = 5;    // head, face, neck, weapon, trinket
 constexpr size_t    kEquipment_Size          = 96;
-constexpr uintptr_t kEquipment_Name          = 8;   // std::string
+constexpr uintptr_t kEquipment_Uid           = 0;    // int64_t (-1 = empty)
+constexpr uintptr_t kEquipment_Name          = 8;    // std::string
+constexpr uintptr_t kEquipment_StrAux        = 40;   // std::string
+constexpr uintptr_t kEquipment_Durability    = 72;   // int32_t (-1)
+constexpr uintptr_t kEquipment_Aux           = 76;   // int32_t (0)
+constexpr uintptr_t kEquipment_Flags         = 80;   // int32_t (6)
+constexpr uintptr_t kEquipment_SortOrder     = 84;   // int32_t (9999999)
+constexpr uintptr_t kEquipment_QuestDest     = 88;   // int32_t (-1)
+constexpr uintptr_t kEquipment_Condition     = 92;   // int32_t (0 = BRAND_NEW)
 constexpr int       kCompId_ClassChooser      = 520;
 constexpr uintptr_t kClassChooser_Selector    = 0x48;  // CatSelector*
 constexpr uintptr_t kClassChooser_CurrentCat  = 0xD0;  // int64_t
