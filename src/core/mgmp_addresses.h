@@ -101,6 +101,11 @@ enum Target : int {
     T_LevelReroll,             // glaiel::LevelUpScreen::Reroll()
     T_ShopBuyItem,             // glaiel::Shop::BuyItem(ShopItem&)
     T_InvItemBoxClick,         // glaiel::InventoryItemBox::click::lambda_1
+    T_DirectorUpdate,          // glaiel::Director::update() -- fixed 60 Hz tick
+    T_SceneUnlockedUpdate,     // glaiel::Scene::unlocked_update(double)
+    T_ShopUpdate,
+    T_ShopExit,               // Shop::initShop exit button lambda
+    T_ShopCandyLevel,         // candy transition callback
     T_COUNT
 };
 
@@ -493,6 +498,19 @@ static const TargetDesc kTargets[T_COUNT] = {
     { 0x00383FE0, "LVLREROLL",   "glaiel::LevelUpScreen::Reroll" },
     { 0x0079A600, "SHOPBUY",     "glaiel::Shop::BuyItem" },
     { 0x0034F0A0, "INVBOXCLK",   "glaiel::InventoryItemBox::click::lambda_1" },
+
+    // glaiel::Director::update (fixed 60 Hz, single code caller in
+    // ApplicationBase::do_fixed_update) and glaiel::Scene::unlocked_update
+    // (single code caller in Director::unlocked_update). Together these let
+    // multiplayer step the "Battle" scene's unlocked_update strictly 1:1 with
+    // Director::update at dt = 1/60 while keeping InputCore/ControlSet/
+    // VirtualMouse (earliest/latest_unlocked_update) and non-Battle scenes
+    // running at full render FPS.
+    { 0x009D5120, "DIRUPD",      "glaiel::Director::update" },
+    { 0x0096AEB0, "SCUNLUPD",    "glaiel::Scene::unlocked_update" },
+    { 0x00797EA0, "SHOPUPD",     "glaiel::Shop::update" },
+    { 0x0079BFC0, "SHOPEXIT",    "glaiel::Shop::initShop exit callback" },
+    { 0x0079C8B0, "SHOPLVL",     "candy level-up transition callback" },
 };
 
 // Coarse module guard, checked before the per-target signatures.
@@ -999,6 +1017,7 @@ constexpr uint32_t kRva_MewDirectorPtr = 0x013DAC30;
 // FrameBegin, so client interstitial replay sets and restores it around the call.
 constexpr uint32_t kRva_SceneCurrent   = 0x013C18F0;
 constexpr uint32_t kRva_HouseInventoryPtr = 0x013DA9A0;
+constexpr uint32_t kRva_TransitionScenePtr = 0x013C5BA8;
 
 // Offsets into the MewDirector, all read off sub_1403B2060 and sub_140231180.
 constexpr uintptr_t kDir_CatRegistry = 1432;   // ptr, the id -> CatData* map
@@ -1168,6 +1187,8 @@ constexpr const char kBtnName_PauseQuitToMenu[] = "Button_PauseMenu_QuitToMenu";
 constexpr uintptr_t kDir_SceneDirector   = 40;    // MewDirector+40 = Director*
 constexpr uintptr_t kDirector_ScenesBegin = 0;    // Scene**
 constexpr uintptr_t kDirector_ScenesEnd   = 8;    // Scene**
+constexpr uintptr_t kDirector_DeltaTime   = 40;   // double (0x28)
+constexpr uintptr_t kDirector_FramePercent = 48;  // double (0x30)
 constexpr uintptr_t kScene_Name           = 1208; // std::string
 constexpr uintptr_t kScene_Destroying     = 1243; // u8, 1 = being torn down
 
@@ -1179,6 +1200,7 @@ constexpr uintptr_t kScene_Destroying     = 1243; // u8, 1 = being torn down
 // MewDirector::ContinueAdventure's first statement is DestroyScene("House"),
 // which is what makes the House test decisive rather than suggestive: starting
 // an adventure explicitly tears that scene down.
+constexpr const char kScene_Battle     [] = "Battle";
 constexpr const char kScene_House      [] = "House";
 constexpr const char kScene_MainMenu   [] = "MainMenu";
 constexpr const char kScene_SaveSelect [] = "SaveSelectionScreen";

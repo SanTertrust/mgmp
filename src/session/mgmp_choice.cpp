@@ -10,11 +10,14 @@
 #include "mgmp_mem.h"
 #include "mgmp_log.h"
 #include "mgmp_addresses.h"
+#include "mgmp_hooks.h"
 #include "mgmp_resolve.h"
 
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <deque>
 
 namespace mgmp {
 namespace {
@@ -45,6 +48,22 @@ constexpr uintptr_t kDispObj_CT    = 0x78;  // swf::DisplayObject::color_transfo
 constexpr uint32_t kMaxOptions     = 64;
 constexpr uint32_t kMaxVoteButtons = 16;
 
+// Shop::BuyItem receives an entry in Shop::items. Kind 12 starts the native
+// level-up transition, whose callback rolls a cat on the local visual RNG.
+constexpr uintptr_t kShop_Director     = 0x58;
+constexpr uintptr_t kShop_Items        = 0x60;
+constexpr uintptr_t kShop_IsTreasure   = 0x79;
+constexpr uintptr_t kShop_IsHouse      = 0x7B;
+constexpr uintptr_t kShop_StealCount   = 0x88;
+constexpr uintptr_t kShop_ItemSize     = 0xC0;
+constexpr uintptr_t kShopItem_Type     = 0;
+constexpr uintptr_t kShopItem_Cost     = 8;
+constexpr uintptr_t kShopItem_Stock    = 12;
+constexpr uintptr_t kShopItem_Data     = 16;
+constexpr uint32_t  kShopItem_Candy    = 12;
+constexpr uintptr_t kShop_Scene        = 0x20;  // Component::scene
+constexpr uintptr_t kTransition_Active = 0x38;
+
 struct Vec2D { double x, y; };
 struct SwfColorTransform {
     float mul_r, mul_g, mul_b, mul_a;
@@ -54,6 +73,22 @@ struct SwfColorTransform {
 using fn_cap           = void   (__fastcall*)(void*);
 using fn_get_world_pos = Vec2D* (__fastcall*)(void* renderer, Vec2D* out, const Vec2D* local,
                                               void* disp_obj, double scale);
+using fn_cat_by_id = void* (__fastcall*)(void*, uint64_t);
+
+struct ShopExitCapture {
+    void* vtable;
+    void* shop;
+};
+
+// std::function capture used by Shop::ObtainItem's candy transition.
+// The callback reads the PodBuffer<8> at +0x10 and never frees it itself.
+struct ShopCandyCapture {
+    void* vtable;
+    void* shop;
+    uint32_t capacity;
+    uint32_t count;
+    void** cats;
+};
 
 struct VoteEntry {
     bool     active    = false;
@@ -78,9 +113,10 @@ struct State {
     fn_cap           lvl_click     = nullptr;   // LevelUpScreen button click lambda
     fn_cap           lvl_reroll    = nullptr;   // LevelUpScreen::Reroll
     fn_get_world_pos get_world_pos = nullptr;   // Renderer::get_world_position
+    fn_cat_by_id     cat_by_id     = nullptr;
+    const void*     transition_slot = nullptr;
 
     void* world_event  = nullptr;   // latest WorldEvent*, from its update
-    void* level_screen = nullptr;   // latest LevelUpScreen*, from its update
 
     // Pending WorldEvent choice (at most one event screen per node).
     bool     pending_evt        = false;
@@ -99,6 +135,11 @@ struct State {
     };
     PendingLvl lvl_q[kMaxPendingLvl];
     uint32_t   lvl_q_count = 0;
+
+    std::deque<ChoiceMsg> shop_actions;
+    ChoiceMsg candy_purchase{};
+    void* candy_shop = nullptr;
+    bool candy_level_opening = false;
 
     uint64_t here_seed = 0;
 
@@ -137,6 +178,8 @@ const char* kind_name(uint8_t k) {
     if (k == kChoiceLevelUpReroll) return "level-up reroll";
     if (k == kChoiceEventVote)     return "event vote";
     if (k == kChoiceLevelUpVote)   return "level-up vote";
+    if (k == kChoiceShopPurchase)  return "shop purchase";
+    if (k == kChoiceShopExit)      return "shop exit";
     return "event";
 }
 
@@ -195,6 +238,89 @@ bool read_game_string(const void* str, char* out, uint32_t cap) {
     if (n && !mem_read(chars, out, n)) { out[0] = '\0'; return false; }
     out[n] = '\0';
     return true;
+}
+
+template <typename T>
+bool read_field(const void* object, uintptr_t offset, T& value) {
+    return object && mem_read(static_cast<const uint8_t*>(object) + offset, &value, sizeof(value));
+}
+
+bool sync_shop(void* shop) {
+    uint8_t treasure = 0, house = 0;
+    return g.on && net_active() && g.here_seed && g.transition_slot && g.cat_by_id &&
+           hooks_is_live(T_ShopBuyItem) && hooks_is_live(T_ShopUpdate) &&
+           hooks_is_live(T_ShopExit) && hooks_is_live(T_ShopCandyLevel) &&
+           read_field(shop, kShop_IsTreasure, treasure) && !treasure &&
+           read_field(shop, kShop_IsHouse, house) && !house;
+}
+
+bool shop_transition_is_idle() {
+    const void* transition = nullptr;
+    uint8_t active = 0;
+    return mem_read(g.transition_slot, &transition, sizeof(transition)) &&
+           read_field(transition, kTransition_Active, active) && !active;
+}
+
+bool read_shop_items(void* shop, uintptr_t& begin, uint32_t& count) {
+    uintptr_t end = 0;
+    if (!read_field(shop, kShop_Items, begin) ||
+        !read_field(shop, kShop_Items + sizeof(begin), end) ||
+        !begin || end < begin || (end - begin) % kShop_ItemSize != 0)
+        return false;
+    const uintptr_t size = (end - begin) / kShop_ItemSize;
+    if (size > 256) return false;
+    count = static_cast<uint32_t>(size);
+    return true;
+}
+
+bool read_shop_item(void* item, ChoiceMsg& purchase, int32_t& stock) {
+    int32_t cost = 0;
+    if (!read_field(item, kShopItem_Type, purchase.aux) ||
+        !read_field(item, kShopItem_Cost, cost) || cost < 0 ||
+        !read_field(item, kShopItem_Stock, stock) ||
+        !read_game_string(static_cast<const uint8_t*>(item) + kShopItem_Data,
+                          purchase.name, sizeof(purchase.name)))
+        return false;
+    purchase.count = static_cast<uint32_t>(cost);
+    return true;
+}
+
+void* shop_cat_by_uid(void* shop, uint64_t uid) {
+    const void* director = nullptr;
+    void* registry = nullptr;
+    if (!uid || !read_field(shop, kShop_Director, director) ||
+        !read_field(director, kDir_CatRegistry, registry) || !registry)
+        return nullptr;
+    return g.cat_by_id(registry, uid);
+}
+
+void send_shop_action(const ChoiceMsg& action) {
+    if (!net_send_choice(action)) {
+        log_line("CHOICE", "!! failed to publish shop action %u", action.kind);
+        return;
+    }
+    ++g.sent;
+    if (action.kind == kChoiceShopPurchase)
+        log_line("CHOICE", "-> shop purchase slot %u, kind %u, cat=%016llx",
+                 action.index, action.aux, (unsigned long long)action.cat_uid);
+    else
+        log_line("CHOICE", "-> shop exit");
+}
+
+void publish_candy_level(void* level_screen) {
+    if (!g.candy_level_opening) return;
+    const uint64_t uid = read_screen_cat_uid(level_screen, kLvl_Cat);
+    if (!uid) return;
+    g.candy_level_opening = false;
+    g.candy_shop = nullptr;
+    g.candy_purchase.cat_uid = uid;
+    send_shop_action(g.candy_purchase);
+}
+
+void discard_shop_actions(uint64_t node_seed) {
+    const auto first = std::remove_if(g.shop_actions.begin(), g.shop_actions.end(),
+        [node_seed](const ChoiceMsg& m) { return m.node_seed == node_seed; });
+    g.shop_actions.erase(first, g.shop_actions.end());
 }
 
 // --- button greying & screen-rect caching for multi-peer votes -------------
@@ -398,13 +524,13 @@ bool inject_event(uint32_t index) {
     return true;
 }
 
-bool inject_level(uint32_t index) {
+bool inject_level(void* screen, uint32_t index) {
     uint8_t* begin = nullptr; uint32_t count = 0;
-    if (!read_options(g.level_screen, kLvl_OptBegin, kLvl_OptEnd, begin, count)) return false;
+    if (!read_options(screen, kLvl_OptBegin, kLvl_OptEnd, begin, count)) return false;
     if (index >= count) return false;
 
     struct Cap { void* vt; void* screen; int32_t index; int32_t pad; };
-    Cap cap = { nullptr, g.level_screen, (int32_t)index, 0 };
+    Cap cap = { nullptr, screen, (int32_t)index, 0 };
     if (!g.lvl_click) return false;
     g.injecting = true;
     g.lvl_click(&cap);
@@ -490,12 +616,8 @@ void apply_pending_level(void* screen) {
         if (match_idx == UINT32_MAX) return;
 
         uint8_t committed = 0;
-        if (mem_read((const uint8_t*)screen + kLvl_Committed, &committed, 1) && committed) {
-            log_line("CHOICE", "!! a %s arrived for a level-up screen that has already"
-                               " committed -- dropping it", kind_name(g.lvl_q[match_idx].msg.kind));
-            lvl_q_erase(match_idx);
+        if (mem_read((const uint8_t*)screen + kLvl_Committed, &committed, 1) && committed)
             return;
-        }
 
         const ChoiceMsg m = g.lvl_q[match_idx].msg;
         if (m.kind == kChoiceLevelUpReroll) {
@@ -549,7 +671,7 @@ void apply_pending_level(void* screen) {
             log_line("CHOICE", "!! level-up option %u is type %u here but %u on the"
                                " peer -- taking it anyway", m.index, mine_type, m.aux);
 
-        const bool ok = inject_level(m.index);
+        const bool ok = inject_level(screen, m.index);
         lvl_q_erase(match_idx);
         clear_votes();
         if (ok) {
@@ -584,6 +706,8 @@ void choice_set_base(uintptr_t base) {
     g.lvl_click     = nullptr;
     g.lvl_reroll    = nullptr;
     g.get_world_pos = nullptr;
+    g.cat_by_id = reinterpret_cast<fn_cat_by_id>(addr_of_call(C_CatDataById));
+    g.transition_slot = reinterpret_cast<const void*>(addr_of_data(D_TransitionScenePtr));
 
     const uintptr_t evt = addr_of(T_EventChoice);
     const uintptr_t lvl = addr_of_call(C_LevelUpClick);
@@ -606,10 +730,12 @@ void choice_init() {
     g.on          = tune::kChoice;
     g.is_client   = (net_role() == NetRole::Client);
     g.world_event = nullptr;
-    g.level_screen = nullptr;
     g.pending_evt = false;
     g.pending_evt_warned = false;
     g.lvl_q_count = 0;
+    g.shop_actions.clear();
+    g.candy_shop = nullptr;
+    g.candy_level_opening = false;
     g.here_seed   = 0;
     memset(g.skipped, 0, sizeof(g.skipped));
     g.skipped_next = 0;
@@ -637,9 +763,11 @@ void choice_shutdown() {
              g.sent, g.applied, g.swallowed);
     g.on = false;
     g.world_event  = nullptr;
-    g.level_screen = nullptr;
     g.pending_evt  = false;
     g.lvl_q_count  = 0;
+    g.shop_actions.clear();
+    g.candy_shop = nullptr;
+    g.candy_level_opening = false;
     g.here_seed    = 0;
     memset(g.skipped, 0, sizeof(g.skipped));
     g.skipped_next = 0;
@@ -729,7 +857,7 @@ bool choice_on_level_reroll(void* screen) {
     if (g.injecting) return true;
 
     Guard guard;
-    g.level_screen = screen;
+    publish_candy_level(screen);
 
     uint8_t committed = 0;
     if (mem_read((const uint8_t*)screen + kLvl_Committed, &committed, 1) && committed)
@@ -758,13 +886,161 @@ bool choice_on_level_reroll(void* screen) {
     return true;
 }
 
-bool choice_on_shop_buy(void* shop, void* shop_item) {
-    (void)shop; (void)shop_item;
-    if (!g.on || !g.is_client || !net_active()) return true;
+void choice_on_shop_buy(void* shop, void* item, ShopBuyFn buy) {
+    if (!g.on || !net_active()) {
+        buy(shop, item);
+        return;
+    }
     Guard guard;
-    ++g.swallowed;
-    log_line("CHOICE", "suppressed local shop purchase -- the host owns the run");
-    return false;
+    if (g.is_client) {
+        ++g.swallowed;
+        log_line("CHOICE", "suppressed local shop purchase -- the host owns the run");
+        return;
+    }
+    if (!sync_shop(shop)) {
+        buy(shop, item);
+        return;
+    }
+
+    ChoiceMsg purchase{};
+    purchase.kind = kChoiceShopPurchase;
+    purchase.node_seed = g.here_seed;
+    uintptr_t begin = 0;
+    uint32_t count = 0;
+    int32_t stock = 0;
+    const uintptr_t address = reinterpret_cast<uintptr_t>(item);
+    if (!read_shop_items(shop, begin, count) || address < begin ||
+        (address - begin) % kShop_ItemSize ||
+        (address - begin) / kShop_ItemSize >= count ||
+        !read_shop_item(item, purchase, stock)) {
+        log_line("CHOICE", "!! could not identify shop purchase in local stock");
+        buy(shop, item);
+        return;
+    }
+    purchase.index = static_cast<uint32_t>((address - begin) / kShop_ItemSize);
+    if (g.candy_shop || (purchase.aux == kShopItem_Candy && !shop_transition_is_idle()))
+        return;
+
+    buy(shop, item);
+    int32_t remaining = 0;
+    if (stock <= 0 || !read_field(item, kShopItem_Stock, remaining) || remaining >= stock)
+        return;
+    if (purchase.aux == kShopItem_Candy) {
+        if (shop_transition_is_idle()) {
+            log_line("CHOICE", "!! candy purchase did not start a level-up transition");
+            return;
+        }
+        g.candy_purchase = purchase;
+        g.candy_shop = shop;
+    } else {
+        send_shop_action(purchase);
+    }
+}
+
+void choice_on_shop_exit(void* capture, ShopExitFn exit) {
+    Guard guard;
+    void* shop = nullptr;
+    int32_t steal_count = 0;
+    if (!read_field(capture, sizeof(void*), shop) || !sync_shop(shop) ||
+        !read_field(shop, kShop_StealCount, steal_count) || steal_count > 0) {
+        exit(capture);
+        return;
+    }
+    // Keep the client in the shop until pending purchases and their level-ups
+    // have run locally, then replay the host's exit.
+    if (g.is_client || g.candy_shop || !shop_transition_is_idle()) return;
+
+    exit(capture);
+    if (!shop_transition_is_idle()) {
+        ChoiceMsg action{};
+        action.kind = kChoiceShopExit;
+        action.node_seed = g.here_seed;
+        send_shop_action(action);
+    }
+}
+
+void choice_on_shop_update(void* shop, ShopBuyFn buy, ShopExitFn exit) {
+    if (!g.on || !g.is_client) return;
+    Guard guard;
+    if (g.shop_actions.empty() || !sync_shop(shop) || g.candy_shop ||
+        !shop_transition_is_idle())
+        return;
+    const void* scene = nullptr;
+    uint8_t paused = 0;
+    if (!read_field(shop, kShop_Scene, scene) ||
+        !read_field(scene, kScene_Paused, paused) || paused)
+        return;
+
+    const auto action = std::find_if(g.shop_actions.begin(), g.shop_actions.end(),
+        [](const ChoiceMsg& m) { return m.node_seed == g.here_seed; });
+    if (action == g.shop_actions.end()) return;
+    const ChoiceMsg purchase = *action;
+    g.shop_actions.erase(action);
+    if (purchase.kind == kChoiceShopExit) {
+        ShopExitCapture capture{nullptr, shop};
+        exit(&capture);
+        return;
+    }
+
+    uintptr_t begin = 0;
+    uint32_t count = 0;
+    int32_t stock = 0;
+    ChoiceMsg local{};
+    void* item = nullptr;
+    if (read_shop_items(shop, begin, count) && purchase.index < count)
+        item = reinterpret_cast<void*>(begin + purchase.index * kShop_ItemSize);
+    if (!read_shop_item(item, local, stock) || stock <= 0 ||
+        local.count != purchase.count || local.aux != purchase.aux ||
+        strcmp(local.name, purchase.name) != 0) {
+        log_line("CHOICE", "!! host's shop purchase does not match local stock (slot %u)",
+                 purchase.index);
+        return;
+    }
+    if (purchase.aux == kShopItem_Candy && !shop_cat_by_uid(shop, purchase.cat_uid)) {
+        log_line("CHOICE", "!! candy recipient %016llx is missing from the local run",
+                 (unsigned long long)purchase.cat_uid);
+        return;
+    }
+
+    buy(shop, item);
+    int32_t remaining = 0;
+    if (!read_field(item, kShopItem_Stock, remaining) || remaining >= stock ||
+        (purchase.aux == kShopItem_Candy && shop_transition_is_idle())) {
+        log_line("CHOICE", "!! failed to replay host's shop purchase (slot %u)", purchase.index);
+        return;
+    }
+    if (purchase.aux == kShopItem_Candy) {
+        g.candy_purchase = purchase;
+        g.candy_shop = shop;
+    }
+    ++g.applied;
+    log_line("CHOICE", "applied host's shop purchase (slot %u)", purchase.index);
+}
+
+void choice_on_shop_candy_level(void* capture, ShopExitFn open_level) {
+    Guard guard;
+    ShopCandyCapture local{};
+    if (!g.on || !g.candy_shop || !mem_read(capture, &local, sizeof(local)) ||
+        g.candy_shop != local.shop) {
+        open_level(capture);
+        return;
+    }
+    if (!g.is_client) {
+        g.candy_level_opening = true;
+        open_level(capture);
+        return;
+    }
+    g.candy_shop = nullptr;
+    void* cat = shop_cat_by_uid(local.shop, g.candy_purchase.cat_uid);
+    if (!cat) {
+        log_line("CHOICE", "!! candy recipient disappeared before the level-up screen opened");
+        open_level(capture);
+        return;
+    }
+    // The game still runs its normal roll and opens its usual LevelUpScreen.
+    local.capacity = local.count = 1;
+    local.cats = &cat;
+    open_level(&local);
 }
 
 bool choice_on_inv_box_click(void* box_ptr) {
@@ -782,7 +1058,7 @@ bool choice_on_level_select(void* screen, void* opt) {
     if (g.injecting) return true;
 
     Guard guard;
-    g.level_screen = screen;
+    publish_candy_level(screen);
 
     uint8_t committed = 0;
     if (mem_read((const uint8_t*)screen + kLvl_Committed, &committed, 1) && committed)
@@ -850,7 +1126,7 @@ bool choice_on_level_select(void* screen, void* opt) {
 void choice_on_level_update(void* level_screen) {
     if (!g.on || !level_screen) return;
     Guard guard;
-    g.level_screen = level_screen;
+    publish_candy_level(level_screen);
     if (net_active()) {
         uint8_t cat_owner = kNoPeer;
         const bool has_cat_owner = screen_cat_owner(level_screen, kLvl_Cat, &cat_owner);
@@ -890,6 +1166,16 @@ void choice_on_message(uint8_t from, const ChoiceMsg& m) {
         return;
     }
 
+    if (m.kind == kChoiceShopPurchase || m.kind == kChoiceShopExit) {
+        if (!g.is_client || from != kHostPeer || !m.node_seed) return;
+        if (g.shop_actions.size() >= 256) {
+            log_line("CHOICE", "!! shop action queue full");
+            return;
+        }
+        g.shop_actions.push_back(m);
+        return;
+    }
+
     if (m.kind == kChoiceLevelUp || m.kind == kChoiceLevelUpReroll) {
         if (g.lvl_q_count >= State::kMaxPendingLvl) {
             log_line("CHOICE", "!! level-up choice queue full (%u) -- dropping oldest",
@@ -909,7 +1195,6 @@ void choice_on_message(uint8_t from, const ChoiceMsg& m) {
                      m.index, m.count, slot.msg.name,
                      (unsigned long long)m.cat_uid, (unsigned long long)m.node_seed);
 
-        if (g.level_screen) apply_pending_level(g.level_screen);
         return;
     }
 
@@ -934,10 +1219,14 @@ void choice_on_message(uint8_t from, const ChoiceMsg& m) {
 void choice_on_node_entered(uint64_t node_seed) {
     if (!g.on) return;
     Guard guard;
+    if (g.here_seed != node_seed) {
+        discard_shop_actions(g.here_seed);
+        g.candy_shop = nullptr;
+        g.candy_level_opening = false;
+    }
     g.here_seed = node_seed;
 
     g.world_event  = nullptr;
-    g.level_screen = nullptr;
     clear_votes();
     g.btn_rects_ms = 0;
 
@@ -952,6 +1241,7 @@ void choice_on_node_skipped(uint64_t node_seed) {
     if (!g.on || !node_seed) return;
     Guard guard;
     remember_skipped(node_seed);
+    discard_shop_actions(node_seed);
 
     if (g.pending_evt && g.pending_evt_seed == node_seed) {
         log_line("CHOICE", "!! node %016llx was skipped -- dropping held event choice %u ('%s')",

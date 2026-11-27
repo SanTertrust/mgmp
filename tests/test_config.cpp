@@ -164,11 +164,16 @@ int main() {
               "and the choice screens");
         check(c.hook[T_SaveScumPenalty] == tune::kHookSaveScum,
               "while the game-modifying hooks follow mgmp_tuning.h alone");
+        check(c.hook[T_DirectorUpdate] == tune::kHookBattleUnlocked &&
+              c.hook[T_SceneUnlockedUpdate] == tune::kHookBattleUnlocked,
+              "and battle unlocked_update lockstep hooks are implied by a session");
     }
     {
         const Config& c = load(R"({ "ui": { "enabled": true } })");
         check(c.hook[T_FrameBegin],
               "the panel alone forces it too -- its connect buttons open a socket");
+        check(!c.hook[T_DirectorUpdate] && !c.hook[T_SceneUnlockedUpdate],
+              "solo play leaves battle unlocked_update hooks off");
     }
 
     printf(g_fail ? "\n%d FAILED\n" : "\nall good\n", g_fail);

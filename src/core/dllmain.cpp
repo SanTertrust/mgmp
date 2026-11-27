@@ -136,6 +136,9 @@ DWORD WINAPI init_thread(LPVOID) {
         log_raw("[!] TimeDelayStatusApplication is TURN-DRIVEN (tune::kHookTimeDelay,"
                 " %u turn(s)) -- this run does NOT match shipped behaviour",
                 tune::kTimeDelayTurns);
+    if (config().hook[T_DirectorUpdate] && config().hook[T_SceneUnlockedUpdate])
+        log_raw("[!] Battle Scene::unlocked_update is LOCKSTEPPED to 60 Hz"
+                " Director::update (tune::kHookBattleUnlocked)");
 
     // Before the hooks, so a fault inside hooks_install itself is caught too.
     crash_install((uintptr_t)GetModuleHandleW(nullptr));

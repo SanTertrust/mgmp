@@ -52,6 +52,7 @@ enum DataSym : int {
     D_ApplicationBase,
     D_SceneCurrent,
     D_HouseInventoryPtr,
+    D_TransitionScenePtr,
     D_COUNT
 };
 uintptr_t addr_of_data(DataSym d);

@@ -52,7 +52,7 @@ namespace mgmp {
 // So: if the value a peer puts in a message changes meaning, that is a protocol
 // change even when every byte stays where it was. Refusing at connect is free;
 // diagnosing it from a turn-0 halt is not.
-constexpr uint32_t kProtoVersion = 40;  // Battle tile pings + choice vote markers
+constexpr uint32_t kProtoVersion = 41;  // Adventure shop purchases and exit
 
 // A frame's payload may not exceed this. RUNSTATE (phase 5) is the only message
 // that will ever approach it; everything in phase 4 is under 128 bytes.
@@ -651,7 +651,10 @@ struct EnterNodeMsg {
 // already read MapNode+0x118 to agree on battle_id -- and it makes "is this
 // choice about the screen in front of me" answerable instead of assumed.
 struct ChoiceMsg {
-    uint8_t  kind  = 0;     // kChoiceEvent, kChoiceLevelUp, or kChoiceLevelUpReroll
+    // Shop purchase: index = stock slot, count = cost, aux = item kind,
+    // cat_uid = the host's candy recipient, name = ShopItem::data_str.
+    // Shop exit uses only kind and node_seed.
+    uint8_t  kind  = 0;
     uint32_t index = 0;     // option index into that screen's array
     uint32_t count = 0;     // options the sender had, so a bad index is caught
     uint32_t aux   = 0;     // level-up: the LevelUpOption type at +0. event: 0.
@@ -671,6 +674,8 @@ constexpr uint8_t kChoiceLevelUp       = 1;
 constexpr uint8_t kChoiceLevelUpReroll = 2;
 constexpr uint8_t kChoiceEventVote     = 3;
 constexpr uint8_t kChoiceLevelUpVote   = 4;
+constexpr uint8_t kChoiceShopPurchase  = 5;
+constexpr uint8_t kChoiceShopExit      = 6;
 
 // Host -> client, once the host has committed to a save file.
 //

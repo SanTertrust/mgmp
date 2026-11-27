@@ -122,6 +122,16 @@ static const SigTargetDesc kTargetSigs[] = {
       "48 83 EC 68 80 79 7B 00 74 10 48 8B 05 ? ? ? ? 44 8B 80 B4 00 00 00" },
     { 0x0034F0A0, "INVBOXCLK",
       "48 8B C4 48 89 58 20 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 38 FF FF FF" },
+    { 0x009D5120, "DIRUPD",
+      "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 41 54 41 55 41 56 41 57 B8 40 10 00 00" },
+    { 0x0096AEB0, "SCUNLUPD",
+      "48 89 5C 24 10 48 89 6C 24 18 57 48 83 EC 20 48 89 74 24 30" },
+    { 0x00797EA0, "SHOPUPD",
+      "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 56 41 57 48 8B EC 48 81 EC 80 00 00 00 48 8B F9" },
+    { 0x0079BFC0, "SHOPEXIT",
+      "48 89 5C 24 10 57 48 83 EC 20 48 8B 41 08" },
+    { 0x0079C8B0, "SHOPLVL",
+      "48 89 5C 24 18 57 48 83 EC 40 48 8B 41 08" },
 };
 
 // INDEXED BY enum Call -- order is load-bearing.
@@ -274,7 +284,10 @@ static const SigDataDesc kSigData[] = {
     { 0x013DA9A0, "HouseInventoryPtr",
       "40 57 48 83 EC 40 80 79 58 00 48 8B F9 0F 84 ? ? ? ? C6 41 58 00 C7 41 4C 00 00 00 00 48 8B 05 ? ? ? ? 48 89 6C 24 58",
       33, 37 },  // via 0x1401A5EAE in ?check_furnlist_changed@FurnitureBuildingUI@glaiel@@QEAAXXZ
+    { 0x013C5BA8, "TransitionScenePtr",
+      "48 83 EC 28 48 8B 51 08 48 8B 4A 78 48 85 C9 74 52 48 8B 82 80 00 00 00 48 39 41 F8 75 45 48 8B 05 ? ? ? ? 80 78 38 00",
+      33, 37 },  // via 0x1400EDD9E in std::_Func_impl_no_alloc<`glaiel::CatStatsDrawer::init'::`2'::<lambda_3>,void>::_Do_call
 };
-static const int kSigDataCount = 5;
+static const int kSigDataCount = 6;
 
 } // namespace mgmp

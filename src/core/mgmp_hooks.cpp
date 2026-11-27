@@ -47,6 +47,7 @@
 #include "mgmp_mem.h"
 #include "mgmp_resolve.h"
 #include "mgmp_session.h"
+#include "mgmp_net.h"
 #include "mgmp_lockstep.h"
 #include "mgmp_follow.h"
 #include "mgmp_savefile.h"
@@ -79,6 +80,7 @@ typedef void  (__fastcall* fn_this_ptr_b)(void* self, void* ta, unsigned char fl
 typedef void* (__fastcall* fn_two_ptr)(void* a, void* b);
 typedef void  (__fastcall* fn_ptr_i32_b)(void* a, int b, unsigned char c);
 typedef char  (__fastcall* fn_this_c)(void* self);
+typedef void  (__fastcall* fn_this_f64)(void* self, double dt);
 
 fn_this       o_InitSystems = nullptr;
 fn_this       o_NextTurn    = nullptr;
@@ -96,6 +98,8 @@ void (__fastcall* o_OnElementInfluence)(void*, const void*) = nullptr;
 bool (__fastcall* o_IsBackstab)(void*, uint64_t, uint64_t) = nullptr;
 fn_ptr_i32    o_SaveScum      = nullptr;
 fn_this       o_TimeDelay     = nullptr;
+fn_this       o_DirectorUpdate      = nullptr;
+fn_this_f64   o_SceneUnlockedUpdate = nullptr;
 fn_this       o_MapUpdate     = nullptr;
 fn_this_ptr   o_EnterNode     = nullptr;
 fn_this       o_StatusMenu    = nullptr;
@@ -108,6 +112,9 @@ fn_this_ptr   o_LevelSelect   = nullptr;   // select_option(this, LevelUpOption*
 fn_this       o_LevelUpdate   = nullptr;
 fn_this       o_LevelReroll   = nullptr;
 fn_this_ptr   o_ShopBuyItem   = nullptr;
+fn_this       o_ShopUpdate    = nullptr;
+fn_this       o_ShopExit      = nullptr;
+fn_this       o_ShopCandyLevel = nullptr;
 fn_this       o_InvItemBoxClick = nullptr;
 fn_this       o_CombatMenu    = nullptr;
 fn_this       o_ButtonUpdate  = nullptr;
@@ -418,6 +425,123 @@ void __fastcall h_SaveScum(void* run, int mode) {
     // Deliberately does NOT call o_SaveScum.
 }
 
+// --- battle Scene::unlocked_update lockstep ---------------------------------
+//
+// Director::update already runs on a fixed 60 Hz step (delta_time = 1/60), but
+// when Application->unlock_framerate is true, ApplicationBase::consume_time
+// also runs a residual Director::unlocked_update(residual_dt) per render frame.
+// Inside the "Battle" scene that residual tick advances Renderer (swf::MovieClip),
+// Animator (on_complete_callback -> CombatAnimationQueue::CompleteCurrent),
+// Character::late_unlocked_update (BecomeCorpse) and HitPause on wall-clock dt,
+// allowing concurrent animation callbacks (e.g. ForbiddenFrost's
+// GainDisorderFromPool_PostCast::OnFinishAbility vs DeathRattle BoomerCatExplode)
+// to execute in different orders on peers with different FPS or combat_speed.
+//
+// Hooking both Director::update and Scene::unlocked_update lets us skip the
+// "Battle" scene on variable-FPS Director::unlocked_update passes and step it
+// strictly 1:1 at the end of each fixed 60 Hz Director::update with dt = 1/60,
+// while InputCore/ControlSet/VirtualMouse (earliest/latest_unlocked_update) and
+// all non-Battle scenes stay unlocked at full render FPS.
+
+thread_local bool g_in_fixed_battle_unlocked = false;
+
+bool battle_unlocked_lockstep_active() {
+    return tune::kHookBattleUnlocked && net_active() &&
+           g_live[T_DirectorUpdate] && g_live[T_SceneUnlockedUpdate] &&
+           o_DirectorUpdate != nullptr && o_SceneUnlockedUpdate != nullptr;
+}
+
+bool scene_is_battle(const void* scene) {
+    if (!scene) return false;
+    const uint8_t* str = (const uint8_t*)scene + kScene_Name;
+    uint64_t len = 0, cap = 0;
+    if (!mem_read(str + 16, &len, sizeof(len)) ||
+        !mem_read(str + 24, &cap, sizeof(cap)))
+        return false;
+    constexpr size_t kBattleLen = sizeof(kScene_Battle) - 1;
+    if (len != kBattleLen) return false;
+    const uint8_t* chars = str;
+    if (cap > 15) {
+        const void* heap = nullptr;
+        if (!mem_read(str, &heap, sizeof(heap)) || !heap) return false;
+        chars = (const uint8_t*)heap;
+    }
+    char buf[8] = {};
+    if (!mem_read(chars, buf, kBattleLen)) return false;
+    return memcmp(buf, kScene_Battle, kBattleLen) == 0;
+}
+
+void __fastcall h_SceneUnlockedUpdate(void* scene, double dt) {
+    if (!g_in_fixed_battle_unlocked && scene &&
+        battle_unlocked_lockstep_active() && scene_is_battle(scene)) {
+        return;
+    }
+    o_SceneUnlockedUpdate(scene, dt);
+}
+
+void __fastcall h_DirectorUpdate(void* dir) {
+    o_DirectorUpdate(dir);
+    if (!dir || !battle_unlocked_lockstep_active()) return;
+
+    void** first = nullptr;
+    void** last  = nullptr;
+    if (!mem_read((const uint8_t*)dir + kDirector_ScenesBegin, &first, sizeof(first)) ||
+        !mem_read((const uint8_t*)dir + kDirector_ScenesEnd,   &last,  sizeof(last))  ||
+        !first || last < first)
+        return;
+
+    const ptrdiff_t count = last - first;
+    if (count <= 0 || count > 128) return;
+
+    void* battles[8] = {};
+    int   nbattles   = 0;
+    for (ptrdiff_t i = 0; i < count; ++i) {
+        void* sc = nullptr;
+        if (!mem_read(&first[i], &sc, sizeof(sc)) || !sc) continue;
+        uint8_t paused = 0, suspended = 0, deleted = 0;
+        if (!mem_read((const uint8_t*)sc + kScene_Paused,     &paused,    1) ||
+            !mem_read((const uint8_t*)sc + kScene_Suspended,  &suspended, 1) ||
+            !mem_read((const uint8_t*)sc + kScene_Destroying, &deleted,   1))
+            continue;
+        if (deleted || paused || suspended) continue;
+        if (scene_is_battle(sc) && nbattles < 8)
+            battles[nbattles++] = sc;
+    }
+    if (!nbattles) return;
+
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        log_line_lvl(LogLevel::Trace, "LOCKSTEP",
+                     "battle Scene::unlocked_update lockstepped 1:1 with "
+                     "Director::update (60 Hz fixed step)");
+    }
+
+    constexpr double kFixedDt = 1.0 / 60.0;
+    constexpr double kFullPct = 1.0;
+    double saved_dt  = kFixedDt;
+    double saved_pct = kFullPct;
+    mem_read((const uint8_t*)dir + kDirector_DeltaTime,    &saved_dt,  sizeof(saved_dt));
+    mem_read((const uint8_t*)dir + kDirector_FramePercent, &saved_pct, sizeof(saved_pct));
+    mem_write((uint8_t*)dir + kDirector_DeltaTime,    &kFixedDt, sizeof(kFixedDt));
+    mem_write((uint8_t*)dir + kDirector_FramePercent, &kFullPct, sizeof(kFullPct));
+
+    g_in_fixed_battle_unlocked = true;
+    for (int i = 0; i < nbattles; ++i) {
+        uint8_t paused = 0, suspended = 0, deleted = 0;
+        if (mem_read((const uint8_t*)battles[i] + kScene_Paused,     &paused,    1) &&
+            mem_read((const uint8_t*)battles[i] + kScene_Suspended,  &suspended, 1) &&
+            mem_read((const uint8_t*)battles[i] + kScene_Destroying, &deleted,   1) &&
+            !deleted && !paused && !suspended) {
+            o_SceneUnlockedUpdate(battles[i], kFixedDt);
+        }
+    }
+    g_in_fixed_battle_unlocked = false;
+
+    mem_write((uint8_t*)dir + kDirector_DeltaTime,    &saved_dt,  sizeof(saved_dt));
+    mem_write((uint8_t*)dir + kDirector_FramePercent, &saved_pct, sizeof(saved_pct));
+}
+
 // --- phase 5: following the host through the map ---------------------------
 
 void __fastcall h_EnterNode(void* self, void* node) {
@@ -485,7 +609,20 @@ void __fastcall h_LevelReroll(void* self) {
 }
 
 void __fastcall h_ShopBuyItem(void* self, void* shop_item) {
-    if (choice_on_shop_buy(self, shop_item)) o_ShopBuyItem(self, shop_item);
+    choice_on_shop_buy(self, shop_item, o_ShopBuyItem);
+}
+
+void __fastcall h_ShopUpdate(void* self) {
+    o_ShopUpdate(self);
+    choice_on_shop_update(self, o_ShopBuyItem, o_ShopExit);
+}
+
+void __fastcall h_ShopExit(void* capture) {
+    choice_on_shop_exit(capture, o_ShopExit);
+}
+
+void __fastcall h_ShopCandyLevel(void* capture) {
+    choice_on_shop_candy_level(capture, o_ShopCandyLevel);
 }
 
 void __fastcall h_InvItemBoxClick(void* box_ptr) {
@@ -794,6 +931,9 @@ const Binding kBindings[] = {
     { T_LevelUpdate,  (void*)&h_LevelUpdate, (void**)&o_LevelUpdate },
     { T_LevelReroll,  (void*)&h_LevelReroll, (void**)&o_LevelReroll },
     { T_ShopBuyItem,  (void*)&h_ShopBuyItem, (void**)&o_ShopBuyItem },
+    { T_ShopUpdate,   (void*)&h_ShopUpdate, (void**)&o_ShopUpdate },
+    { T_ShopExit,     (void*)&h_ShopExit, (void**)&o_ShopExit },
+    { T_ShopCandyLevel, (void*)&h_ShopCandyLevel, (void**)&o_ShopCandyLevel },
     { T_InvItemBoxClick, (void*)&h_InvItemBoxClick, (void**)&o_InvItemBoxClick },
 
     { T_SaveSelUpdate,  (void*)&h_SaveSelUpdate,  (void**)&o_SaveSelUpdate  },
@@ -811,6 +951,8 @@ const Binding kBindings[] = {
 
     { T_SaveScumPenalty, (void*)&h_SaveScum, (void**)&o_SaveScum },
     { T_TimeDelayTick,   (void*)&h_TimeDelay, (void**)&o_TimeDelay },
+    { T_DirectorUpdate,      (void*)&h_DirectorUpdate,      (void**)&o_DirectorUpdate      },
+    { T_SceneUnlockedUpdate, (void*)&h_SceneUnlockedUpdate, (void**)&o_SceneUnlockedUpdate },
 
     { T_HouseTestInit,      (void*)&h_HouseTestInit,      (void**)&o_HouseTestInit      },
     { T_HouseCatUpdate,     (void*)&h_HouseCatUpdate,     (void**)&o_HouseCatUpdate     },

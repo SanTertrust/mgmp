@@ -126,11 +126,16 @@ bool choice_on_event_commit(void* cap);
 bool choice_on_level_select(void* screen, void* opt);
 // `screen` is LevelUpScreen* for Reroll().
 bool choice_on_level_reroll(void* screen);
-// Non-owner client input guards for Shop and Adventure Inventory.
-bool choice_on_shop_buy(void* shop, void* shop_item);
+using ShopBuyFn = void (__fastcall*)(void*, void*);
+using ShopExitFn = void (__fastcall*)(void*);
+void choice_on_shop_buy(void* shop, void* item, ShopBuyFn buy);
+void choice_on_shop_exit(void* capture, ShopExitFn exit);
+void choice_on_shop_update(void* shop, ShopBuyFn buy, ShopExitFn exit);
+void choice_on_shop_candy_level(void* capture, ShopExitFn open_level);
+// Non-owner client input guard for Adventure Inventory.
 bool choice_on_inv_box_click(void* box_ptr);
 
-// Per-frame ticks. Both cache the screen pointer and apply a held choice.
+// Per-frame ticks apply a held choice to the live screen.
 void choice_on_event_update(void* world_event);
 void choice_on_level_update(void* level_screen);
 
@@ -154,9 +159,7 @@ uint32_t choice_get_vote_badges(ChoiceVoteBadge* out, uint32_t cap);
 // walking into node 6 -- so "the seed is not the one I am standing in" says
 // nothing about staleness. See apply_pending.
 //
-// What it does do is forget the cached WorldEvent*/LevelUpScreen*. Those
-// screens belong to the node just left and may already be destroyed, and
-// choice_on_message applies straight into whichever pointer is held.
+// Forget the cached WorldEvent* belonging to the node just left.
 void choice_on_node_entered(uint64_t node_seed);
 
 // mgmp_follow has DISCARDED a node it was told about without entering it --

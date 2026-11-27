@@ -195,6 +195,11 @@ void hook_defaults() {
     // a detour on a function the game calls constantly for no reason at all.
     g_cfg.hook[T_HighlightRefresh] = false;
 
+    // Battle Scene::unlocked_update lockstep: only needed during a multiplayer
+    // session; solo play keeps its native unlocked Battle animation ticks.
+    g_cfg.hook[T_DirectorUpdate]      = false;
+    g_cfg.hook[T_SceneUnlockedUpdate] = false;
+
     for (int t = T_HouseTestInit; t <= T_GoOnAdventure; ++t)
         g_cfg.hook[t] = false;
 }
@@ -233,6 +238,9 @@ void hooks_implied_by(bool net_configured) {
             g_cfg.hook[T_LevelUpdate] = true;
             g_cfg.hook[T_LevelReroll] = true;
             g_cfg.hook[T_ShopBuyItem] = true;
+            g_cfg.hook[T_ShopUpdate] = true;
+            g_cfg.hook[T_ShopExit] = true;
+            g_cfg.hook[T_ShopCandyLevel] = true;
             g_cfg.hook[T_InvItemBoxClick] = true;
         }
 
@@ -265,6 +273,14 @@ void hooks_implied_by(bool net_configured) {
         // mutation that cost a run on 2026-08-26. If this hook is ever missing,
         // the highlight must not be called at all.
         g_cfg.hook[T_HighlightRefresh] = tune::kAimPreview;
+
+        // Lockstep Battle's Scene::unlocked_update 1:1 with fixed 60 Hz
+        // Director::update so unlocked-FPS residual ticks cannot reorder
+        // MovieClip/Animator/BecomeCorpse callbacks against fixed-tick logic.
+        if (tune::kHookBattleUnlocked) {
+            g_cfg.hook[T_DirectorUpdate]      = true;
+            g_cfg.hook[T_SceneUnlockedUpdate] = true;
+        }
 
         if (tune::kHouseCoop) {
             for (int t = T_HouseTestInit; t <= T_GoOnAdventure; ++t)

@@ -48,6 +48,12 @@ constexpr bool     kHookSaveScum  = true;
 constexpr bool     kHookTimeDelay = true;
 // Turn boundaries such a status waits before firing. 1 = the next boundary.
 constexpr uint32_t kTimeDelayTurns = 1;
+// Lockstep the Battle scene's Scene::unlocked_update 1:1 with fixed 60 Hz
+// Director::update during multiplayer so unlocked-FPS residual ticks cannot
+// reorder MovieClip/Animator/BecomeCorpse callbacks against fixed-tick battle
+// logic (e.g. ForbiddenFrost's GainDisorderFromPool_PostCast vs DeathRattle).
+// InputCore/ControlSet/VirtualMouse and non-Battle scenes remain unlocked.
+constexpr bool     kHookBattleUnlocked = true;
 
 // --- the meta layer's sync modules ------------------------------------------
 //
