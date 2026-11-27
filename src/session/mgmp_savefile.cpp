@@ -690,6 +690,9 @@ void savefile_catchup(uint8_t peer) {
 bool savefile_publish_active(uint8_t peer, bool fresh, bool flush_adventure) {
     ensure_state();
     if (!g.on || g.is_client || !net_active()) return false;
+    // The roster includes the host. Keep deferred broadcasts pending until a
+    // client is present, without checkpointing SQLite or logging every frame.
+    if (peer == kNoPeer && net_peer_count() <= 1) return false;
     if (!g.director_slot) return false;
     const void* director = nullptr;
     if (!mem_read(g.director_slot, &director, sizeof(director)) || !director)
@@ -789,7 +792,7 @@ void savefile_pump() {
 
     if (!g.on || g.is_client) return;
     if (g.published) return;
-    if (!net_active()) return;
+    if (!net_active() || net_peer_count() <= 1) return;
 
     // THE SILENT STALL. g.have_slot is set by savefile_on_slot_click and by
     // nothing else, so a host that never passed through the save-selection

@@ -27,7 +27,7 @@ int main() {
     printf("-- ActionMsg round-trips every field --\n");
     {
         ActionMsg a{};
-        a.turn = 7; a.actor = 3; a.type = 2;
+        a.turn = 7; a.actor = 0x01020304; a.type = 2;
         a.battle_id = 0x211f6ea51e365ae0ULL;   // a real node seed0, from a log
         a.slot_kind = 4; a.slot_index = 1;
         a.b30 = 1; a.b31 = 0;
@@ -44,7 +44,7 @@ int main() {
         check(b.battle_id == 0x211f6ea51e365ae0ULL,
               "battle_id, which keys every per-battle message -- all 64 bits of it, "
               "since it is a node seed and not a small counter");
-        check(b.turn == 7 && b.actor == 3 && b.type == 2, "turn/actor/type");
+        check(b.turn == 7 && b.actor == a.actor && b.type == 2, "turn and full-width battle actor ID");
         check(b.slot_kind == 4 && b.slot_index == 1, "slot identity");
         check(b.b30 == 1 && b.b31 == 0, "the two tail bytes");
         check(b.tx == 5 && b.ty == -3, "target survives a negative");
@@ -179,7 +179,7 @@ int main() {
     {
         AimMsg a{};
         a.battle_id = 0xABCDEF0123456789ull;
-        a.cat = 13; a.active = 1; a.slot_kind = 4; a.slot_index = 2;
+        a.cat = 0x01020304; a.active = 1; a.slot_kind = 4; a.slot_index = 2;
         a.tx = 6; a.ty = -3; a.dx = -1; a.dy = 0;
         strcpy(a.gon, "FireballSpell");
         uint32_t n = enc_aim(buf, sizeof(buf), a);
@@ -189,7 +189,7 @@ int main() {
         AimMsg o{};
         check(dec_aim(r, o), "decodes");
         check(o.battle_id == a.battle_id, "battle id survives all 64 bits");
-        check(o.cat == 13 && o.active == 1, "cat and active");
+        check(o.cat == a.cat && o.active == 1, "full-width battle actor ID and active");
         check(o.slot_kind == 4 && o.slot_index == 2, "the slot, which is the identity");
         check(o.tx == 6 && o.ty == -3, "target, including a negative coordinate");
         check(o.dx == -1 && o.dy == 0, "direction");
@@ -501,7 +501,7 @@ int main() {
         Writer w(buf, sizeof(buf));
         w.u8v(MSG_ACTION);
         w.u64v(9);                      // battle_id, ahead of turn on the wire
-        w.u32v(1); w.u8v(0); w.u8v(2); w.u8v(0); w.u8v(0); w.u8v(0); w.u8v(0);
+        w.u32v(1); w.u32v(0); w.u8v(2); w.u8v(0); w.u8v(0); w.u8v(0); w.u8v(0);
         w.i32v(0); w.i32v(0); w.i32v(0); w.i32v(0);
         char big[200]; memset(big, 'x', sizeof(big)); big[199] = 0;
         w.str(big);                     // Writer clamps to 255

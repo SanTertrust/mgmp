@@ -50,6 +50,32 @@ struct GameUiCat {
     void* transform = nullptr;
 };
 
+// Cached per-cat VirtualCharacter & Ability* handles for instant switching
+// on a GameUiCombatBar without re-allocating components on every hover.
+struct GameUiCatKit {
+    void* vchar       = nullptr;
+    void* ab_attack   = nullptr;
+    void* ab_move     = nullptr;
+    void* ab_spell[4] = {};
+    bool  built       = false;
+};
+
+// Native battle CombatMenu bar ("CombatMenu" SWF + MenuPanel + AbilityTooltip)
+// displaying a CatData*'s basic attack, move, 4 spells, 4 passives, and 5
+// equipment slots (head, face, neck, weapon, trinket) with live hover tooltips.
+struct GameUiCombatBar {
+    void* entity         = nullptr;
+    void* renderer       = nullptr;
+    void* transform      = nullptr;
+    void* panel          = nullptr; // glaiel::MenuPanel*
+    void* tooltip_comp   = nullptr; // glaiel::AbilityTooltip*
+    void* btn_attack     = nullptr;
+    void* btn_move       = nullptr;
+    void* btn_spell[4]   = {};
+    void* btn_passive[4] = {};
+    void* btn_item[5]    = {};      // head, face, neck, weapon, trinket
+};
+
 // Virtual UI canvas dimensions (matching YesNoPrompt / native menus).
 constexpr double kGameUiWidth  = 1280.0;
 constexpr double kGameUiHeight = 720.0;
@@ -83,6 +109,28 @@ bool gameui_add_label(GameUiOverlay& ov, const wchar_t* text,
 bool gameui_add_cat(GameUiOverlay& ov, void* cat_data,
                     double x, double y, double scale, int32_t layer,
                     GameUiCat& out);
+
+// Spawn a single AbilityTooltip component on the overlay scene so hovering
+// any MenuPanel/Button icon in the overlay displays native game tooltips.
+void* gameui_add_ability_tooltip(GameUiOverlay& ov);
+
+// Spawn a per-cat cluster of native ability, passive, and equipment icons
+// arranged around a card centered at (cx, cy) with scale `card_scale`.
+// Populated abilities stack on the left, passives on the right, and equipped
+// items in a centered row below the card; empty slots are hidden.
+bool gameui_add_cat_kit_icons(GameUiOverlay& ov, void* cat_data,
+                              double cx, double cy, double card_scale,
+                              GameUiCombatBar& bar, GameUiCatKit& kit);
+
+// Spawn a native battle CombatMenu bar at the bottom of the overlay scene,
+// wired with MenuPanel + AbilityTooltip for native hover tooltips.
+bool gameui_add_combat_bar(GameUiOverlay& ov, GameUiCombatBar& out);
+
+// Populate a GameUiCombatBar with a CatData*'s abilities, passives, and
+// equipment (head, face, neck, weapon, trinket). `kit` caches VirtualCharacter
+// abilities per cat for the lifetime of `ov`.
+void gameui_combat_bar_show_cat(GameUiOverlay& ov, GameUiCombatBar& bar,
+                                void* cat_data, GameUiCatKit& kit);
 
 // Transform / visibility / text / frame helpers.
 void gameui_set_pos(void* transform, double x, double y, double sort_depth = 0.0);

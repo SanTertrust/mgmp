@@ -22,47 +22,10 @@
 namespace mgmp {
 namespace {
 
-// --- the two option arrays -------------------------------------------------
-constexpr uintptr_t kEvt_OptBegin  = 224;
-constexpr uintptr_t kEvt_OptEnd    = 232;
-
-constexpr uintptr_t kLvl_OptBegin  = 864;
-constexpr uintptr_t kLvl_OptEnd    = 872;
-constexpr uintptr_t kLvl_Committed = 792;   // select_option's "already chose" guard
-
-constexpr uintptr_t kOptStride     = 240;
-
-constexpr uintptr_t kEvtOpt_Stat   = 64;
-constexpr uintptr_t kLvlOpt_Type   = 0;
-constexpr uintptr_t kLvlOpt_Name   = 200;
-
-// MenuPanel & Button layout (verified in IDA against Mewgenics.exe.i64).
-constexpr uintptr_t kEvt_Panel     = 0x40;  // WorldEvent::panel (MenuPanel*)
-constexpr uintptr_t kLvl_Panel     = 0xB0;  // LevelUpScreen::panel (MenuPanel*)
-constexpr uintptr_t kPanel_Buttons = 0x40;  // MenuPanel::buttons (std::map<string, Button*>)
-constexpr uintptr_t kBtn_Renderer  = 0x38;  // Button::renderer (Ref<Renderer>)
-constexpr uintptr_t kBtn_Clip      = 0x48;  // Button::button_clip (swf::MovieClip*)
-constexpr uintptr_t kBtn_Bounds    = 0x70;  // Button::cached_bounds (float[4]: xMin, xMax, yMin, yMax)
-constexpr uintptr_t kDispObj_CT    = 0x78;  // swf::DisplayObject::color_transform (8 floats)
-
+// Struct offsets for WorldEvent, LevelUpScreen, MenuPanel, Button, DisplayObject,
+// Shop, and Transition live in mgmp_addresses.h.
 constexpr uint32_t kMaxOptions     = 64;
 constexpr uint32_t kMaxVoteButtons = 16;
-
-// Shop::BuyItem receives an entry in Shop::items. Kind 12 starts the native
-// level-up transition, whose callback rolls a cat on the local visual RNG.
-constexpr uintptr_t kShop_Director     = 0x58;
-constexpr uintptr_t kShop_Items        = 0x60;
-constexpr uintptr_t kShop_IsTreasure   = 0x79;
-constexpr uintptr_t kShop_IsHouse      = 0x7B;
-constexpr uintptr_t kShop_StealCount   = 0x88;
-constexpr uintptr_t kShop_ItemSize     = 0xC0;
-constexpr uintptr_t kShopItem_Type     = 0;
-constexpr uintptr_t kShopItem_Cost     = 8;
-constexpr uintptr_t kShopItem_Stock    = 12;
-constexpr uintptr_t kShopItem_Data     = 16;
-constexpr uint32_t  kShopItem_Candy    = 12;
-constexpr uintptr_t kShop_Scene        = 0x20;  // Component::scene
-constexpr uintptr_t kTransition_Active = 0x38;
 
 struct Vec2D { double x, y; };
 struct SwfColorTransform {
@@ -137,6 +100,9 @@ struct State {
     uint32_t   lvl_q_count = 0;
 
     std::deque<ChoiceMsg> shop_actions;
+    std::deque<ChoiceMsg> ac_actions;
+    void*                 last_lvl_scene   = nullptr;
+    uint64_t              last_lvl_cat_uid = 0;
     ChoiceMsg candy_purchase{};
     void* candy_shop = nullptr;
     bool candy_level_opening = false;
@@ -180,6 +146,7 @@ const char* kind_name(uint8_t k) {
     if (k == kChoiceLevelUpVote)   return "level-up vote";
     if (k == kChoiceShopPurchase)  return "shop purchase";
     if (k == kChoiceShopExit)      return "shop exit";
+    if (k == kChoiceAbilityReplace) return "ability replace";
     return "event";
 }
 
@@ -734,6 +701,9 @@ void choice_init() {
     g.pending_evt_warned = false;
     g.lvl_q_count = 0;
     g.shop_actions.clear();
+    g.ac_actions.clear();
+    g.last_lvl_scene   = nullptr;
+    g.last_lvl_cat_uid = 0;
     g.candy_shop = nullptr;
     g.candy_level_opening = false;
     g.here_seed   = 0;
@@ -766,6 +736,9 @@ void choice_shutdown() {
     g.pending_evt  = false;
     g.lvl_q_count  = 0;
     g.shop_actions.clear();
+    g.ac_actions.clear();
+    g.last_lvl_scene   = nullptr;
+    g.last_lvl_cat_uid = 0;
     g.candy_shop = nullptr;
     g.candy_level_opening = false;
     g.here_seed    = 0;
@@ -967,7 +940,7 @@ void choice_on_shop_update(void* shop, ShopBuyFn buy, ShopExitFn exit) {
         return;
     const void* scene = nullptr;
     uint8_t paused = 0;
-    if (!read_field(shop, kShop_Scene, scene) ||
+    if (!read_field(shop, kComp_Scene, scene) ||
         !read_field(scene, kScene_Paused, paused) || paused)
         return;
 
@@ -1127,6 +1100,11 @@ void choice_on_level_update(void* level_screen) {
     if (!g.on || !level_screen) return;
     Guard guard;
     publish_candy_level(level_screen);
+    void* lvl_scene = nullptr;
+    if (read_field(level_screen, kComp_Scene, lvl_scene) && lvl_scene) {
+        g.last_lvl_scene   = lvl_scene;
+        g.last_lvl_cat_uid = read_screen_cat_uid(level_screen, kLvl_Cat);
+    }
     if (net_active()) {
         uint8_t cat_owner = kNoPeer;
         const bool has_cat_owner = screen_cat_owner(level_screen, kLvl_Cat, &cat_owner);
@@ -1136,6 +1114,146 @@ void choice_on_level_update(void* level_screen) {
                           kChoiceLevelUpVote, follow_here_seed(), uid);
     }
     apply_pending_level(level_screen);
+}
+
+namespace {
+
+void ability_chooser_owner(void* chooser, uint64_t& out_cat_uid, bool& out_local_owns) {
+    out_cat_uid = 0;
+    out_local_owns = !g.is_client;
+    if (!chooser) return;
+
+    void* parent_scene = nullptr;
+    if (!read_field(chooser, kAC_ParentScene, parent_scene) || !parent_scene)
+        return;
+
+    if (parent_scene == g.last_lvl_scene && g.last_lvl_cat_uid) {
+        out_cat_uid = g.last_lvl_cat_uid;
+        uint8_t owner = kNoPeer;
+        const bool has = draft_lookup_owner(out_cat_uid, &owner);
+        out_local_owns = has ? (owner == net_self()) : !g.is_client;
+        return;
+    }
+
+    if (g.world_event) {
+        void* evt_scene = nullptr;
+        if (read_field(g.world_event, kComp_Scene, evt_scene) && evt_scene == parent_scene) {
+            out_cat_uid = read_screen_cat_uid(g.world_event, kEvt_CatChoice);
+            uint8_t owner = kNoPeer;
+            const bool has = out_cat_uid && draft_lookup_owner(out_cat_uid, &owner);
+            out_local_owns = has ? (owner == net_self()) : !g.is_client;
+            return;
+        }
+    }
+}
+
+void tint_all_panel_buttons(void* panel, bool grey_out) {
+    if (!panel) return;
+    void* head = nullptr;
+    uint64_t count = 0;
+    if (!mem_read((const uint8_t*)panel + kPanel_Buttons, &head, sizeof(head)) || !head)
+        return;
+    if (!mem_read((const uint8_t*)panel + kPanel_Buttons + 8, &count, sizeof(count)) ||
+        count == 0 || count > 128)
+        return;
+    void* root = nullptr;
+    if (!mem_read((const uint8_t*)head + 8, &root, sizeof(root)) || !root) return;
+
+    void* stack[64];
+    int sp = 0;
+    stack[sp++] = root;
+    uint32_t visited = 0;
+    while (sp > 0 && visited < 128) {
+        void* node = stack[--sp];
+        if (!node || node == head) continue;
+        uint8_t isnil = 1;
+        if (!mem_read((const uint8_t*)node + 25, &isnil, 1) || isnil) continue;
+        ++visited;
+        void* left = nullptr; void* right = nullptr;
+        mem_read((const uint8_t*)node + 0,  &left,  sizeof(left));
+        mem_read((const uint8_t*)node + 16, &right, sizeof(right));
+        if (right && right != head && sp < 64) stack[sp++] = right;
+        if (left  && left  != head && sp < 64) stack[sp++] = left;
+        void* btn = nullptr;
+        if (mem_read((const uint8_t*)node + 64, &btn, sizeof(btn)) && btn)
+            tint_button_clip(btn, grey_out);
+    }
+}
+
+bool ability_chooser_is_closing(void* chooser) {
+    void* panel = nullptr;
+    void* ren   = nullptr;
+    void* mc    = nullptr;
+    uint8_t flags = 0;
+    if (!read_field(chooser, kAC_Panel, panel) || !panel) return false;
+    if (!read_field(panel, kPanel_Renderer, ren) || !ren) return false;
+    if (!read_field(ren, kRenderer_Graphics, mc) || !mc)  return false;
+    if (!mem_read((const uint8_t*)mc + 9, &flags, 1))     return false;
+    return (flags & 2u) != 0;
+}
+
+} // namespace
+
+bool choice_on_ability_chooser_close(void* chooser, int32_t slot) {
+    if (!g.on || !chooser || g.injecting || !net_active()) return true;
+    Guard guard;
+
+    uint64_t cat_uid = 0;
+    bool local_owns = false;
+    ability_chooser_owner(chooser, cat_uid, local_owns);
+    if (!local_owns) {
+        ++g.swallowed;
+        log_line("CHOICE", "suppressed local ability-replace click (slot=%d) -- another player owns this cat",
+                 (int)slot);
+        return false;
+    }
+
+    if (ability_chooser_is_closing(chooser)) return true;
+
+    ChoiceMsg m{};
+    m.kind      = kChoiceAbilityReplace;
+    m.index     = static_cast<uint32_t>(slot);
+    m.node_seed = follow_here_seed();
+    m.cat_uid   = cat_uid;
+    if (net_send_choice(m)) {
+        ++g.sent;
+        log_line("CHOICE", "-> ability replace slot %d (cat=%016llx)",
+                 (int)slot, (unsigned long long)cat_uid);
+    }
+    return true;
+}
+
+void choice_on_ability_chooser_update(void* chooser, AbilityChooserCloseFn close_fn) {
+    if (!g.on || !chooser) return;
+    Guard guard;
+
+    uint64_t cat_uid = 0;
+    bool local_owns = false;
+    ability_chooser_owner(chooser, cat_uid, local_owns);
+
+    if (net_active()) {
+        void* panel = nullptr;
+        if (read_field(chooser, kAC_Panel, panel) && panel)
+            tint_all_panel_buttons(panel, !local_owns);
+    }
+
+    if (g.ac_actions.empty() || !close_fn || ability_chooser_is_closing(chooser))
+        return;
+
+    for (auto it = g.ac_actions.begin(); it != g.ac_actions.end(); ++it) {
+        if (it->node_seed && g.here_seed && it->node_seed != g.here_seed) continue;
+        if (it->cat_uid && cat_uid && it->cat_uid != cat_uid) continue;
+        const int32_t slot = static_cast<int32_t>(it->index);
+        const uint64_t uid = it->cat_uid;
+        g.ac_actions.erase(it);
+        g.injecting = true;
+        close_fn(chooser, slot);
+        g.injecting = false;
+        ++g.applied;
+        log_line("CHOICE", "applied peer's ability replace: slot %d (cat=%016llx)",
+                 (int)slot, (unsigned long long)uid);
+        return;
+    }
 }
 
 // --- receiving -------------------------------------------------------------
@@ -1173,6 +1291,15 @@ void choice_on_message(uint8_t from, const ChoiceMsg& m) {
             return;
         }
         g.shop_actions.push_back(m);
+        return;
+    }
+
+    if (m.kind == kChoiceAbilityReplace) {
+        if (g.ac_actions.size() >= 32) g.ac_actions.pop_front();
+        g.ac_actions.push_back(m);
+        log_line("CHOICE", "<- peer %u ability replace slot %d (cat=%016llx) on node %016llx",
+                 (unsigned)from, (int)(int32_t)m.index,
+                 (unsigned long long)m.cat_uid, (unsigned long long)m.node_seed);
         return;
     }
 
@@ -1242,6 +1369,9 @@ void choice_on_node_skipped(uint64_t node_seed) {
     Guard guard;
     remember_skipped(node_seed);
     discard_shop_actions(node_seed);
+    g.ac_actions.erase(std::remove_if(g.ac_actions.begin(), g.ac_actions.end(),
+        [node_seed](const ChoiceMsg& m) { return m.node_seed == node_seed; }),
+        g.ac_actions.end());
 
     if (g.pending_evt && g.pending_evt_seed == node_seed) {
         log_line("CHOICE", "!! node %016llx was skipped -- dropping held event choice %u ('%s')",

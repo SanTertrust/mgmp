@@ -63,21 +63,7 @@ typedef void (__fastcall* fn_highlight)(void* brain, void* ability, int mode);
 typedef void (__fastcall* fn_move)(void* tobj, iVec2D tile, char a, char b);
 typedef void (__fastcall* fn_recompute)(void* self, void* ability, char flag);
 
-// Character -> TacticsObject, and the TacticsObject's current tile. The same
-// two offsets the per-turn state hash walks, and validated the same way: the
-// round trip Character+0x60 -> TacticsObject+0x98 must come back to us or the
-// preview is skipped rather than guessed at.
-constexpr uintptr_t kChar_TObj  = 0x60;
-constexpr uintptr_t kTObj_Back  = 0x98;
-constexpr uintptr_t kTObj_Tile  = 0x48;
-
-// The three counters the game brackets its displacement with. Restoring them is
-// not optional: +0xD10 is what the range computation spends, and leaving it one
-// short would make the peer's preview -- and, far worse, the peer's own idea of
-// what this cat can still do -- wrong for the rest of the turn.
-constexpr uintptr_t kChar_Guard    = 0xEC0;
-constexpr uintptr_t kChar_MovePts  = 0xD10;
-constexpr uintptr_t kChar_MovesUsed = 0xD3C;
+// Character / TacticsObject / PlayerBrain struct offsets live in mgmp_addresses.h.
 
 // 0FFFFFFFFh at both of the game's own preview sites.
 constexpr int kHighlightMode = -1;
@@ -86,31 +72,6 @@ constexpr int kHighlightMode = -1;
 // a different layer would sort the peer's tiles against the local ones
 // differently, and "the same as the local preview" is the whole point.
 constexpr int kAoeLayer = 0x13;
-
-// THE SELECTION, NOT THE DECISION.
-//
-// The first version of this module read Brain+0x220/0x228/0x230/0x238 -- the
-// cached pending choice -- because that is what Brain::UpdateDecision draws
-// from at 0x140137798. That was the wrong source, and the symptom was exact:
-// the host sent 121 aims and the client drew none, because +0x220 only reads 2
-// in the sliver of time between a decision being COMMITTED and it being
-// applied. What a player looks at is the state before that: an ability picked,
-// a mouse moving over the board, nothing committed at all.
-//
-// That state lives on the PlayerBrain and is drawn by its own update,
-// sub_140775EB0 (vtable 0x140F82D78; DbgPlayerBrain and MountBrain share the
-// implementation). The fields are read off its two DrawAbilityAOE sites,
-// 0x14077659C and 0x1407771A4, where `this` is r14:
-//     mov r9,  [r14+360h]     ; direction
-//     mov r8,  [r14+358h]     ; target tile
-//     mov rdx, [r14+3D8h]     ; the ability the player has selected
-// and off the sub_140138A10 calls one instruction above each of them.
-//
-// Only ever read through the human-cat gate below, so the object really is a
-// PlayerBrain when these offsets are touched.
-constexpr uintptr_t kPBrain_Ability = 0x3D8;
-constexpr uintptr_t kPBrain_Target  = 0x358;   // iVec2D
-constexpr uintptr_t kPBrain_Dir     = 0x360;   // iVec2D
 
 // On change, and never faster than this. The same numbers mgmp_cursor uses, and
 // for the same reason: an aim moves as fast as a mouse, and a preview that
@@ -122,7 +83,7 @@ struct Held {
     bool     have  = false;
     uint8_t  from  = kNoPeer;
     uint64_t battle_id = 0;
-    uint8_t  cat   = 0;
+    uint32_t cat   = 0;
     uint8_t  slot_kind = 0, slot_index = 0;
     iVec2D   target{}, dir{};
     char     gon[64] = {};
@@ -144,7 +105,8 @@ struct State {
 
     // What we last put on the wire, so an unchanged aim costs nothing.
     bool     sent_active = false;
-    uint8_t  sent_cat = 0, sent_kind = 0, sent_index = 0;
+    uint32_t sent_cat = 0;
+    uint8_t  sent_kind = 0, sent_index = 0;
     iVec2D   sent_target{}, sent_dir{};
     uint32_t sent_at = 0;
 
@@ -222,7 +184,7 @@ void attack_range_under_move(void* brain, void* self, iVec2D target) {
     // A TacticsObject that does not point back at this Character is not the one
     // we may move.
     void* back = nullptr;
-    if (!mem_read((const uint8_t*)tobj + kTObj_Back, &back, sizeof(back)) || back != self)
+    if (!mem_read((const uint8_t*)tobj + kTObj_Owner, &back, sizeof(back)) || back != self)
         return;
 
     iVec2D home{};
@@ -350,7 +312,7 @@ bool read_brain_aim(const void* brain, void*& ability,
     return true;
 }
 
-void publish(void* brain, uint8_t cat) {
+void publish(void* brain, uint32_t cat) {
     void* ability = nullptr;
     iVec2D target{}, dir{};
     if (!read_brain_aim(brain, ability, target, dir)) return;
@@ -405,7 +367,7 @@ void publish(void* brain, uint8_t cat) {
     g.sent_at       = now;
 }
 
-void draw_held(void* brain, uint8_t cat) {
+void draw_held(void* brain, uint32_t cat) {
     if (!g.held.have || g.held.cat != cat) return;
     // A held aim from another battle draws nothing. Cheap, and it is the same
     // rule every other battle-scoped message follows.
@@ -560,7 +522,7 @@ void aim_on_update_decision(void* brain) {
     if (!mem_read((const uint8_t*)brain + kBrain_Character, &self, sizeof(self)) || !self)
         return;
 
-    uint8_t cat = 0;
+    uint32_t cat = 0;
     bool    peer_owns = false;
     if (!lockstep_aim_subject(self, cat, peer_owns)) return;
 
@@ -570,6 +532,18 @@ void aim_on_update_decision(void* brain) {
 
 uint32_t aim_sent()  { return g.sent; }
 uint32_t aim_drawn() { return g.drawn; }
+
+bool aim_active_slot_for(const void* character, uint8_t* out_kind, uint8_t* out_index) {
+    if (!g.on || !character || !g.held.have || !lockstep_in_battle()) return false;
+    if (g.held.battle_id != lockstep_battle_id()) return false;
+    uint32_t cat = 0;
+    bool peer_owns = false;
+    if (!lockstep_aim_subject(character, cat, peer_owns) || !peer_owns) return false;
+    if (cat != g.held.cat) return false;
+    if (out_kind)  *out_kind  = g.held.slot_kind;
+    if (out_index) *out_index = g.held.slot_index;
+    return true;
+}
 
 bool aim_highlight_suppressed() { return g.suppress; }
 

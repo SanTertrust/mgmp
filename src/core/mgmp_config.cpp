@@ -242,6 +242,8 @@ void hooks_implied_by(bool net_configured) {
             g_cfg.hook[T_ShopExit] = true;
             g_cfg.hook[T_ShopCandyLevel] = true;
             g_cfg.hook[T_InvItemBoxClick] = true;
+            g_cfg.hook[T_AbilityChooserUpdate] = true;
+            g_cfg.hook[T_AbilityChooserClose] = true;
         }
 
         // The node hash's second sample point is taken on WorldEvent::update --

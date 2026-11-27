@@ -28,10 +28,31 @@ using fn_cam_get_mouse    = void* (__fastcall*)(void* cam, double* out_vec2);
 using fn_str_assign       = void* (__fastcall*)(void* str, const char* s, size_t n);
 using fn_wstr_assign      = void* (__fastcall*)(void* wstr, const wchar_t* s, size_t n);
 using fn_str_dtor         = void  (__fastcall*)(void* str);
+using fn_wstr_dtor        = void  (__fastcall*)(void* wstr);
+
+using fn_add_menupanel    = void* (__fastcall*)(void* entity);
+using fn_panel_get_btn    = void* (__fastcall*)(void* panel, void* str_by_val, bool create);
+using fn_create_ab_tt     = void* (__fastcall*)(void* scene, void* entity);
+using fn_create_vchar     = void* (__fastcall*)(void* scene, const void* cat_data);
+using fn_vchar_add_ab     = void* (__fastcall*)(void* vchar, void* str_by_val, bool flag);
+using fn_cat_basic_atk    = void* (__fastcall*)(void* cat_data, void* retstr);
+using fn_setup_ab_icon    = void  (__fastcall*)(void* ability, void* mc, int32_t slot);
+using fn_setup_pass_icon  = void  (__fastcall*)(void* cat_passive_by_val, void* mc, const void* cat_data, int32_t slot);
+using fn_setup_item_icon  = void  (__fastcall*)(void* spawndb, const void* name_str, void* equip, void* disp_obj);
+using fn_item_name        = void* (__fastcall*)(void* spawndb, void* retwstr, void* equip);
+using fn_item_tooltip     = void* (__fastcall*)(void* spawndb, void* retwstr, void* equip);
+using fn_passive_name     = void* (__fastcall*)(void* spawndb, void* retwstr, void* str_by_val, int32_t level, const void* cat_data, void* character);
+using fn_passive_desc     = void* (__fastcall*)(void* spawndb, void* retwstr, void* str_by_val, int32_t level, const void* cat_data, void* character);
+using fn_ab_display_name  = void* (__fastcall*)(void* ability, void* retwstr);
+using fn_ab_tooltip       = void* (__fastcall*)(void* ability, void* retwstr);
+using fn_button_enable    = void  (__fastcall*)(void* button, bool enabled);
+using fn_mc_reset_goto_s  = void  (__fastcall*)(void* mc, void* str_by_val);
+using fn_swf_find_child   = void* (__fastcall*)(void* container, void* str_by_val, bool flag);
 
 struct FnTable {
     bool              checked = false;
     bool              ok      = false;
+    bool              combat_bar_ok = false;
     fn_add_scene      add_scene      = nullptr;
     fn_create_entity  create_entity  = nullptr;
     fn_create_rc      create_rc      = nullptr;
@@ -47,6 +68,26 @@ struct FnTable {
     fn_str_assign     str_assign     = nullptr;
     fn_wstr_assign    wstr_assign    = nullptr;
     fn_str_dtor       str_dtor       = nullptr;
+    fn_wstr_dtor      wstr_dtor      = nullptr;
+
+    fn_add_menupanel   add_menupanel   = nullptr;
+    fn_panel_get_btn   panel_get_btn   = nullptr;
+    fn_create_ab_tt    create_ab_tt    = nullptr;
+    fn_create_vchar    create_vchar    = nullptr;
+    fn_vchar_add_ab    vchar_add_ab    = nullptr;
+    fn_cat_basic_atk   cat_basic_atk   = nullptr;
+    fn_setup_ab_icon   setup_ab_icon   = nullptr;
+    fn_setup_pass_icon setup_pass_icon = nullptr;
+    fn_setup_item_icon setup_item_icon = nullptr;
+    fn_item_name       item_name       = nullptr;
+    fn_item_tooltip    item_tooltip    = nullptr;
+    fn_passive_name    passive_name    = nullptr;
+    fn_passive_desc    passive_desc    = nullptr;
+    fn_ab_display_name ab_display_name = nullptr;
+    fn_ab_tooltip      ab_tooltip      = nullptr;
+    fn_button_enable   button_enable   = nullptr;
+    fn_mc_reset_goto_s mc_reset_goto_s = nullptr;
+    fn_swf_find_child  swf_find_child  = nullptr;
 };
 
 FnTable g_fn;
@@ -70,6 +111,26 @@ bool ensure_resolved() {
     g_fn.str_assign      = (fn_str_assign)     addr_of_call(C_StrAssign);
     g_fn.wstr_assign     = (fn_wstr_assign)    addr_of_call(C_WStrAssign);
     g_fn.str_dtor        = (fn_str_dtor)       addr_of_call(C_GameStrDtor);
+    g_fn.wstr_dtor       = (fn_wstr_dtor)      addr_of_call(C_GameWStrDtor);
+
+    g_fn.add_menupanel   = (fn_add_menupanel)  addr_of_call(C_EntityAddMenuPanel);
+    g_fn.panel_get_btn   = (fn_panel_get_btn)  addr_of_call(C_MenuPanelGetButton);
+    g_fn.create_ab_tt    = (fn_create_ab_tt)   addr_of_call(C_CreateAbilityTooltip);
+    g_fn.create_vchar    = (fn_create_vchar)   addr_of_call(C_SceneCreateVirtualChar);
+    g_fn.vchar_add_ab    = (fn_vchar_add_ab)   addr_of_call(C_VirtualCharAddAbility);
+    g_fn.cat_basic_atk   = (fn_cat_basic_atk)  addr_of_call(C_CatDataGetBasicAttack);
+    g_fn.setup_ab_icon   = (fn_setup_ab_icon)  addr_of_call(C_SetupAbilityIcon);
+    g_fn.setup_pass_icon = (fn_setup_pass_icon)addr_of_call(C_SetupPassiveIcon);
+    g_fn.setup_item_icon = (fn_setup_item_icon)addr_of_call(C_SpawnDbSetupItemIcon);
+    g_fn.item_name       = (fn_item_name)      addr_of_call(C_SpawnDbItemName);
+    g_fn.item_tooltip    = (fn_item_tooltip)   addr_of_call(C_SpawnDbItemTooltip);
+    g_fn.passive_name    = (fn_passive_name)   addr_of_call(C_SpawnDbPassiveName);
+    g_fn.passive_desc    = (fn_passive_desc)   addr_of_call(C_SpawnDbPassiveDesc);
+    g_fn.ab_display_name = (fn_ab_display_name)addr_of_call(C_AbilityGetDisplayName);
+    g_fn.ab_tooltip      = (fn_ab_tooltip)     addr_of_call(C_AbilityGetTooltip);
+    g_fn.button_enable   = (fn_button_enable)  addr_of_call(C_ButtonEnable);
+    g_fn.mc_reset_goto_s = (fn_mc_reset_goto_s)addr_of_call(C_McResetGotoStopStr);
+    g_fn.swf_find_child  = (fn_swf_find_child) addr_of_call(C_SwfFindChild);
 
     g_fn.ok = g_fn.add_scene && g_fn.create_entity && g_fn.create_rc &&
               g_fn.create_cam && g_fn.create_renderer_empty && g_fn.renderer_init &&
@@ -77,6 +138,14 @@ bool ensure_resolved() {
               g_fn.find_child && g_fn.tb_set_text && g_fn.tb_set_color &&
               g_fn.mc_goto_stop && g_fn.cam_get_mouse &&
               g_fn.str_assign && g_fn.wstr_assign && g_fn.str_dtor;
+    g_fn.combat_bar_ok = g_fn.ok && g_fn.wstr_dtor &&
+              g_fn.add_menupanel && g_fn.panel_get_btn && g_fn.create_ab_tt &&
+              g_fn.create_vchar && g_fn.vchar_add_ab && g_fn.cat_basic_atk &&
+              g_fn.setup_ab_icon && g_fn.setup_pass_icon && g_fn.setup_item_icon &&
+              g_fn.item_name && g_fn.item_tooltip && g_fn.passive_name &&
+              g_fn.passive_desc && g_fn.ab_display_name && g_fn.ab_tooltip &&
+              g_fn.button_enable && g_fn.mc_reset_goto_s &&
+              g_fn.swf_find_child;
     if (!g_fn.ok)
         log_line("GAMEUI", "!! one or more native UI call targets did not resolve");
     return g_fn.ok;
@@ -614,6 +683,595 @@ bool gameui_read_wstring(const void* game_wstr, wchar_t* out, uint32_t cap) {
     if (n && !mem_read(chars, out, n * sizeof(wchar_t))) { out[0] = L'\0'; return false; }
     out[n] = L'\0';
     return true;
+}
+
+// --- Native battle CombatMenu bar (abilities, passives, equipment) ----------
+
+namespace {
+
+struct GameCatPassive {
+    GameStr name;
+    int32_t level = 1;
+    int32_t pad   = 0;
+};
+
+void* get_live_spawndb() {
+    const uintptr_t slot = addr_of_data(D_SpawnDatabasePtr);
+    if (!slot) return nullptr;
+    void* db = nullptr;
+    if (!mem_read((const void*)slot, &db, sizeof(db))) return nullptr;
+    return db;
+}
+
+void destroy_game_wstr(void* gw) {
+    if (!gw || !g_fn.wstr_dtor) return;
+    __try {
+        g_fn.wstr_dtor(gw);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void assign_str_field(void* dst_str, const char* s) {
+    if (!dst_str || !g_fn.str_assign) return;
+    __try {
+        g_fn.str_assign(dst_str, s ? s : "", s ? strlen(s) : 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void assign_wstr_field(void* dst_wstr, const wchar_t* ws) {
+    if (!dst_wstr || !g_fn.wstr_assign) return;
+    __try {
+        g_fn.wstr_assign(dst_wstr, ws ? ws : L"", ws ? wcslen(ws) : 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void move_wstr_into_field(void* dst_wstr, GameStr& src_wstr) {
+    if (!dst_wstr) {
+        destroy_game_wstr(src_wstr.raw);
+        return;
+    }
+    destroy_game_wstr(dst_wstr);
+    memcpy(dst_wstr, src_wstr.raw, sizeof(src_wstr.raw));
+    memset(src_wstr.raw, 0, sizeof(src_wstr.raw));
+    *(uint64_t*)(src_wstr.raw + 24) = 7;
+}
+
+void* seh_panel_get_button(void* panel, const char* name) {
+    if (!panel || !name) return nullptr;
+    GameStr gs{};
+    if (!init_game_str(gs, name)) return nullptr;
+    // MenuPanel::get_button takes std::string by value (callee destroys gs).
+    __try {
+        return g_fn.panel_get_btn(panel, gs.raw, true);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+void seh_mc_reset_goto(void* mc, const char* label) {
+    if (!mc || !label) return;
+    GameStr gs{};
+    if (!init_game_str(gs, label)) return;
+    __try {
+        g_fn.mc_reset_goto_s(mc, gs.raw);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void seh_mc_goto_str(void* mc, const char* label) {
+    seh_mc_reset_goto(mc, label);
+}
+
+void* seh_swf_find_child(void* container, const char* name) {
+    if (!container || !name) return nullptr;
+    GameStr gs{};
+    if (!init_game_str(gs, name)) return nullptr;
+    __try {
+        return g_fn.swf_find_child(container, gs.raw, false);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+void* seh_vchar_add_ability(void* vchar, const char* name) {
+    if (!vchar || !name || !name[0] || strcmp(name, "None") == 0) return nullptr;
+    GameStr gs{};
+    if (!init_game_str(gs, name)) return nullptr;
+    __try {
+        return g_fn.vchar_add_ab(vchar, gs.raw, true);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+void clear_combat_slot(void* btn) {
+    if (!btn) return;
+    void* clip = nullptr;
+    mem_read((const uint8_t*)btn + kBtn_Clip, &clip, sizeof(clip));
+    if (clip) seh_mc_reset_goto(clip, "missing");
+
+    void* nullp = nullptr;
+    uint32_t zero_u32 = 0;
+    int32_t  zero_i32 = 0;
+    int32_t  disabled = 4;
+    mem_write((uint8_t*)btn + kBtn_Userdata,           &nullp,    sizeof(nullp));
+    mem_write((uint8_t*)btn + kBtn_UserdataType,       &zero_i32, sizeof(zero_i32));
+    mem_write((uint8_t*)btn + kBtn_ExtraUserdataCount, &zero_u32, sizeof(zero_u32));
+    assign_str_field((uint8_t*)btn + kBtn_StateFrames + 4 * 32, "missing");
+    assign_wstr_field((uint8_t*)btn + kBtn_Label,   L"");
+    assign_wstr_field((uint8_t*)btn + kBtn_Tooltip, L"");
+    mem_write((uint8_t*)btn + kBtn_State, &disabled, sizeof(disabled));
+}
+
+void set_button_hoverable_disabled(void* btn) {
+    if (!btn) return;
+    __try {
+        g_fn.button_enable(btn, false);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    assign_str_field((uint8_t*)btn + kBtn_StateFrames + 4 * 32, "disabled");
+    assign_str_field((uint8_t*)btn + kBtn_StateFrames + 2 * 32, "over");
+}
+
+void set_dispobj_visible(void* obj, bool visible) {
+    if (!obj) return;
+    uint8_t flags = 0;
+    if (!mem_read((const uint8_t*)obj + kDispObj_Flags, &flags, 1)) return;
+    if (visible) flags |= 0x20u;
+    else         flags &= (uint8_t)~0x20u;
+    mem_write((uint8_t*)obj + kDispObj_Flags, &flags, 1);
+}
+
+void set_dispobj_matrix(void* obj, float sx, float sy, float tx, float ty) {
+    if (!obj) return;
+    // glaiel::swf::DisplayObject::Matrix3x2 at +0x60: { sx, sy, rx, ry, tx, ty }.
+    const float m[6] = { sx, sy, 0.0f, 0.0f, tx, ty };
+    mem_write((uint8_t*)obj + 0x60, m, sizeof(m));
+}
+
+void position_button_clip(void* btn, bool visible, float scale, float x, float y) {
+    if (!btn) return;
+    void* clip = nullptr;
+    if (!mem_read((const uint8_t*)btn + kBtn_Clip, &clip, sizeof(clip)) || !clip)
+        return;
+    set_dispobj_visible(clip, visible);
+    if (visible)
+        set_dispobj_matrix(clip, scale, scale, x, y);
+    else
+        set_dispobj_matrix(clip, 0.01f, 0.01f, -9999.0f, -9999.0f);
+}
+
+bool populate_ability_slot(void* btn, void* ability, int32_t slot_idx) {
+    clear_combat_slot(btn);
+    if (!btn || !ability) return false;
+    void* clip = nullptr;
+    if (!mem_read((const uint8_t*)btn + kBtn_Clip, &clip, sizeof(clip)) || !clip)
+        return false;
+
+    seh_mc_goto_str(clip, "up");
+
+    GameStr name_w{}, tip_w{};
+    memset(name_w.raw, 0, sizeof(name_w.raw));
+    *(uint64_t*)(name_w.raw + 24) = 7;
+    memset(tip_w.raw, 0, sizeof(tip_w.raw));
+    *(uint64_t*)(tip_w.raw + 24) = 7;
+
+    bool got_name = false, got_tip = false;
+    __try {
+        g_fn.ab_display_name(ability, name_w.raw);
+        got_name = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try {
+        g_fn.ab_tooltip(ability, tip_w.raw);
+        got_tip = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (got_name) move_wstr_into_field((uint8_t*)btn + kBtn_Label, name_w);
+    if (got_tip)  move_wstr_into_field((uint8_t*)btn + kBtn_Tooltip, tip_w);
+
+    set_button_hoverable_disabled(btn);
+
+    __try {
+        g_fn.setup_ab_icon(ability, clip, slot_idx);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return true;
+}
+
+bool populate_passive_slot(void* btn, void* spawndb, void* cat_data,
+                           const char* pname, int32_t level, int32_t slot_idx) {
+    clear_combat_slot(btn);
+    if (!btn || !spawndb || !cat_data || !pname || !pname[0] || strcmp(pname, "None") == 0)
+        return false;
+    void* clip = nullptr;
+    if (!mem_read((const uint8_t*)btn + kBtn_Clip, &clip, sizeof(clip)) || !clip)
+        return false;
+
+    seh_mc_goto_str(clip, "up");
+
+    GameStr name_w{}, tip_w{};
+    memset(name_w.raw, 0, sizeof(name_w.raw));
+    *(uint64_t*)(name_w.raw + 24) = 7;
+    memset(tip_w.raw, 0, sizeof(tip_w.raw));
+    *(uint64_t*)(tip_w.raw + 24) = 7;
+
+    GameStr arg1{};
+    if (init_game_str(arg1, pname)) {
+        bool ok = false;
+        __try {
+            g_fn.passive_name(spawndb, name_w.raw, arg1.raw, level, cat_data, nullptr);
+            ok = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (ok) move_wstr_into_field((uint8_t*)btn + kBtn_Label, name_w);
+    }
+
+    GameStr arg2{};
+    if (init_game_str(arg2, pname)) {
+        bool ok = false;
+        __try {
+            g_fn.passive_desc(spawndb, tip_w.raw, arg2.raw, level, cat_data, nullptr);
+            ok = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (ok) move_wstr_into_field((uint8_t*)btn + kBtn_Tooltip, tip_w);
+    }
+
+    set_button_hoverable_disabled(btn);
+
+    GameCatPassive cp{};
+    if (init_game_str(cp.name, pname)) {
+        cp.level = level;
+        // SetupPassiveIcon takes CatPassive by value (callee destroys cp.name).
+        __try {
+            g_fn.setup_pass_icon(&cp, clip, cat_data, slot_idx);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return true;
+}
+
+bool populate_item_slot(void* btn, void* spawndb, uint8_t* equip) {
+    clear_combat_slot(btn);
+    if (!btn || !spawndb || !equip) return false;
+
+    int64_t uid = -1;
+    char ename[96] = {};
+    if (!mem_read(equip + kEquipment_Uid, &uid, sizeof(uid)) || uid == -1)
+        return false;
+    if (!gameui_read_string(equip + kEquipment_Name, ename, sizeof(ename)) || !ename[0])
+        return false;
+
+    void* clip = nullptr;
+    if (!mem_read((const uint8_t*)btn + kBtn_Clip, &clip, sizeof(clip)) || !clip)
+        return false;
+
+    seh_mc_goto_str(clip, "up");
+
+    // Set normal equipped shell frame (3), hide quest background, draw item icon.
+    if (void* shell = seh_swf_find_child(clip, "shell"))
+        seh_mc_goto_stop(shell, 3);
+    if (void* questbg = seh_swf_find_child(clip, "questbg"))
+        set_dispobj_visible(questbg, false);
+    if (void* item_mc = seh_swf_find_child(clip, "item")) {
+        __try {
+            g_fn.setup_item_icon(spawndb, equip + kEquipment_Name, equip, item_mc);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    GameStr name_w{}, tip_w{};
+    memset(name_w.raw, 0, sizeof(name_w.raw));
+    *(uint64_t*)(name_w.raw + 24) = 7;
+    memset(tip_w.raw, 0, sizeof(tip_w.raw));
+    *(uint64_t*)(tip_w.raw + 24) = 7;
+
+    bool got_name = false, got_tip = false;
+    __try {
+        g_fn.item_name(spawndb, name_w.raw, equip);
+        got_name = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try {
+        g_fn.item_tooltip(spawndb, tip_w.raw, equip);
+        got_tip = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (got_name) move_wstr_into_field((uint8_t*)btn + kBtn_Label, name_w);
+    if (got_tip)  move_wstr_into_field((uint8_t*)btn + kBtn_Tooltip, tip_w);
+
+    set_button_hoverable_disabled(btn);
+    return true;
+}
+
+} // namespace
+
+void* gameui_add_ability_tooltip(GameUiOverlay& ov) {
+    if (!gameui_is_alive(ov) || !ensure_resolved() || !g_fn.combat_bar_ok)
+        return nullptr;
+    void* tt_ent = seh_create_entity(ov.scene);
+    if (!tt_ent) return nullptr;
+    __try {
+        return g_fn.create_ab_tt(ov.scene, tt_ent);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+bool gameui_add_cat_kit_icons(GameUiOverlay& ov, void* cat_data,
+                              double cx, double cy, double card_scale,
+                              GameUiCombatBar& out, GameUiCatKit& kit) {
+    out = {};
+    if (!gameui_is_alive(ov) || !cat_data || !ensure_resolved() || !g_fn.combat_bar_ok)
+        return false;
+
+    void* ent = seh_create_entity(ov.scene);
+    if (!ent) return false;
+    void* ren = seh_create_renderer(ov.scene, ent, "CombatMenu");
+    if (!ren) return false;
+
+    // Stop CombatMenu's root timeline immediately so child button clips stay
+    // fixed on a single frame and never loop/recreate at 60 fps.
+    if (!gameui_goto_label(ren, nullptr, "morepassives"))
+        gameui_goto_frame(ren, nullptr, 0);
+
+    set_renderer_layer(ren, 32);
+
+    void* tr = nullptr;
+    mem_read((const uint8_t*)ren + kRenderer_Transform, &tr, sizeof(tr));
+
+    void* panel = nullptr;
+    __try {
+        panel = g_fn.add_menupanel(ent);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        panel = nullptr;
+    }
+    if (!panel) return false;
+
+    out.entity    = ent;
+    out.renderer  = ren;
+    out.transform = tr;
+    out.panel     = panel;
+
+    out.btn_attack = seh_panel_get_button(panel, "bAttack");
+    out.btn_move   = seh_panel_get_button(panel, "bMove");
+    const char* spell_names[4]   = { "bSpell0", "bSpell1", "bSpell2", "bSpell3" };
+    const char* passive_names[4] = { "bPassive0", "bPassive1", "bPassive2", "bPassive3" };
+    const char* item_names[5]    = { "bItem0", "bItem1", "bItem2", "bItem3", "bItem4" };
+    for (int i = 0; i < 4; ++i) out.btn_spell[i]   = seh_panel_get_button(panel, spell_names[i]);
+    for (int i = 0; i < 4; ++i) out.btn_passive[i] = seh_panel_get_button(panel, passive_names[i]);
+    for (int i = 0; i < 5; ++i) out.btn_item[i]    = seh_panel_get_button(panel, item_names[i]);
+
+    // Hide the battle frame/background and unused battle-only slots.
+    const char* hide_names[] = {
+        "bg", "hpregen", "manaregen",
+        "bEnd", "bBonusSpell", "bPassive4", "bPassive5", "bPassive6"
+    };
+    for (const char* hn : hide_names)
+        gameui_set_child_visible(ren, hn, false);
+
+    // Build VirtualCharacter + Ability* handles for this cat.
+    void* spawndb = get_live_spawndb();
+    if (!kit.built) {
+        kit.built = true;
+        __try {
+            kit.vchar = g_fn.create_vchar(ov.scene, cat_data);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            kit.vchar = nullptr;
+        }
+        if (kit.vchar) {
+            GameStr atk_s{};
+            memset(atk_s.raw, 0, sizeof(atk_s.raw));
+            *(uint64_t*)(atk_s.raw + 24) = 15;
+            bool got_atk = false;
+            __try {
+                g_fn.cat_basic_atk(cat_data, atk_s.raw);
+                got_atk = true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            if (got_atk) {
+                char atk_name[96] = {};
+                if (gameui_read_string(atk_s.raw, atk_name, sizeof(atk_name)))
+                    kit.ab_attack = seh_vchar_add_ability(kit.vchar, atk_name);
+                destroy_game_str(atk_s);
+            }
+
+            char move_name[96] = {};
+            if (gameui_read_string((const uint8_t*)cat_data + kCatData_Abilities + kCatAbilities_Move,
+                                   move_name, sizeof(move_name)))
+                kit.ab_move = seh_vchar_add_ability(kit.vchar, move_name);
+
+            for (int i = 0; i < 4; ++i) {
+                char sp_name[96] = {};
+                if (gameui_read_string((const uint8_t*)cat_data + kCatData_Abilities + kCatAbilities_Spells + i * 32,
+                                       sp_name, sizeof(sp_name)))
+                    kit.ab_spell[i] = seh_vchar_add_ability(kit.vchar, sp_name);
+            }
+        }
+    }
+
+    // Populate slots and collect only non-empty buttons for compact placement.
+    void* active_btns[6]  = {};
+    int   active_count    = 0;
+    auto push_ab = [&](void* btn, void* ab, int32_t slot) {
+        if (populate_ability_slot(btn, ab, slot)) active_btns[active_count++] = btn;
+        else position_button_clip(btn, false, 0.01f, -9999.0f, -9999.0f);
+    };
+    push_ab(out.btn_attack, kit.ab_attack, 10);
+    push_ab(out.btn_move,   kit.ab_move,   9);
+    for (int i = 0; i < 4; ++i)
+        push_ab(out.btn_spell[i], kit.ab_spell[i], i);
+
+    void* passive_btns[4] = {};
+    int   passive_count   = 0;
+    for (int i = 0; i < 4; ++i) {
+        const uint8_t* p = (const uint8_t*)cat_data + kCatData_Abilities + kCatAbilities_Passives + i * kCatPassive_Size;
+        char pname[96] = {};
+        int32_t level = 1;
+        gameui_read_string(p, pname, sizeof(pname));
+        mem_read(p + kCatPassive_Level, &level, sizeof(level));
+        if (populate_passive_slot(out.btn_passive[i], spawndb, cat_data, pname, level, i))
+            passive_btns[passive_count++] = out.btn_passive[i];
+        else
+            position_button_clip(out.btn_passive[i], false, 0.01f, -9999.0f, -9999.0f);
+    }
+
+    void* item_btns[5] = {};
+    int   item_count   = 0;
+    for (int i = 0; i < (int)kCatData_EquipmentSlots; ++i) {
+        uint8_t* eq = (uint8_t*)cat_data + kCatData_Equipment + i * kEquipment_Size;
+        if (populate_item_slot(out.btn_item[i], spawndb, eq))
+            item_btns[item_count++] = out.btn_item[i];
+        else
+            position_button_clip(out.btn_item[i], false, 0.01f, -9999.0f, -9999.0f);
+    }
+
+    // Arrange icons tightly around the cat card:
+    //   Left column  : active abilities (attack, move, spells)
+    //   Right column : passives
+    //   Bottom row   : equipped gear (head, face, neck, weapon, trinket)
+    const float  icon_s  = static_cast<float>(0.50 * card_scale);
+    const double left_x  = cx - 118.0 * card_scale;
+    const double right_x = cx + 118.0 * card_scale;
+    const double ab_step = 38.0 * card_scale;
+    const double pa_step = 44.0 * card_scale;
+    const double eq_step = 44.0 * card_scale;
+    const double eq_y    = cy + 162.0 * card_scale;
+
+    for (int i = 0; i < active_count; ++i) {
+        const double y = cy + (i - (active_count - 1) * 0.5) * ab_step;
+        position_button_clip(active_btns[i], true, icon_s, (float)left_x, (float)y);
+    }
+    for (int i = 0; i < passive_count; ++i) {
+        const double y = cy + (i - (passive_count - 1) * 0.5) * pa_step;
+        position_button_clip(passive_btns[i], true, icon_s, (float)right_x, (float)y);
+    }
+    for (int i = 0; i < item_count; ++i) {
+        const double x = cx + (i - (item_count - 1) * 0.5) * eq_step;
+        position_button_clip(item_btns[i], true, icon_s, (float)x, (float)eq_y);
+    }
+
+    return true;
+}
+
+bool gameui_add_combat_bar(GameUiOverlay& ov, GameUiCombatBar& out) {
+    out = {};
+    if (!gameui_is_alive(ov) || !ensure_resolved() || !g_fn.combat_bar_ok)
+        return false;
+
+    void* ent = seh_create_entity(ov.scene);
+    if (!ent) return false;
+    void* ren = seh_create_renderer(ov.scene, ent, "CombatMenu");
+    if (!ren) return false;
+
+    // Stop CombatMenu's root timeline on a fixed layout frame ("morepassives"
+    // shows 4 spells + 4 passives + 5 equipment slots) so it doesn't loop
+    // through all layout frames at 60 fps and reset child button clips.
+    if (!gameui_goto_label(ren, nullptr, "morepassives"))
+        gameui_goto_frame(ren, nullptr, 0);
+
+    set_renderer_layer(ren, 41);
+
+    void* tr = nullptr;
+    mem_read((const uint8_t*)ren + kRenderer_Transform, &tr, sizeof(tr));
+
+    void* panel = nullptr;
+    __try {
+        panel = g_fn.add_menupanel(ent);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        panel = nullptr;
+    }
+    if (!panel) return false;
+
+    void* tt_ent = seh_create_entity(ov.scene);
+    void* tt_comp = nullptr;
+    if (tt_ent) {
+        __try {
+            tt_comp = g_fn.create_ab_tt(ov.scene, tt_ent);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            tt_comp = nullptr;
+        }
+    }
+
+    out.entity       = ent;
+    out.renderer     = ren;
+    out.transform    = tr;
+    out.panel        = panel;
+    out.tooltip_comp = tt_comp;
+
+    out.btn_attack = seh_panel_get_button(panel, "bAttack");
+    out.btn_move   = seh_panel_get_button(panel, "bMove");
+    const char* spell_names[4]   = { "bSpell0", "bSpell1", "bSpell2", "bSpell3" };
+    const char* passive_names[4] = { "bPassive0", "bPassive1", "bPassive2", "bPassive3" };
+    const char* item_names[5]    = { "bItem0", "bItem1", "bItem2", "bItem3", "bItem4" };
+    for (int i = 0; i < 4; ++i) out.btn_spell[i]   = seh_panel_get_button(panel, spell_names[i]);
+    for (int i = 0; i < 4; ++i) out.btn_passive[i] = seh_panel_get_button(panel, passive_names[i]);
+    for (int i = 0; i < 5; ++i) out.btn_item[i]    = seh_panel_get_button(panel, item_names[i]);
+
+    // Hide battle-only / unused slots.
+    const char* hide_names[] = { "bEnd", "bBonusSpell", "bPassive4", "bPassive5", "bPassive6" };
+    for (const char* hn : hide_names)
+        gameui_set_child_visible(ren, hn, false);
+
+    return true;
+}
+
+void gameui_combat_bar_show_cat(GameUiOverlay& ov, GameUiCombatBar& bar,
+                                void* cat_data, GameUiCatKit& kit) {
+    if (!gameui_is_alive(ov) || !bar.panel || !cat_data || !g_fn.combat_bar_ok)
+        return;
+
+    void* spawndb = get_live_spawndb();
+
+    // Lazily create VirtualCharacter + Ability* handles once per cat card.
+    if (!kit.built) {
+        kit.built = true;
+        __try {
+            kit.vchar = g_fn.create_vchar(ov.scene, cat_data);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            kit.vchar = nullptr;
+        }
+        if (kit.vchar) {
+            // Basic attack (respects weapon overrides).
+            GameStr atk_s{};
+            memset(atk_s.raw, 0, sizeof(atk_s.raw));
+            *(uint64_t*)(atk_s.raw + 24) = 15;
+            bool got_atk = false;
+            __try {
+                g_fn.cat_basic_atk(cat_data, atk_s.raw);
+                got_atk = true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            if (got_atk) {
+                char atk_name[96] = {};
+                if (gameui_read_string(atk_s.raw, atk_name, sizeof(atk_name)))
+                    kit.ab_attack = seh_vchar_add_ability(kit.vchar, atk_name);
+                destroy_game_str(atk_s);
+            }
+
+            // Move ability.
+            char move_name[96] = {};
+            if (gameui_read_string((const uint8_t*)cat_data + kCatData_Abilities + kCatAbilities_Move,
+                                   move_name, sizeof(move_name)))
+                kit.ab_move = seh_vchar_add_ability(kit.vchar, move_name);
+
+            // 4 active spells.
+            for (int i = 0; i < 4; ++i) {
+                char sp_name[96] = {};
+                if (gameui_read_string((const uint8_t*)cat_data + kCatData_Abilities + kCatAbilities_Spells + i * 32,
+                                       sp_name, sizeof(sp_name)))
+                    kit.ab_spell[i] = seh_vchar_add_ability(kit.vchar, sp_name);
+            }
+        }
+    }
+
+    populate_ability_slot(bar.btn_attack, kit.ab_attack, 10);
+    populate_ability_slot(bar.btn_move,   kit.ab_move,   9);
+    for (int i = 0; i < 4; ++i)
+        populate_ability_slot(bar.btn_spell[i], kit.ab_spell[i], i);
+
+    for (int i = 0; i < 4; ++i) {
+        const uint8_t* p = (const uint8_t*)cat_data + kCatData_Abilities + kCatAbilities_Passives + i * kCatPassive_Size;
+        char pname[96] = {};
+        int32_t level = 1;
+        gameui_read_string(p, pname, sizeof(pname));
+        mem_read(p + kCatPassive_Level, &level, sizeof(level));
+        populate_passive_slot(bar.btn_passive[i], spawndb, cat_data, pname, level, i);
+    }
+
+    for (int i = 0; i < (int)kCatData_EquipmentSlots; ++i) {
+        uint8_t* eq = (uint8_t*)cat_data + kCatData_Equipment + i * kEquipment_Size;
+        populate_item_slot(bar.btn_item[i], spawndb, eq);
+    }
 }
 
 } // namespace mgmp

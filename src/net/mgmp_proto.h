@@ -52,7 +52,7 @@ namespace mgmp {
 // So: if the value a peer puts in a message changes meaning, that is a protocol
 // change even when every byte stays where it was. Refusing at connect is free;
 // diagnosing it from a turn-0 halt is not.
-constexpr uint32_t kProtoVersion = 41;  // Adventure shop purchases and exit
+constexpr uint32_t kProtoVersion = 43;  // House remote pipe donation & NPC progress sync
 
 // A frame's payload may not exceed this. RUNSTATE (phase 5) is the only message
 // that will ever approach it; everything in phase 4 is under 128 bytes.
@@ -139,6 +139,7 @@ enum MsgType : uint8_t {
     MSG_SCREEN_PING         = 34, // both: remote click ripple (LMB) & 3s screen ping (MMB)
     MSG_DRAFT_PICK          = 35, // client -> host: toggle ownership pick of a cat_uid
     MSG_DRAFT_STATE         = 36, // host -> peers: full adventure cat ownership draft state
+    MSG_HOUSE_PIPE          = 37, // both: remote HousePipe donation drawer & NPC progress sync
 };
 
 // A save file is a plain sqlite3 database (the shipped ones start with the
@@ -412,7 +413,7 @@ struct InventoryMsg {
 struct ActionMsg {
     uint64_t battle_id  = 0;   // which battle; see above
     uint32_t turn       = 0;
-    uint8_t  actor      = 0;   // cat index; a cross-check, see mgmp_lockstep.h
+    uint32_t actor      = 0;   // battle-local actor ID, see mgmp_lockstep.h
     uint8_t  type       = 0;   // 2 = ability, 3 = end turn. Never 6 or 7.
     uint8_t  slot_kind  = 0;   // SLOT_* from mgmp_ability.h
     uint8_t  slot_index = 0;
@@ -513,7 +514,7 @@ struct ControlMsg {
 // uses -- resolve by slot, validate by name.
 struct AimMsg {
     uint64_t battle_id  = 0;   // which battle; a mismatch is dropped, not halted
-    uint8_t  cat        = 0;   // roster index of the cat being aimed
+    uint32_t cat        = 0;   // battle-local actor ID of the cat being aimed
     uint8_t  active     = 0;   // 0 = stopped aiming, draw nothing
     uint8_t  slot_kind  = 0;   // SLOT_* from mgmp_ability.h
     uint8_t  slot_index = 0;
@@ -676,6 +677,7 @@ constexpr uint8_t kChoiceEventVote     = 3;
 constexpr uint8_t kChoiceLevelUpVote   = 4;
 constexpr uint8_t kChoiceShopPurchase  = 5;
 constexpr uint8_t kChoiceShopExit      = 6;
+constexpr uint8_t kChoiceAbilityReplace = 7;
 
 // Host -> client, once the host has committed to a save file.
 //
@@ -911,6 +913,30 @@ struct HouseFurnitureMsg {
     uint8_t* data       = nullptr; // encode: borrowed. decode: owned by receiver (free()).
 };
 
+enum class PipeAction : uint8_t {
+    Open         = 0, // host -> owner client: open NPCMapDrawer for cat_id
+    Donate       = 1, // client -> host: donate cat_id to npc (0..7, 7=trash/steven)
+    Cancel       = 2, // client -> host: closed NPCMapDrawer without donating; eject cat
+    SyncProgress = 3, // host -> all clients: updated 8-NPC progress snapshot
+    Close        = 4, // host -> client: abort/close remote pipe drawer
+};
+
+struct NpcProgressEntry {
+    int32_t goal_favor            = 0;
+    uint8_t current_goal_complete = 0;
+    uint8_t unlocked              = 0;
+    uint8_t accepting_cats        = 0;
+};
+
+struct HousePipeMsg {
+    uint32_t         generation = 0;
+    uint8_t          action     = 0; // PipeAction
+    uint8_t          npc        = 0; // 0..7 for Donate
+    uint8_t          has_prog   = 0; // 1 if prog[8] is populated
+    int64_t          cat_id     = 0;
+    NpcProgressEntry prog[8]    = {};
+};
+
 struct ScreenPingMsg {
     uint8_t  kind      = 0;   // 0 = click ripple (LMB), 1 = 3s ping (MMB)
     uint8_t  in_house  = 0;   // 0 = screen space, 1 = house world, 2 = battle tile (wx=tx, wy=ty)
@@ -1124,7 +1150,7 @@ inline uint32_t enc_action(uint8_t* p, uint32_t cap, const ActionMsg& a) {
     w.u8v(MSG_ACTION);
     w.u64v(a.battle_id);
     w.u32v(a.turn);
-    w.u8v(a.actor); w.u8v(a.type); w.u8v(a.slot_kind); w.u8v(a.slot_index);
+    w.u32v(a.actor); w.u8v(a.type); w.u8v(a.slot_kind); w.u8v(a.slot_index);
     w.u8v(a.b30);   w.u8v(a.b31);
     w.i32v(a.tx); w.i32v(a.ty); w.i32v(a.dx); w.i32v(a.dy);
     w.str(a.gon);
@@ -1278,7 +1304,7 @@ inline uint32_t enc_aim(uint8_t* p, uint32_t cap, const AimMsg& m) {
     Writer w(p, cap);
     w.u8v(MSG_AIM);
     w.u64v(m.battle_id);
-    w.u8v(m.cat); w.u8v(m.active); w.u8v(m.slot_kind); w.u8v(m.slot_index);
+    w.u32v(m.cat); w.u8v(m.active); w.u8v(m.slot_kind); w.u8v(m.slot_index);
     w.u32v((uint32_t)m.tx); w.u32v((uint32_t)m.ty);
     w.u32v((uint32_t)m.dx); w.u32v((uint32_t)m.dy);
     w.str(m.gon);
@@ -1519,6 +1545,25 @@ inline uint32_t enc_house_furniture(uint8_t* p, uint32_t cap, const HouseFurnitu
     return w.ok ? w.len : 0;
 }
 
+inline uint32_t enc_house_pipe(uint8_t* p, uint32_t cap, const HousePipeMsg& m) {
+    Writer w(p, cap);
+    w.u8v(MSG_HOUSE_PIPE);
+    w.u32v(m.generation);
+    w.u8v(m.action);
+    w.u8v(m.npc);
+    w.u8v(m.has_prog);
+    w.u64v((uint64_t)m.cat_id);
+    if (m.has_prog) {
+        for (int i = 0; i < 8; ++i) {
+            w.i32v(m.prog[i].goal_favor);
+            w.u8v(m.prog[i].current_goal_complete);
+            w.u8v(m.prog[i].unlocked);
+            w.u8v(m.prog[i].accepting_cats);
+        }
+    }
+    return w.ok ? w.len : 0;
+}
+
 inline uint32_t enc_screen_ping(uint8_t* p, uint32_t cap, const ScreenPingMsg& m) {
     Writer w(p, cap);
     w.u8v(MSG_SCREEN_PING);
@@ -1592,7 +1637,7 @@ inline bool dec_welcome(Reader& r, Welcome& v) {
 inline bool dec_action(Reader& r, ActionMsg& a) {
     a.battle_id = r.u64v();
     a.turn = r.u32v();
-    a.actor = r.u8v(); a.type = r.u8v(); a.slot_kind = r.u8v(); a.slot_index = r.u8v();
+    a.actor = r.u32v(); a.type = r.u8v(); a.slot_kind = r.u8v(); a.slot_index = r.u8v();
     a.b30 = r.u8v();   a.b31 = r.u8v();
     a.tx = r.i32v(); a.ty = r.i32v(); a.dx = r.i32v(); a.dy = r.i32v();
     r.str(a.gon, sizeof(a.gon));
@@ -1687,7 +1732,7 @@ inline bool dec_peers(Reader& r, PeersMsg& v) {
 
 inline bool dec_aim(Reader& r, AimMsg& m) {
     m.battle_id  = r.u64v();
-    m.cat        = r.u8v();
+    m.cat        = r.u32v();
     m.active     = r.u8v();
     m.slot_kind  = r.u8v();
     m.slot_index = r.u8v();
@@ -1974,6 +2019,25 @@ inline bool dec_house_furniture(Reader& r, HouseFurnitureMsg& m) {
     return true;
 }
 
+inline bool dec_house_pipe(Reader& r, HousePipeMsg& m) {
+    m = {};
+    m.generation = r.u32v();
+    m.action     = r.u8v();
+    m.npc        = r.u8v();
+    m.has_prog   = r.u8v();
+    m.cat_id     = (int64_t)r.u64v();
+    if (!r.ok) return false;
+    if (m.has_prog) {
+        for (int i = 0; i < 8; ++i) {
+            m.prog[i].goal_favor            = r.i32v();
+            m.prog[i].current_goal_complete = r.u8v();
+            m.prog[i].unlocked              = r.u8v();
+            m.prog[i].accepting_cats        = r.u8v();
+        }
+    }
+    return r.ok;
+}
+
 inline bool dec_screen_ping(Reader& r, ScreenPingMsg& m) {
     m.kind      = r.u8v();
     m.in_house  = r.u8v();
@@ -2053,6 +2117,7 @@ inline const char* msg_name(uint8_t t) {
         case MSG_SCREEN_PING: return "SCREEN_PING";
         case MSG_DRAFT_PICK:  return "DRAFT_PICK";
         case MSG_DRAFT_STATE: return "DRAFT_STATE";
+        case MSG_HOUSE_PIPE:  return "HOUSE_PIPE";
         default:          return "?";
     }
 }

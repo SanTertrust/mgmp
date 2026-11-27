@@ -49,4 +49,5 @@ Shared-run co-op multiplayer for Mewgenics (2–4 players, direct-IP TCP, inject
   - Hooking static `SDL_*` stubs instead of `SDL_DYNAPI` `.data` slots (overwritten at runtime by `SDL_InitDynamicAPI`).
   - `MewDirector::ContinueAdventure` live-apply (unconditionally destroys `House` and frees the live cat registry).
   - Vtable-slot name propagation across game updates (MSVC ICF folds ~1600 empty virtuals into one function).
+  - Creating a bare SWF `glaiel::Renderer` (`Renderer::init`) without its native controller: every SWF `MovieClip` starts with `playing = true`, and Mewgenics stores UI layouts/states on root timeline frames (`CatTest`, `CombatMenu`, buttons, etc.), so an unstopped clip cycles all states at 60 fps. Always call `gotoAndStop` (`gameui_goto_label` / `gameui_goto_frame`) immediately after creating a `Renderer` unless the root timeline is genuinely meant to loop.
   - Detailed per-module invariants live in the module headers/comments (`mgmp_lockstep.cpp`, `mgmp_catsync.cpp`, `mgmp_house.cpp`, `mgmp_overlay.cpp`, `mgmp_cursor.cpp`) — read them before editing.

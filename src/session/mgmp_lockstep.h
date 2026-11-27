@@ -35,6 +35,10 @@
 // stable *within* one battle (they are only unstable across runs, which is what
 // runs C/D measured -- 0 of 21 matched).
 //
+// Mid-battle spawns keep the starting roster intact. Their ownership follows
+// the source's starting slot, and new human actors get IDs in the order they
+// first request input. Replaying turns reconstructs the same IDs.
+//
 // CONTROL IS A SPLIT OF INPUT, NOT OF STATE. Both peers simulate every cat
 // identically. `net_control` only says which cats local input may decide for.
 // For every other cat this module overwrites GetChoice unconditionally, which
@@ -86,6 +90,9 @@ bool lockstep_pre_player_choice(void* brain, void* out);
 // Captures and publishes real human decisions (ability or end-turn).
 void lockstep_post_player_choice(void* brain, void* out);
 
+// Native Character::OnSpawnCharacter, before spawn passives can spawn again.
+void lockstep_on_spawn_character(const void* spawner, const void* child);
+
 // Called from the ApplyTurnAction hook, before the original runs. Clears the
 // outstanding-send guard and validates that what landed is what we expected.
 void lockstep_on_applied(const void* action, const void* actor);
@@ -131,9 +138,7 @@ bool lockstep_local_actor();
 // value for as long as a decision stays cached -- fine for fading a cursor,
 // wrong for a menu that is on screen across that whole window.
 //
-// Answers false for everything it cannot PROVE: no session, no snapshot, a cat
-// that is not in the roster (a summon), or an AI cat. The caller is cosmetic,
-// and a menu greyed out when it should not be reads as a bug in the game.
+// Also covers human-controlled summons before they first request input.
 bool lockstep_peer_owns_character(const void* character);
 
 // --- diagnostics ------------------------------------------------------------
@@ -179,11 +184,8 @@ bool lockstep_in_battle();
 // Brain::UpdateDecision and `end` on the way out: whatever the preview turned
 // the cat to is put back, leaving facing written only by committed actions.
 // Both are inert outside a net session. See the long note on the definitions.
-// Everything mgmp_aim needs about one character, answered once: is it a HUMAN
-// cat in this battle's roster at all, which index, and does the PEER own it.
-// False for a summon, for an AI cat and outside a battle -- an aim preview is
-// meaningless in all three cases.
-bool lockstep_aim_subject(const void* character, uint8_t& cat, bool& peer_owns);
+// The battle-local ID and ownership of a character registered for human input.
+bool lockstep_aim_subject(const void* character, uint32_t& cat, bool& peer_owns);
 
 void     lockstep_preview_facing_begin(void* brain);
 void     lockstep_preview_facing_end();
@@ -191,7 +193,7 @@ uint32_t lockstep_preview_facing_count();
 
 // --- the state fence -------------------------------------------------------
 //
-// Snapshot every snapped cat's simulation state, run something, then check that
+// Snapshot the live combatants (including summons), run something, then check that
 // none of it moved. Built for mgmp_aim, which calls a function INTO the game on
 // the one peer that does not own the cat -- the shape where any state write is
 // a divergence by construction.
@@ -202,8 +204,7 @@ uint32_t lockstep_preview_facing_count();
 // divergence and inventing a value for it would hide that. Returns the number
 // of cats that changed, and names the first few in the log.
 //
-// Cheap enough for a per-frame caller: one pass over the roster, no allocation,
-// and it returns immediately when lockstep is not in a battle.
+// Scratch storage is reused between frames.
 void     lockstep_state_fence_begin();
 uint32_t lockstep_state_fence_end(const char* what);
 uint32_t lockstep_state_fence_hits();

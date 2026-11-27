@@ -31,6 +31,10 @@ add_executable(test_split test_split.cpp)
 target_include_directories(test_split PRIVATE ${CMAKE_SOURCE_DIR}/src/session)
 add_test(NAME test_split COMMAND test_split)
 
+add_executable(test_spawn_control test_spawn_control.cpp)
+target_include_directories(test_spawn_control PRIVATE ${CMAKE_SOURCE_DIR}/src/session)
+add_test(NAME test_spawn_control COMMAND test_spawn_control)
+
 add_executable(test_draft test_draft.cpp)
 target_include_directories(test_draft PRIVATE ${CMAKE_SOURCE_DIR}/src/session ${CMAKE_SOURCE_DIR}/src/net)
 add_test(NAME test_draft COMMAND test_draft)
@@ -57,6 +61,6 @@ target_compile_definitions(test_config PRIVATE
     WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS NOMINMAX)
 add_test(NAME test_config COMMAND test_config)
 
-foreach(t test_proto test_hashring test_timedelay test_barrier test_split test_draft test_battleid test_config)
+foreach(t test_proto test_hashring test_timedelay test_barrier test_split test_spawn_control test_draft test_battleid test_config)
     target_compile_options(${t} PRIVATE /W3)
 endforeach()

@@ -106,6 +106,12 @@ enum Target : int {
     T_ShopUpdate,
     T_ShopExit,               // Shop::initShop exit button lambda
     T_ShopCandyLevel,         // candy transition callback
+    T_OnSpawnCharacter,       // glaiel::Character::OnSpawnCharacter(Character*, Ability*)
+    T_HousePipeUpdate,        // glaiel::HousePipe::update()
+    T_NPCMapDonateCat,        // glaiel::NPCMapDrawer::DonateCat()
+    T_GlobalProgGainFavor,    // glaiel::GlobalProgressionData::GainFavor(NPC, CatData*, int)
+    T_AbilityChooserUpdate,   // glaiel::AbilityChooser::update()
+    T_AbilityChooserClose,    // glaiel::AbilityChooser::close(int)
     T_COUNT
 };
 
@@ -511,6 +517,12 @@ static const TargetDesc kTargets[T_COUNT] = {
     { 0x00797EA0, "SHOPUPD",     "glaiel::Shop::update" },
     { 0x0079BFC0, "SHOPEXIT",    "glaiel::Shop::initShop exit callback" },
     { 0x0079C8B0, "SHOPLVL",     "candy level-up transition callback" },
+    { 0x0011C0A0, "CHARSPAWN",   "glaiel::Character::OnSpawnCharacter" },
+    { 0x002082D0, "HPIPEUPD",    "glaiel::HousePipe::update" },
+    { 0x0027DAC0, "NPCDONATE",   "glaiel::NPCMapDrawer::DonateCat" },
+    { 0x001C1650, "NPCFAVOR",    "glaiel::GlobalProgressionData::GainFavor" },
+    { 0x00053D30, "ACUPD",       "glaiel::AbilityChooser::update" },
+    { 0x00053D70, "ACCLOSE",     "glaiel::AbilityChooser::close(int)" },
 };
 
 // Coarse module guard, checked before the per-target signatures.
@@ -641,6 +653,34 @@ enum Call : int {
     C_MovieClipGotoAndStop,    // void(swf::MovieClip*, int frame)
     C_CatTempStatsClear,       // void(CatTemporaryStats*) -- clears passives_next_fight before unpack
     C_RendererGetWorldPos,     // Vec2D*(Renderer*, Vec2D* out, const Vec2D* local, DisplayObject*, double scale)
+
+    // --- draft combat-bar inspection (mgmp_gameui.cpp / mgmp_draft.cpp) --
+    C_EntityAddMenuPanel,      // MenuPanel*(Entity*)
+    C_MenuPanelGetButton,      // Button*(MenuPanel*, std::string, bool create)
+    C_CreateAbilityTooltip,    // AbilityTooltip*(Scene*, Entity*)
+    C_SceneCreateVirtualChar,  // VirtualCharacter*(Scene*, const CatData&)
+    C_VirtualCharAddAbility,   // Ability*(VirtualCharacter*, std::string, bool)
+    C_CatDataGetBasicAttack,   // std::string*(CatData*, std::string* retstr)
+    C_SetupAbilityIcon,        // void(Ability*, swf::MovieClip*, int slot)
+    C_SetupPassiveIcon,        // void(CatPassive* by_val, swf::MovieClip*, const CatData*, int slot)
+    C_SpawnDbSetupItemIcon,    // void(SpawnDatabase*, const std::string& name, Equipment*, swf::DisplayObject*)
+    C_SpawnDbItemName,         // std::wstring*(SpawnDatabase*, std::wstring* retstr, Equipment*)
+    C_SpawnDbItemTooltip,      // std::wstring*(SpawnDatabase*, std::wstring* retstr, Equipment*)
+    C_SpawnDbPassiveName,      // std::wstring*(SpawnDatabase*, std::wstring* retstr, std::string by_val, int level, const CatData*, Character*)
+    C_SpawnDbPassiveDesc,      // std::wstring*(SpawnDatabase*, std::wstring* retstr, std::string by_val, int level, const CatData*, Character*)
+    C_AbilityGetDisplayName,   // std::wstring*(Ability*, std::wstring* retstr)
+    C_AbilityGetTooltip,       // std::wstring*(Ability*, std::wstring* retstr)
+    C_ButtonEnable,            // void(Button*, bool)
+    C_McResetGotoStopStr,      // void(swf::MovieClip*, std::string by_val)
+    C_SwfFindChild,            // swf::DisplayObject*(swf::DisplayObjectContainer*, std::string by_val, bool)
+    C_GameWStrDtor,            // void(std::wstring*) -- _Tidy_deallocate
+
+    // --- remote house pipe donation (mgmp_house_physics.cpp) -------------
+    C_HouseCatRunAway,         // void(HouseCat*)
+    C_HouseDrawerDoOnOpen,     // void(HouseDrawerPanel*)
+    C_HouseDrawerDoOnClose,    // void(HouseDrawerPanel*)
+    C_HouseDrawerRefreshNav,   // void(HouseDrawerUI*)
+    C_HouseDrawerClose,        // void(HouseDrawerPanel*)
     C_COUNT
 };
 
@@ -919,6 +959,32 @@ static const CallDesc kCalls[C_COUNT] = {
     { 0x009A8A20, "glaiel::swf::MovieClip::gotoAndStop(int)" },
     { 0x000B6F30, "glaiel::CatTemporaryStats::clear" },
     { 0x0097B400, "glaiel::Renderer::get_world_position" },
+
+    // --- draft combat-bar inspection (mgmp_gameui.cpp / mgmp_draft.cpp) --
+    { 0x000E9340, "glaiel::Entity::AddComponent<MenuPanel>" },
+    { 0x0097C4F0, "glaiel::MenuPanel::get_button" },
+    { 0x00054840, "glaiel::Scene::CreateComponent<AbilityTooltip>" },
+    { 0x00054A10, "glaiel::Scene::Create<VirtualCharacter,CatData>" },
+    { 0x008F96F0, "glaiel::VirtualCharacter::AddAbility" },
+    { 0x000C5520, "glaiel::CatData::get_basic_attack" },
+    { 0x002B3AE0, "glaiel::SetupAbilityIcon" },
+    { 0x002B5010, "glaiel::SetupPassiveIcon" },
+    { 0x007BB990, "glaiel::SpawnDatabase::SetupItemIcon" },
+    { 0x007B4BE0, "glaiel::SpawnDatabase::ItemName" },
+    { 0x007B5480, "glaiel::SpawnDatabase::ItemTooltip" },
+    { 0x007B2D30, "glaiel::SpawnDatabase::PassiveName" },
+    { 0x007B3640, "glaiel::SpawnDatabase::PassiveDescription" },
+    { 0x00045F20, "glaiel::Ability::GetDisplayName" },
+    { 0x000463A0, "glaiel::Ability::GetTooltip" },
+    { 0x0097EBE0, "glaiel::Button::EnableButton" },
+    { 0x009A9610, "glaiel::swf::MovieClip::resetAndGotoAndStop(string)" },
+    { 0x0099A5A0, "glaiel::swf::DisplayObjectContainer::findChild" },
+    { 0x00052290, "std::wstring::_Tidy_deallocate" },
+    { 0x001FF2E0, "glaiel::HouseCat::run_away" },
+    { 0x00204920, "glaiel::HouseDrawerPanel::do_on_open" },
+    { 0x002049D0, "glaiel::HouseDrawerPanel::do_on_close" },
+    { 0x00203C80, "glaiel::HouseDrawerUI::RefreshButtonNav" },
+    { 0x002048D0, "glaiel::HouseDrawerPanel::close" },
 };
 
 // sub_140138A10 IS NOT A DRAW ROUTINE, and it is in the table above only
@@ -1018,6 +1084,7 @@ constexpr uint32_t kRva_MewDirectorPtr = 0x013DAC30;
 constexpr uint32_t kRva_SceneCurrent   = 0x013C18F0;
 constexpr uint32_t kRva_HouseInventoryPtr = 0x013DA9A0;
 constexpr uint32_t kRva_TransitionScenePtr = 0x013C5BA8;
+constexpr uint32_t kRva_SpawnDatabasePtr  = 0x013C79D0;
 
 // Offsets into the MewDirector, all read off sub_1403B2060 and sub_140231180.
 constexpr uintptr_t kDir_CatRegistry = 1432;   // ptr, the id -> CatData* map
@@ -1305,6 +1372,30 @@ constexpr uintptr_t kApp_CursorShown  = 3424;  // bool, cursor visible this fram
 constexpr int       kCompId_CatPlacementArea = 466;
 constexpr int       kCompId_House            = 1094;
 constexpr int       kCompId_HouseCat         = 1096;
+constexpr int       kCompId_HouseDrawerUI    = 1100;
+constexpr int       kCompId_HousePipe        = 1104;
+constexpr int       kCompId_NPCMapDrawer     = 1346;
+
+constexpr uintptr_t kDir_GlobalProg          = 1448; // MewDirector+1448 = GlobalProgressionData*
+constexpr uintptr_t kGProg_NpcProgress       = 72;   // SingleNPCProgress[8]
+constexpr size_t    kNpcProg_Stride          = 120;  // sizeof(SingleNPCProgress)
+constexpr uintptr_t kNpcProg_GoalFavor       = 64;   // int32_t
+constexpr uintptr_t kNpcProg_GoalComplete    = 72;   // bool
+constexpr uintptr_t kNpcProg_Unlocked        = 80;   // bool
+constexpr uintptr_t kNpcProg_AcceptingCats   = 81;   // bool
+
+constexpr uintptr_t kHPipe_PrevCats          = 240;  // int32_t
+constexpr uintptr_t kHPipe_SlotsData         = 256;  // HouseCat** (PodBuffer<8>.data)
+
+constexpr uintptr_t kNpcDrawer_Panel         = 56;   // HouseDrawerPanel*
+constexpr uintptr_t kNpcDrawer_HasCatToDonate= 64;   // bool
+constexpr uintptr_t kNpcDrawer_InDonateMode  = 65;   // bool
+constexpr uintptr_t kNpcDrawer_DonatingCatPtr= 72;   // HouseCat*
+constexpr uintptr_t kNpcDrawer_DonatingCatId = 80;   // uint64_t (safe_pointer_base header at hc-8)
+constexpr uintptr_t kNpcDrawer_LastDonatedNpc= 184;  // int32_t (8 = none)
+constexpr uintptr_t kNpcDrawer_CatStatsWasOpen= 200; // bool
+constexpr uintptr_t kDrawerUI_CurrentPanel   = 88;   // HouseDrawerPanel*
+constexpr uintptr_t kCatData_Flags           = 3064; // uint64_t
 
 constexpr uintptr_t kComp_Entity             = 24;   // Component::entity
 constexpr uintptr_t kComp_Director           = 40;   // Component::director
@@ -1377,6 +1468,13 @@ constexpr uintptr_t kAnimState_Substate      = 40;   // std::string
 
 constexpr uintptr_t kRenderer_Visible        = 81;   // bool
 
+constexpr uintptr_t kCatData_Abilities       = 2000; // CatAbilities (0x7D0)
+constexpr uintptr_t kCatAbilities_Move       = 0;    // std::string
+constexpr uintptr_t kCatAbilities_BasicAtk   = 32;   // std::string
+constexpr uintptr_t kCatAbilities_Spells     = 64;   // std::string[4]
+constexpr uintptr_t kCatAbilities_Passives   = 320;  // CatPassive[4]
+constexpr size_t    kCatPassive_Size         = 40;   // std::string name (32) + int32_t level (4)
+constexpr uintptr_t kCatPassive_Level        = 32;   // int32_t
 constexpr uintptr_t kCatData_Equipment       = 2480; // CatEquipment, five inline slots
 constexpr uint32_t  kCatData_EquipmentSlots  = 5;    // head, face, neck, weapon, trinket
 constexpr size_t    kEquipment_Size          = 96;
@@ -1458,5 +1556,115 @@ constexpr uintptr_t kCatData_Level           = 0xC30;// int32_t
 constexpr uintptr_t kCatData_Uid             = 0xC48;// int64_t
 constexpr uintptr_t kLvl_Cat                 = 0xA0; // LevelUpScreen::cat (CatData*)
 constexpr uintptr_t kEvt_CatChoice           = 0x128;// WorldEvent::cat_choice (CatData*)
+
+// --- battle & simulation offsets (mgmp_lockstep.cpp, mgmp_aim.cpp) ---------
+constexpr uintptr_t kTC_Scene                = 0x18;
+constexpr uintptr_t kTC_QueueCount           = 0x60;
+constexpr uintptr_t kScene_Sub               = 0x08;
+constexpr uintptr_t kSub_Holder              = 0x20;
+constexpr uintptr_t kHolder_List             = 0x1F90;
+constexpr uintptr_t kList_Count              = 12;
+constexpr uintptr_t kList_Data               = 16;
+
+constexpr uintptr_t kEntity_Deleted          = 24;
+constexpr uintptr_t kEntity_CompCount        = 36;
+constexpr uintptr_t kEntity_CompData         = 40;
+constexpr uintptr_t kComp_Enabled            = 14;
+constexpr uintptr_t kComp_Destroyed          = 15;
+constexpr uintptr_t kComp_Active             = 16;
+constexpr uintptr_t kComp_Scene              = 0x20; // Component::scene
+
+constexpr int32_t   kPassiveTypeId           = 1414;
+constexpr uintptr_t kPassive_Stacks          = 0x5C;
+constexpr uintptr_t kPassive_Data            = 0x68;
+constexpr uintptr_t kPassive_PendingRemoval  = 0x75;
+constexpr uintptr_t kGon_Name                = 0x88;
+
+constexpr uintptr_t kChar_TObj               = 0x60;
+constexpr uintptr_t kChar_Brain              = 0x68;
+constexpr uintptr_t kChar_SpawnedBy          = 0x468; // Ref<Character> (pointer + generation)
+constexpr uintptr_t kChar_Facing             = 0x388;
+constexpr uintptr_t kChar_HP                 = 0x4B0;
+constexpr uintptr_t kChar_Shield             = 0x4B4;
+constexpr uintptr_t kChar_DivineShield       = 0x4B8;
+constexpr uintptr_t kChar_MaxHP              = 0x4BC;
+constexpr uintptr_t kChar_Dead               = 0x4C2;
+constexpr uintptr_t kChar_MovePts            = 0xD10;
+constexpr uintptr_t kChar_MovesUsed          = 0xD3C;
+constexpr uintptr_t kChar_Guard              = 0xEC0;
+
+constexpr uintptr_t kTObj_Tile               = 0x48;
+constexpr uintptr_t kTObj_Owner              = 0x98;
+
+constexpr uintptr_t kPBrain_Target           = 0x358; // iVec2D
+constexpr uintptr_t kPBrain_Dir              = 0x360; // iVec2D
+constexpr uintptr_t kPBrain_Ability          = 0x3D8;
+constexpr uintptr_t kPlayerBrain_OgOrientation = 0x41C;
+
+constexpr uintptr_t kAbility_Character       = 0x10;
+
+constexpr uintptr_t kDamage_Source           = 0x00;
+constexpr uintptr_t kDamage_AbilityAndPassive = 0x20;
+constexpr uintptr_t kDamage_Flags            = 0x59;
+constexpr uintptr_t kDamage_SpeculativeFlags = 0x5B;
+constexpr uintptr_t kDamage_Type             = 0x8C;
+constexpr uintptr_t kDamage_Amount           = 0x90;
+constexpr uintptr_t kDamage_Tile             = 0x9C;
+constexpr uintptr_t kDamage_Elements         = 0x148;
+
+// --- map screen offsets (mgmp_follow.cpp) ----------------------------------
+constexpr uintptr_t kMap_NodeCount           = 124;
+constexpr uintptr_t kMap_NodeData            = 128;
+constexpr uintptr_t kMap_Marker              = 0xA0;
+constexpr uintptr_t kNode_Seed               = 0x118;
+constexpr uintptr_t kNode_Type               = 0x138;
+constexpr uintptr_t kNode_Graphics           = 0x160;
+constexpr uintptr_t kMarker_Transform        = 0x48;
+constexpr uintptr_t kMarker_AtNode           = 0x50;
+constexpr uintptr_t kMarker_NextNode         = 0x58;
+constexpr uintptr_t kMarker_Selected         = 0x60;
+constexpr uintptr_t kMarker_MoveTimer        = 0x68;
+constexpr uintptr_t kClip_Pos                = 0x70; // float x, y
+
+// --- choice, menu panel, button & shop offsets (mgmp_choice.cpp) -----------
+constexpr uintptr_t kEvt_Panel               = 0x40; // WorldEvent::panel (MenuPanel*)
+constexpr uintptr_t kEvt_OptBegin            = 224;
+constexpr uintptr_t kEvt_OptEnd              = 232;
+constexpr uintptr_t kLvl_Panel               = 0xB0; // LevelUpScreen::panel (MenuPanel*)
+constexpr uintptr_t kLvl_Committed           = 792;  // select_option's "already chose" guard
+constexpr uintptr_t kLvl_OptBegin            = 864;
+constexpr uintptr_t kLvl_OptEnd              = 872;
+constexpr uintptr_t kAC_ParentScene          = 56;   // AbilityChooser::parent_scene (Scene*)
+constexpr uintptr_t kAC_Panel                = 64;   // AbilityChooser::panel (MenuPanel*)
+constexpr uintptr_t kPanel_Renderer          = 56;   // MenuPanel::renderer (Renderer*)
+constexpr uintptr_t kOptStride               = 240;
+constexpr uintptr_t kEvtOpt_Stat             = 64;
+constexpr uintptr_t kLvlOpt_Type             = 0;
+constexpr uintptr_t kLvlOpt_Name             = 200;
+
+constexpr uintptr_t kPanel_Buttons           = 0x40; // MenuPanel::buttons (std::map<string, Button*>)
+constexpr uintptr_t kBtn_Renderer            = 0x38; // Button::renderer (Ref<Renderer>)
+constexpr uintptr_t kBtn_Clip                = 0x48; // Button::button_clip (swf::MovieClip*)
+constexpr uintptr_t kBtn_Bounds              = 0x70; // Button::cached_bounds (float[4]: xMin, xMax, yMin, yMax)
+constexpr uintptr_t kBtn_Label               = 0x1B8; // Button::label (std::wstring)
+constexpr uintptr_t kBtn_Tooltip             = 0x1D8; // Button::tooltip (std::wstring)
+constexpr uintptr_t kBtn_Userdata            = 0x218; // Button::userdata (void*)
+constexpr uintptr_t kBtn_ExtraUserdataCount  = 0x224; // Button::extra_userdata.count (u32)
+constexpr uintptr_t kBtn_UserdataType        = 0x230; // Button::userdata_type (int32_t)
+constexpr uintptr_t kBtn_StateFrames         = 0x300; // Button::stateframes[6] (std::string, stride 32)
+constexpr uintptr_t kDispObj_CT              = 0x78; // swf::DisplayObject::color_transform (8 floats)
+
+constexpr uintptr_t kShop_Director           = 0x58;
+constexpr uintptr_t kShop_Items              = 0x60;
+constexpr uintptr_t kShop_IsTreasure         = 0x79;
+constexpr uintptr_t kShop_IsHouse            = 0x7B;
+constexpr uintptr_t kShop_StealCount         = 0x88;
+constexpr uintptr_t kShop_ItemSize           = 0xC0;
+constexpr uintptr_t kShopItem_Type           = 0;
+constexpr uintptr_t kShopItem_Cost           = 8;
+constexpr uintptr_t kShopItem_Stock          = 12;
+constexpr uintptr_t kShopItem_Data           = 16;
+constexpr uint32_t  kShopItem_Candy          = 12;
+constexpr uintptr_t kTransition_Active       = 0x38;
 
 } // namespace mgmp

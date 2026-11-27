@@ -128,12 +128,17 @@ bool choice_on_level_select(void* screen, void* opt);
 bool choice_on_level_reroll(void* screen);
 using ShopBuyFn = void (__fastcall*)(void*, void*);
 using ShopExitFn = void (__fastcall*)(void*);
+using AbilityChooserCloseFn = void (__fastcall*)(void*, int32_t);
 void choice_on_shop_buy(void* shop, void* item, ShopBuyFn buy);
 void choice_on_shop_exit(void* capture, ShopExitFn exit);
 void choice_on_shop_update(void* shop, ShopBuyFn buy, ShopExitFn exit);
 void choice_on_shop_candy_level(void* capture, ShopExitFn open_level);
 // Non-owner client input guard for Adventure Inventory.
 bool choice_on_inv_box_click(void* box_ptr);
+
+// AbilityChooser (ability/passive/disorder replacement popup): owned by cat owner.
+bool choice_on_ability_chooser_close(void* chooser, int32_t slot);
+void choice_on_ability_chooser_update(void* chooser, AbilityChooserCloseFn close_fn);
 
 // Per-frame ticks apply a held choice to the live screen.
 void choice_on_event_update(void* world_event);

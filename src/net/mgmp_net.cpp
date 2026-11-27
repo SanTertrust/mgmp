@@ -232,6 +232,7 @@ bool decode_into(const uint8_t* buf, uint32_t len, NetMsg& m) {
         case MSG_HOUSE_INTERSTITIALS: return dec_house_interstitials(r, m.house_interstitials);
         case MSG_HOUSE_POOP_POP: return dec_house_poop_pop(r, m.house_poop_pop);
         case MSG_HOUSE_FURNITURE: return dec_house_furniture(r, m.house_furniture);
+        case MSG_HOUSE_PIPE: return dec_house_pipe(r, m.house_pipe);
         case MSG_SCREEN_PING: return dec_screen_ping(r, m.screen_ping);
         case MSG_DRAFT_PICK:  return dec_draft_pick(r, m.draft_pick);
         case MSG_DRAFT_STATE: return dec_draft_state(r, m.draft_state);
@@ -1180,6 +1181,18 @@ bool net_send_draft_state(const DraftStateMsg& m) {
 bool net_send_draft_state_to(uint8_t peer, const DraftStateMsg& m) {
     uint8_t p[256];
     uint32_t n = enc_draft_state(p, sizeof(p), m);
+    return n && net_send_peer(peer, p, n);
+}
+
+bool net_send_house_pipe(const HousePipeMsg& m) {
+    uint8_t p[128];
+    uint32_t n = enc_house_pipe(p, sizeof(p), m);
+    return n && net_send(p, n);
+}
+
+bool net_send_house_pipe_to(uint8_t peer, const HousePipeMsg& m) {
+    uint8_t p[128];
+    uint32_t n = enc_house_pipe(p, sizeof(p), m);
     return n && net_send_peer(peer, p, n);
 }
 

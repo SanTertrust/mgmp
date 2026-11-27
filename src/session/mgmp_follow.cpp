@@ -1,5 +1,6 @@
 // mgmp_follow.cpp -- see mgmp_follow.h.
 
+#include "mgmp_addresses.h"
 #include "mgmp_catsync.h"
 #include "mgmp_choice.h"
 #include "mgmp_invsync.h"
@@ -22,19 +23,7 @@
 namespace mgmp {
 namespace {
 
-// MapScreen's node vector, read off MapNode::Click and cross-checked against
-// every other MapScreen function that walks it (update, generate_map,
-// generate_auto_connections, generate_bonus_nodes, load_map, select_boss_level,
-// TickNemesis all use the same +124/+128 pair). Standard CustomVector shape:
-// { u32 capacity @ 0x78, u32 count @ 0x7C, MapNode** data @ 0x80 }.
-constexpr uintptr_t kMap_NodeCount = 124;
-constexpr uintptr_t kMap_NodeData  = 128;
-
-// MapNode+0x118: the node's own 32-byte xoshiro256 seed, written by
-// MapScreen::generate_map and copied into TLS+0x178 by EnterNode.
-// MapNode+0x138: MapNodeType, from MapNode::str_to_type.
-constexpr uintptr_t kNode_Seed = 0x118;
-constexpr uintptr_t kNode_Type = 0x138;
+// MapScreen / MapNode / MapMarker / Transform offsets live in mgmp_addresses.h.
 
 // MapNode::str_to_type, in enum order. 1 and 18 are three-character names whose
 // string constants IDA did not render; they are not battle types and nothing
@@ -436,16 +425,6 @@ uint64_t follow_here_seed() { return g.have_here ? g.here_seed : 0; }
 // MapScreen+0x80, so a wrong offset yields "unknown" instead of a confident
 // wrong number -- the same rule the per-turn state hash follows. That is what
 // makes reading two undocumented slots an acceptable risk here.
-constexpr uintptr_t kMap_Marker       = 0xA0;
-constexpr uintptr_t kMarker_Transform = 0x48;
-constexpr uintptr_t kMarker_AtNode    = 0x50;
-constexpr uintptr_t kMarker_NextNode  = 0x58;
-constexpr uintptr_t kMarker_Selected  = 0x60;
-constexpr uintptr_t kMarker_MoveTimer = 0x68;
-constexpr uintptr_t kNode_Graphics    = 0x160;
-constexpr uintptr_t kClip_Pos         = 0x70;  // float x, y (converted to double in MapMarker::init/update)
-constexpr uintptr_t kTransform_Pos    = 0x80;  // double x, y, z
-
 // Keep MapScreen::cat_marker synchronized with the node we are entering via
 // o_EnterNode (client follow and debug panel jumps). EnterNode itself never
 // updates cat_marker: normally MapMarker::update walks to the clicked node,

@@ -2,6 +2,8 @@
 
 #include "mgmp_draft.h"
 #include "mgmp_gameui.h"
+#include "mgmp_savefile.h"
+#include "mgmp_leave.h"
 #include "mgmp_addresses.h"
 #include "mgmp_resolve.h"
 #include "mgmp_mem.h"
@@ -30,16 +32,20 @@ GameUiColor peer_color(uint8_t peer_id) {
 }
 
 struct CardUi {
-    uint64_t    cat_uid = 0;
-    double      cx      = 0.0;
-    double      cy      = 0.0;
-    GameUiClip  bg;
-    GameUiCat   cat;
-    GameUiLabel name_lbl;
-    GameUiLabel class_lbl;
-    GameUiLabel owner_lbl;
-    uint8_t     shown_owner = 0xFE; // force initial label refresh
-    bool        hovered     = false;
+    uint64_t        cat_uid = 0;
+    double          cx      = 0.0;
+    double          cy      = 0.0;
+    double          scale   = 1.0;
+    wchar_t         name[64] = L"Cat";
+    GameUiClip      bg;
+    GameUiCat       cat;
+    GameUiCatKit    kit;
+    GameUiCombatBar icons;
+    GameUiLabel     name_lbl;
+    GameUiLabel     class_lbl;
+    GameUiLabel     owner_lbl;
+    uint8_t         shown_owner = 0xFE; // force initial label refresh
+    bool            hovered     = false;
 };
 
 struct State {
@@ -52,15 +58,16 @@ struct State {
     bool          node_ready      = false;
 
     // Native Game UI overlay state.
-    GameUiOverlay ov;
-    GameUiClip    backdrop;
-    GameUiLabel   title_lbl;
-    GameUiLabel   status_lbl;
-    CardUi        cards[kMaxDraftCats];
-    uint8_t       card_count = 0;
-    uint32_t      ui_gen     = 0;
-    bool          ui_dirty   = false;
-    bool          prev_lmb   = false;
+    GameUiOverlay   ov;
+    GameUiClip      backdrop;
+    GameUiLabel     title_lbl;
+    GameUiLabel     status_lbl;
+    void*           tooltip_comp = nullptr;
+    CardUi          cards[kMaxDraftCats];
+    uint8_t         card_count    = 0;
+    uint32_t        ui_gen        = 0;
+    bool            ui_dirty      = false;
+    bool            prev_lmb      = false;
 
     fn_cat_by_id  cat_by_id  = nullptr;
 };
@@ -73,6 +80,18 @@ bool window_is_focused() {
     DWORD pid = 0;
     GetWindowThreadProcessId(fg, &pid);
     return pid == GetCurrentProcessId();
+}
+
+// The draft overlay must only be shown once this peer is actually on the
+// Adventure Map with the run loaded (never over MainMenu, SaveSelection,
+// House/Prep, mid-save-reload, or while the Map is suspended).
+bool can_show_draft_ui() {
+    if (!savefile_adventure_is_loaded()) return false;
+    if (savefile_has_pending()) return false;
+    bool map_suspended = false;
+    if (!leave_find_scene("Map", nullptr, &map_suspended) || map_suspended)
+        return false;
+    return true;
 }
 
 void* resolve_cat_data(uint64_t uid) {
@@ -153,10 +172,11 @@ void format_peer_label(uint8_t owner, uint8_t self_id, bool hovered, bool can_pi
 void close_ui() {
     if (g.ov.open)
         gameui_close(g.ov);
-    g.card_count = 0;
-    g.ui_gen     = 0;
-    g.ui_dirty   = false;
-    g.prev_lmb   = false;
+    g.tooltip_comp = nullptr;
+    g.card_count   = 0;
+    g.ui_gen       = 0;
+    g.ui_dirty     = false;
+    g.prev_lmb     = false;
 }
 
 void refresh_ui_labels() {
@@ -197,10 +217,11 @@ void refresh_ui_labels() {
 
         // Card scale & alpha feedback.
         const double hover_mul = (c.hovered && clickable) ? 1.06 : 1.0;
-        gameui_set_scale(c.bg.transform, 1.55 * hover_mul, 2.05 * hover_mul);
+        gameui_set_scale(c.bg.transform, 1.50 * c.scale * hover_mul, 2.00 * c.scale * hover_mul);
         const double alpha = (own != kNoPeer && own != self_id) ? 0.55 : 1.0;
         gameui_set_alpha(c.bg.renderer, alpha);
         if (c.cat.renderer) gameui_set_alpha(c.cat.renderer, alpha);
+        if (c.icons.renderer) gameui_set_alpha(c.icons.renderer, alpha);
 
         c.shown_owner = own;
     }
@@ -212,8 +233,9 @@ bool build_ui() {
     if (!g.model.active || g.model.count == 0) return false;
     if (!gameui_open(g.ov, "MGMP_CatDraft", 999990.0)) return false;
 
-    // Native modal backdrop ("ConfirmationBox" with yes/no/prompt hidden).
-    if (gameui_add_clip(g.ov, "ConfirmationBox", 640.0, 360.0, 1.50, 1.38, 10, 0.96, g.backdrop)) {
+    // Native modal backdrop ("ConfirmationBox" with yes/no/prompt hidden),
+    // framing the cards and their surrounding ability/passive/gear icons.
+    if (gameui_add_clip(g.ov, "ConfirmationBox", 640.0, 360.0, 1.58, 1.32, 10, 0.96, g.backdrop)) {
         gameui_set_child_visible(g.backdrop.renderer, "yes", false);
         gameui_set_child_visible(g.backdrop.renderer, "no",  false);
         gameui_set_child_text(g.backdrop.renderer, "prompt", L"");
@@ -221,34 +243,42 @@ bool build_ui() {
 
     // Header & status text in native game font.
     // Note: HouseNametag renders its text ~40*scale px above its transform y.
-    gameui_add_label(g.ov, L"CHOOSE YOUR CATS", 640.0, 185.0, 2.05, 20,
+    gameui_add_label(g.ov, L"CHOOSE YOUR CATS", 640.0, 74.0, 1.85, 20,
                      { 1.0f, 1.0f, 1.0f, 1.0f }, g.title_lbl);
-    gameui_add_label(g.ov, L"", 640.0, 240.0, 1.40, 20,
+    gameui_add_label(g.ov, L"", 640.0, 120.0, 1.30, 20,
                      { 1.0f, 0.95f, 0.65f, 1.0f }, g.status_lbl);
 
-    // Lay out 1..N cat cards evenly across the center.
+    // One shared AbilityTooltip drives hover descriptions for every icon on
+    // every cat card in the overlay.
+    g.tooltip_comp = gameui_add_ability_tooltip(g.ov);
+
+    // Lay out 1..N cat cards evenly with space on left/right/bottom for each
+    // cat's own abilities, passives, and equipment icons.
     const uint8_t n = g.model.count;
-    const double card_w = 220.0;
-    const double gap    = (n <= 4) ? 36.0 : 18.0;
-    const double total_w = n * card_w + (n > 1 ? (n - 1) * gap : 0.0);
-    const double start_x = 640.0 - total_w * 0.5 + card_w * 0.5;
-    const double card_y  = 420.0;
+    const double base_slot_w = 296.0;
+    const double fit = (n * base_slot_w > 1200.0) ? (1200.0 / (n * base_slot_w)) : 1.0;
+    const double slot_w  = base_slot_w * fit;
+    const double total_w = n * slot_w;
+    const double start_x = 640.0 - total_w * 0.5 + slot_w * 0.5;
+    const double card_y  = 312.0;
 
     g.card_count = 0;
     for (uint8_t i = 0; i < n; ++i) {
         CardUi& c = g.cards[i];
         c = {};
         c.cat_uid = g.model.cat_uid[i];
-        c.cx      = start_x + i * (card_w + gap);
+        c.cx      = start_x + i * slot_w;
         c.cy      = card_y;
+        c.scale   = fit;
 
-        gameui_add_clip(g.ov, "InventoryGridBGBox", c.cx, c.cy, 1.55, 2.05, 15, 1.0, c.bg);
+        gameui_add_clip(g.ov, "InventoryGridBGBox", c.cx, c.cy,
+                        1.50 * fit, 2.00 * fit, 15, 1.0, c.bg);
 
         void* cd = resolve_cat_data(c.cat_uid);
         wchar_t name_buf[64] = L"Cat";
         wchar_t cls_buf[64]  = L"";
         if (cd) {
-            gameui_add_cat(g.ov, cd, c.cx, c.cy + 40.0, 1.10, 22, c.cat);
+            gameui_add_cat(g.ov, cd, c.cx, c.cy + 36.0 * fit, 1.05 * fit, 22, c.cat);
 
             wchar_t raw_name[48] = {};
             if (gameui_read_wstring((const uint8_t*)cd + kCatData_Name, raw_name, 48) && raw_name[0])
@@ -271,13 +301,18 @@ bool build_ui() {
             } else {
                 swprintf_s(cls_buf, 64, L"Lv.%d", (int)lvl);
             }
-        }
 
-        gameui_add_label(g.ov, name_buf, c.cx, c.cy - 92.0, 1.50, 25,
+            // Surround this card with its own abilities (left), passives
+            // (right), and equipped gear (bottom).
+            gameui_add_cat_kit_icons(g.ov, cd, c.cx, c.cy, fit, c.icons, c.kit);
+        }
+        wcsncpy_s(c.name, name_buf, _TRUNCATE);
+
+        gameui_add_label(g.ov, name_buf, c.cx, c.cy - 88.0 * fit, 1.45 * fit, 25,
                          { 1.0f, 1.0f, 1.0f, 1.0f }, c.name_lbl);
-        gameui_add_label(g.ov, cls_buf, c.cx, c.cy - 38.0, 1.15, 25,
+        gameui_add_label(g.ov, cls_buf, c.cx, c.cy - 36.0 * fit, 1.12 * fit, 25,
                          { 0.90f, 0.90f, 0.90f, 1.0f }, c.class_lbl);
-        gameui_add_label(g.ov, L"", c.cx, c.cy + 124.0, 1.35, 25,
+        gameui_add_label(g.ov, L"", c.cx, c.cy + 120.0 * fit, 1.30 * fit, 25,
                          { 0.85f, 0.85f, 0.85f, 1.0f }, c.owner_lbl);
 
         ++g.card_count;
@@ -372,7 +407,8 @@ bool draft_begin_host(uint32_t node_index) {
              gen, (unsigned)cat_n, peer_n, node_index);
 
     broadcast_state();
-    build_ui();
+    if (can_show_draft_ui())
+        build_ui();
     return true;
 }
 
@@ -395,6 +431,11 @@ void draft_tick() {
         return;
     }
 
+    if (!can_show_draft_ui()) {
+        if (g.ov.open) close_ui();
+        return;
+    }
+
     // Open or rebuild UI if needed.
     if (!gameui_is_alive(g.ov) || g.ui_gen != g.model.generation) {
         if (!build_ui()) return;
@@ -410,7 +451,9 @@ void draft_tick() {
     int clicked_idx = -1;
     bool hover_changed = false;
     for (uint8_t i = 0; i < g.card_count; ++i) {
-        const bool h = have_mouse && gameui_hit_rect(mx, my, g.cards[i].cx, g.cards[i].cy, 210.0, 250.0);
+        const double hit_w = 192.0 * g.cards[i].scale;
+        const double hit_h = 228.0 * g.cards[i].scale;
+        const bool h = have_mouse && gameui_hit_rect(mx, my, g.cards[i].cx, g.cards[i].cy, hit_w, hit_h);
         if (h != g.cards[i].hovered) {
             g.cards[i].hovered = h;
             hover_changed = true;

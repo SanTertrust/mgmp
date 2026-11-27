@@ -86,6 +86,7 @@ fn_this       o_InitSystems = nullptr;
 fn_this       o_NextTurn    = nullptr;
 fn_two_ptr    o_GetChoice   = nullptr;
 fn_two_ptr    o_PlayerOnRequestAction = nullptr;
+void (__fastcall* o_OnSpawnCharacter)(void*, void*, void*) = nullptr;
 fn_this_ptr_b o_DoAction    = nullptr;
 fn_this_ptr   o_Trigger     = nullptr;
 fn_this_i32   o_BeginTurn   = nullptr;
@@ -111,6 +112,9 @@ fn_this       o_EventUpdate   = nullptr;
 fn_this_ptr   o_LevelSelect   = nullptr;   // select_option(this, LevelUpOption*)
 fn_this       o_LevelUpdate   = nullptr;
 fn_this       o_LevelReroll   = nullptr;
+fn_this       o_AbilityChooserUpdate = nullptr;
+typedef void  (__fastcall* fn_this_i32)(void* self, int32_t arg);
+fn_this_i32   o_AbilityChooserClose  = nullptr;
 fn_this_ptr   o_ShopBuyItem   = nullptr;
 fn_this       o_ShopUpdate    = nullptr;
 fn_this       o_ShopExit      = nullptr;
@@ -139,6 +143,10 @@ typedef void  (__fastcall* fn_this_bb)(void* self, bool a1, bool a2);
 typedef bool  (__fastcall* fn_this_cat)(void* self, void* cat);
 fn_this_cat o_HousePipePlace = nullptr;
 fn_this_cat o_ButchBoxPlace  = nullptr;
+fn_this     o_HousePipeUpdate = nullptr;
+fn_this     o_NPCMapDonateCat = nullptr;
+typedef void  (__fastcall* fn_gain_favor)(void* prog, int npc, void* cat, int amount);
+fn_gain_favor o_GlobalProgGainFavor = nullptr;
 typedef void* (__fastcall* fn_this_i64)(void* self, int64_t a1);
 fn_this_bb    o_HouseTestInit      = nullptr;
 fn_this       o_HouseCatUpdate     = nullptr;
@@ -258,6 +266,11 @@ void* __fastcall h_PlayerOnRequestAction(void* self, void* out) {
         lockstep_post_player_choice(self, ret);
     }
     return ret;
+}
+
+void __fastcall h_OnSpawnCharacter(void* spawner, void* child, void* ability) {
+    lockstep_on_spawn_character(spawner, child);
+    o_OnSpawnCharacter(spawner, child, ability);
 }
 
 void __fastcall h_DoAction(void* self, void* ta, unsigned char flag) {
@@ -608,6 +621,15 @@ void __fastcall h_LevelReroll(void* self) {
     if (choice_on_level_reroll(self)) o_LevelReroll(self);
 }
 
+void __fastcall h_AbilityChooserUpdate(void* self) {
+    o_AbilityChooserUpdate(self);
+    choice_on_ability_chooser_update(self, o_AbilityChooserClose);
+}
+
+void __fastcall h_AbilityChooserClose(void* self, int32_t slot) {
+    if (choice_on_ability_chooser_close(self, slot)) o_AbilityChooserClose(self, slot);
+}
+
 void __fastcall h_ShopBuyItem(void* self, void* shop_item) {
     choice_on_shop_buy(self, shop_item, o_ShopBuyItem);
 }
@@ -718,7 +740,28 @@ void __fastcall h_HouseRoomRemove(void* self, void* cat) {
 }
 
 bool __fastcall h_HousePipePlace(void* self, void* cat) {
-    return house_allows_special_placement(cat) && o_HousePipePlace(self, cat);
+    if (!house_allows_pipe_placement(cat)) return false;
+    bool ok = o_HousePipePlace(self, cat);
+    if (ok) house_on_pipe_placed(self, cat);
+    return ok;
+}
+
+void __fastcall h_HousePipeUpdate(void* self) {
+    house_on_pipe_update_pre(self);
+    o_HousePipeUpdate(self);
+    house_on_pipe_update_post(self);
+}
+
+void __fastcall h_NPCMapDonateCat(void* self) {
+    house_on_npc_donate_cat_pre(self);
+    o_NPCMapDonateCat(self);
+    house_on_npc_donate_cat_post(self);
+}
+
+void __fastcall h_GlobalProgGainFavor(void* prog, int npc, void* cat, int amount) {
+    if (!house_on_gain_favor(prog, npc, cat, amount)) return;
+    o_GlobalProgGainFavor(prog, npc, cat, amount);
+    house_on_gain_favor_post(prog, npc, cat, amount);
 }
 
 bool __fastcall h_ButchBoxPlace(void* self, void* cat) {
@@ -909,6 +952,7 @@ const Binding kBindings[] = {
     { T_NextTurn,    (void*)&h_NextTurn,    (void**)&o_NextTurn    },
     { T_GetChoice,   (void*)&h_GetChoice,   (void**)&o_GetChoice   },
     { T_PlayerOnRequestAction, (void*)&h_PlayerOnRequestAction, (void**)&o_PlayerOnRequestAction },
+    { T_OnSpawnCharacter, (void*)&h_OnSpawnCharacter, (void**)&o_OnSpawnCharacter },
     { T_DoAction,    (void*)&h_DoAction,    (void**)&o_DoAction    },
     { T_Trigger,     (void*)&h_Trigger,     (void**)&o_Trigger     },
     { T_BeginTurn,   (void*)&h_BeginTurn,   (void**)&o_BeginTurn   },
@@ -930,6 +974,8 @@ const Binding kBindings[] = {
     { T_LevelSelect,  (void*)&h_LevelSelect, (void**)&o_LevelSelect },
     { T_LevelUpdate,  (void*)&h_LevelUpdate, (void**)&o_LevelUpdate },
     { T_LevelReroll,  (void*)&h_LevelReroll, (void**)&o_LevelReroll },
+    { T_AbilityChooserUpdate, (void*)&h_AbilityChooserUpdate, (void**)&o_AbilityChooserUpdate },
+    { T_AbilityChooserClose,  (void*)&h_AbilityChooserClose,  (void**)&o_AbilityChooserClose  },
     { T_ShopBuyItem,  (void*)&h_ShopBuyItem, (void**)&o_ShopBuyItem },
     { T_ShopUpdate,   (void*)&h_ShopUpdate, (void**)&o_ShopUpdate },
     { T_ShopExit,     (void*)&h_ShopExit, (void**)&o_ShopExit },
@@ -963,6 +1009,9 @@ const Binding kBindings[] = {
     { T_HouseLayoutSaved,   (void*)&h_HouseLayoutSaved,   (void**)&o_HouseLayoutSaved   },
     { T_HouseRoomRemove,    (void*)&h_HouseRoomRemove,    (void**)&o_HouseRoomRemove    },
     { T_HousePipePlace,     (void*)&h_HousePipePlace,     (void**)&o_HousePipePlace     },
+    { T_HousePipeUpdate,    (void*)&h_HousePipeUpdate,    (void**)&o_HousePipeUpdate    },
+    { T_NPCMapDonateCat,    (void*)&h_NPCMapDonateCat,    (void**)&o_NPCMapDonateCat    },
+    { T_GlobalProgGainFavor,(void*)&h_GlobalProgGainFavor,(void**)&o_GlobalProgGainFavor},
     { T_ButchBoxPlace,      (void*)&h_ButchBoxPlace,      (void**)&o_ButchBoxPlace      },
     { T_FurniturePoopPop,   (void*)&h_FurniturePoopPop,   (void**)&o_FurniturePoopPop   },
     { T_MewDirAutoSaveHouse,(void*)&h_MewDirAutoSaveHouse,(void**)&o_MewDirAutoSaveHouse},
@@ -1089,6 +1138,7 @@ int hooks_install() {
     house_set_go_on_adventure_orig((void*)o_GoOnAdventure);
     house_set_poop_pop_orig((void*)o_FurniturePoopPop);
     house_set_autosave_orig((void*)o_MewDirAutoSaveHouse);
+    house_set_gain_favor_orig((void*)o_GlobalProgGainFavor);
 
     // After every hook is known, not before: a feature that is only safe while
     // another hook runs has to be told, and aim_set_base ran above -- before

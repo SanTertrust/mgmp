@@ -84,6 +84,11 @@ void overlay_on_swap(void* window);
 // Returns false before the first swap, or if the window size is unusable.
 bool overlay_local_pointer(float& nx, float& ny, uint8_t& mode);
 
+// Screen-space pointer (normalized 16:9 content coords [0..1]) of the remote
+// peer who currently owns the active battle turn (owns_turn != 0).
+// Returns false if no fresh turn-owning remote peer pointer is available.
+bool overlay_owner_pointer(float* out_nx, float* out_ny);
+
 struct CursorMsg;
 struct ScreenPingMsg;
 

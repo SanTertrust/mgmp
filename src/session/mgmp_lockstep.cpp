@@ -27,6 +27,7 @@
 #include "mgmp_tuning.h"
 #include "mgmp_mem.h"
 #include "mgmp_split.h"
+#include "mgmp_spawn_control.h"
 #include "mgmp_rtti.h"
 #include "mgmp_rng.h"
 #include "mgmp_log.h"
@@ -36,6 +37,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
+#include <vector>
 
 namespace mgmp {
 namespace {
@@ -49,10 +51,8 @@ namespace {
 // dressed 10x10 grid is already 100 tiles before a single combatant.
 //
 // It is therefore set to the hard protocol limit rather than to a guess with
-// margin. Roster indices travel as uint8_t in ACTION and CONTROL and kNoCat is
-// 0xFF, so 254 is the largest index that can exist on the wire; anything under
-// that is an arbitrary line waiting to be crossed by a bigger room. The cost is
-// about 2 KB of static arrays.
+// margin. Starting roster indices still travel as uint8_t in CONTROL and the
+// state dump. ACTION and AIM use a separate ID range for actors added later.
 //
 // 32 was the old value. Over it the snapshot bailed, which meant no roster, no
 // control split, no actions on the wire and no hashes -- both peers quietly
@@ -75,84 +75,11 @@ constexpr uint32_t kMaxCats    = 254;
 // cannot disagree.
 constexpr uint32_t kMaxSentLog = 512;
 constexpr uint32_t kMaxPending = kMaxSentLog;
-constexpr uint8_t  kNoCat      = 0xFF;
+constexpr uint8_t  kNoCat      = kNoControlSlot;
 thread_local bool t_battle_thread = false;
 thread_local uint32_t t_damage_hit = 0;
 
-// Character list, reached from TurnControl. See the header for provenance.
-constexpr uintptr_t kTC_Scene      = 0x18;
-constexpr uintptr_t kScene_Sub     = 0x08;
-constexpr uintptr_t kSub_Holder    = 0x20;
-constexpr uintptr_t kHolder_List   = 0x1F90;
-constexpr uintptr_t kList_Count    = 12;
-constexpr uintptr_t kList_Data     = 16;
-
-// Brain+0x38 is the owning Character (Hex-Rays types it as such in
-// Brain::UpdateDecision); Character+0x68 is the reverse edge, the Brain*
-// TurnControl::update reads to call UpdateDecision. TurnControl+0x60 is the
-// decision queue's element count.
-constexpr uintptr_t kBrain_Owner   = 0x38;
-constexpr uintptr_t kChar_Brain    = 0x68;
-constexpr uintptr_t kTC_QueueCount = 0x60;
-
-// --- Character fields, for the state hash (recovered 2026-08-24) ------------
-//
-// Character+0x60 points at a TacticsObject and TacticsObject+0x98 points back
-// at the Character. That pair is not a guess to be trusted: the snapshot walks
-// it in BOTH directions per cat and refuses to hash a cat whose pointer does
-// not round trip. Provenance, one independent reading each:
-//
-//   +0x60  TacticsObject*  AbilityHealthThreshold::late_update reads
-//                          *(char+96)+96 -- TacticsObject's "removed" flag, the
-//                          guard at the top of both TacticsObject::Move and
-//                          ::ReceiveDamage. Character::get_standing_tile_elements
-//                          reads *(char+96)+99, another TacticsObject bool.
-//   +0x388 iVec2D facing   Character::Face's only durable write (this+113).
-//   +0x4B0 int32  HP       Character::Die zeroes +0x4B0 as a QWORD -- i.e. HP
-//                          and shield in one store; ReceiveDamage__inner_0
-//                          touches it 21 times; EndTurn and RunAway read it as
-//                          a dword.
-//   +0x4B4 int32  shield   Character::GainShield writes this+301, and it is the
-//                          same field AbilityHealthThreshold adds to HP when
-//                          the ability's GON says `count_shield`. Two unrelated
-//                          functions, one offset.
-//   +0x4BC int32  max HP   the deval base passed for `threshold` /
-//                          `threshold_min` / `threshold_max`, so a GON "50%"
-//                          means 50% of this; recompute_stats reads it 4x.
-//   +0x4C2 bool   dead     Character::Die's entry guard, set by Die and
-//                          OnCorpsePop, read by BeginTurn, EndTurn, DoAction,
-//                          RoundUpkeep, GainShield and update.
-//
-// TacticsObject+0x48 is the current tile: ::Move copies the old value to +0x50
-// and writes the destination here, and ::ReceiveDamage passes it as the tile
-// argument to the splash walk.
-constexpr uintptr_t kChar_TObj     = 0x60;
-constexpr uintptr_t kChar_Facing   = 0x388;
-constexpr uintptr_t kChar_HP           = 0x4B0;
-constexpr uintptr_t kChar_Shield       = 0x4B4;
-constexpr uintptr_t kChar_DivineShield = 0x4B8;
-constexpr uintptr_t kChar_MaxHP        = 0x4BC;
-constexpr uintptr_t kChar_Dead         = 0x4C2;
-
-constexpr uintptr_t kEntity_Deleted        = 24;
-constexpr uintptr_t kEntity_CompCount      = 36;
-constexpr uintptr_t kEntity_CompData       = 40;
-constexpr uintptr_t kComp_Enabled          = 14;
-constexpr uintptr_t kComp_Destroyed        = 15;
-constexpr uintptr_t kComp_Active           = 16;
-constexpr int32_t   kPassiveTypeId         = 1414;
-constexpr uintptr_t kPassive_Stacks        = 0x5C;
-constexpr uintptr_t kPassive_Data          = 0x68;
-constexpr uintptr_t kPassive_PendingRemoval = 0x75;
-constexpr uintptr_t kGon_Name              = 0x88;
-constexpr uintptr_t kTObj_Tile     = 0x48;
-constexpr uintptr_t kTObj_Owner    = 0x98;
-
-// DamageInstance fields verified in IDA against ReceiveDamage.
-constexpr uintptr_t kDamage_Flags = 0x59;
-constexpr uintptr_t kDamage_Type = 0x8C;
-constexpr uintptr_t kDamage_Amount = 0x90;
-constexpr uintptr_t kDamage_Elements = 0x148;
+// Battle / Character / Entity / Passive / DamageInstance offsets live in mgmp_addresses.h.
 
 struct DamageStage {
     int32_t amount = 0;
@@ -201,12 +128,6 @@ void format_damage_stage(char* out, size_t cap, const DamageStage& stage) {
                 (stage.flags >> 3) & 1u, (stage.flags >> 4) & 1u);
 }
 
-// PlayerBrain::og_orientation (iVec2D): PlayerBrain::update saves this at the
-// top of each frame and restores Character+0x388 to it at the end unless the
-// player clicked to turn. Updating it alongside Character::Face keeps the
-// peer's PlayerBrain::update from snapping facing back on the next frame.
-constexpr uintptr_t kPlayerBrain_OgOrientation = 0x41C;
-
 struct FaceVec2D { int32_t x, y; };
 typedef void (__fastcall *fn_character_face)(void* chr, FaceVec2D dir, char a3, char a4);
 
@@ -253,11 +174,13 @@ struct State {
     fn_affecting_elements affecting_elements = nullptr;
 
     const void* cats[kMaxCats] = {};
+    uint64_t    cat_generation[kMaxCats] = {};
     uint32_t    cat_count      = 0;
     bool        local_cat[kMaxCats] = {};   // this peer's input decides for it
     bool        human_cat[kMaxCats] = {};   // a human brain drives it at all
     bool        snapped        = false;
     const void* snapped_list   = nullptr;   // the vector object we snapshotted
+    SpawnControl spawns;
 
     // --- what the last hash was actually taken over ----------------------
     //
@@ -899,6 +822,85 @@ uint8_t cat_index_of(const void* character) {
     return kNoCat;
 }
 
+bool character_generation(const void* character, uint64_t& generation) {
+    return character && mem_read(static_cast<const uint8_t*>(character) - sizeof(generation),
+                                 &generation, sizeof(generation));
+}
+
+uint8_t starting_slot(const void* character, uint64_t generation) {
+    const uint8_t slot = cat_index_of(character);
+    return slot != kNoCat && g.cat_generation[slot] == generation ? slot : kNoCat;
+}
+
+bool has_player_brain(const char* type) {
+    // MountBrain calls PlayerBrain::OnRequestAction when the pilot is human.
+    return strstr(type, "PlayerBrain") || strstr(type, "MountBrain");
+}
+
+uint8_t spawn_owner_slot(const void* source, uint64_t generation) {
+    const uint8_t slot = starting_slot(source, generation);
+    if (slot != kNoCat && g.human_cat[slot]) return slot;
+    return g.spawns.owner_slot(source, generation);
+}
+
+uint8_t native_spawn_owner_slot(const void* character) {
+    struct { const void* source; uint64_t generation; } ref{};
+    if (!mem_read(static_cast<const uint8_t*>(character) + kChar_SpawnedBy, &ref, sizeof(ref)))
+        return kNoCat;
+    return spawn_owner_slot(ref.source, ref.generation);
+}
+
+bool owns_control_slot(uint8_t slot) {
+    if (slot == kNoCat) return net_role() == NetRole::Host;
+    if (!g.local_cat[slot]) return false;
+    // A returning client's original split can still claim a slot the host
+    // took over. The host sends its updated CONTROL before replaying actions.
+    const auto& host = g.peer_control[kHostPeer];
+    if (net_role() == NetRole::Client && g.have_peer_control[kHostPeer] &&
+        host.battle_id == g.battles.current &&
+        std::find(host.cats, host.cats + host.count, slot) != host.cats + host.count)
+        return false;
+    return true;
+}
+
+struct ActorControl {
+    uint32_t id = kNoActor;
+    bool human = false;
+    bool local = false;
+};
+
+ActorControl actor_control(const void* character, bool requesting_input = false) {
+    uint64_t generation = 0;
+    if (!character_generation(character, generation)) return {};
+    const uint8_t slot = starting_slot(character, generation);
+    if (slot != kNoCat && g.human_cat[slot])
+        return {slot, true, owns_control_slot(slot)};
+
+    auto* spawn = g.spawns.find(character, generation);
+    if (!requesting_input && (!spawn || spawn->id == kNoActor)) {
+        const void* brain = nullptr;
+        char type[96] = {};
+        if (!mem_read(static_cast<const uint8_t*>(character) + kChar_Brain, &brain, sizeof(brain)) ||
+            !has_player_brain(rtti_class_name(brain, type, sizeof(type))))
+            return {};
+    }
+    const uint8_t owner = spawn ? spawn->owner_slot : native_spawn_owner_slot(character);
+    if (requesting_input) {
+        if (!spawn)
+            spawn = &g.spawns.record(character, generation, owner);
+        // This is a simulation poll, independent of UI/render timing. A late
+        // joiner encounters these actors in the same order while replaying.
+        if (spawn->id == kNoActor) {
+            g.spawns.assign_id(*spawn);
+            if (owner == kNoCat)
+                log_line("LOCKSTEP", "spawned actor %u has no player-owned source; host controls it", spawn->id);
+            else
+                log_line("LOCKSTEP", "spawned actor %u inherits control from cat %u", spawn->id, (unsigned)owner);
+        }
+    }
+    return {spawn ? spawn->id : kNoActor, true, owns_control_slot(owner)};
+}
+
 int trace_cat_index(const void* character) {
     const uint8_t i = cat_index_of(character);
     return i == kNoCat ? -1 : (int)i;
@@ -992,10 +994,14 @@ void snapshot_cats(void* turn_control) {
     }
 
     g.cat_count = 0;
+    g.spawns.clear();
     for (uint32_t i = 0; i < count; ++i) {
         const void* c = nullptr;
         if (!mem_read((const uint8_t*)data + i * sizeof(void*), &c, sizeof(c)) || !c) continue;
-        g.cats[g.cat_count++] = c;
+        g.cats[g.cat_count] = c;
+        g.cat_generation[g.cat_count] = 0;
+        character_generation(c, g.cat_generation[g.cat_count]);
+        ++g.cat_count;
     }
     g.snapped      = true;
     g.snapped_list = list;
@@ -1022,7 +1028,7 @@ void snapshot_cats(void* turn_control) {
         strcpy_s(bcls[i], "?");
         if (mem_read((const uint8_t*)g.cats[i] + kChar_Brain, &brain, sizeof(brain)) && brain)
             rtti_class_name(brain, bcls[i], sizeof(bcls[i]));
-        g.human_cat[i] = (strstr(bcls[i], "PlayerBrain") != nullptr);
+        g.human_cat[i] = has_player_brain(bcls[i]);
         if (g.human_cat[i]) ++g.humans;
     }
 
@@ -1567,7 +1573,7 @@ uint32_t pend_purge_retired() {
 
 // Pops the oldest pending action for `cat`, if any. Actions for different cats
 // can legitimately be in flight at once, so this is not a plain FIFO pop.
-bool pend_take(uint8_t cat, ActionMsg& out) {
+bool pend_take(uint32_t cat, ActionMsg& out) {
     for (uint32_t i = 0; i < g.pend_count; ++i) {
         uint32_t slot = (g.pend_head + i) % kMaxPending;
         if (g.pending[slot].actor != cat) continue;
@@ -1577,6 +1583,7 @@ bool pend_take(uint8_t cat, ActionMsg& out) {
         // the wrong battle -- the same bug battle identity exists to stop, one
         // layer down.
         if (g.pending[slot].battle_id != g.battles.current) continue;
+        if (cat >= kFirstSpawnActor && g.pending[slot].turn != g.turn) continue;
         out = g.pending[slot];
         // Close the gap by shifting the entries behind it forward one.
         for (uint32_t j = i; j + 1 < g.pend_count; ++j) {
@@ -2164,7 +2171,6 @@ bool lockstep_in_battle() { return g.active && g.snapped && !g.halted; }
 void lockstep_trace_cast_passives(const void* ability, const char* gon_name) {
     if (!tune::kStateTrace || !t_battle_thread || !lockstep_in_battle() || !ability) return;
     // Ability::trigger uses Ability::character for the cast, including delayed triggers.
-    constexpr uintptr_t kAbility_Character = 0x10;
     const void* actor = nullptr;
     if (!mem_read(static_cast<const uint8_t*>(ability) + kAbility_Character,
                   &actor, sizeof(actor)) || !actor) return;
@@ -2181,11 +2187,6 @@ void lockstep_trace_damage(void* target, const void* damage, uintptr_t caller_rv
         return;
     }
 
-    constexpr uintptr_t kSource = 0x00;
-    constexpr uintptr_t kAbilityAndPassive = 0x20;
-    constexpr uintptr_t kSpeculativeFlags = 0x5B;
-    constexpr uintptr_t kTile = 0x9C;
-
     const auto* d = static_cast<const uint8_t*>(damage);
     const auto* c = static_cast<const uint8_t*>(target);
     uint8_t flags = 0;
@@ -2195,11 +2196,11 @@ void lockstep_trace_damage(void* target, const void* damage, uintptr_t caller_rv
     int32_t tile[2] = {};
     int32_t before[3] = {};
     uint64_t generation = 0;
-    if (!mem_read(d + kSpeculativeFlags, &flags, sizeof(flags)) || (flags & 1) ||
-        !mem_read(d + kSource, &source, sizeof(source)) ||
-        !mem_read(d + kAbilityAndPassive, origins, sizeof(origins)) ||
+    if (!mem_read(d + kDamage_SpeculativeFlags, &flags, sizeof(flags)) || (flags & 1) ||
+        !mem_read(d + kDamage_Source, &source, sizeof(source)) ||
+        !mem_read(d + kDamage_AbilityAndPassive, origins, sizeof(origins)) ||
         !mem_read(d + kDamage_Type, input, sizeof(input)) ||
-        !mem_read(d + kTile, tile, sizeof(tile)) ||
+        !mem_read(d + kDamage_Tile, tile, sizeof(tile)) ||
         !mem_read(c + kChar_HP, before, sizeof(before)) ||
         !mem_read(c - sizeof(generation), &generation, sizeof(generation))) {
         receive_damage(target, damage);
@@ -2330,13 +2331,12 @@ bool lockstep_trace_backstab(void* target, uint64_t direction, uint64_t tile,
 // The three-way shape is the control split's, deliberately: AI cats are decided
 // locally on BOTH peers, so they are neither published nor drawn. Treating one
 // as remote would paint a preview over a cat that is about to move on its own.
-bool lockstep_aim_subject(const void* character, uint8_t& cat, bool& peer_owns) {
+bool lockstep_aim_subject(const void* character, uint32_t& cat, bool& peer_owns) {
     if (!g.active || !g.snapped || !character) return false;
-    const uint8_t i = cat_index_of(character);
-    if (i == kNoCat)     return false;   // a summon: in nobody's roster
-    if (!g.human_cat[i]) return false;   // an AI cat: both peers drive it
-    cat       = i;
-    peer_owns = !g.local_cat[i];
+    const auto control = actor_control(character);
+    if (!control.human || control.id == kNoActor) return false;
+    cat       = control.id;
+    peer_owns = !control.local;
     return true;
 }
 
@@ -2423,9 +2423,13 @@ uint32_t lockstep_preview_facing_count() { return g_pf.restored; }
 // the whole cat state -- the same struct the per-turn hash uses.
 
 struct StateFence {
-    CatState snap[kMaxCats]{};
-    bool     got[kMaxCats]{};
-    uint32_t count = 0;
+    struct Sample {
+        const void* character;
+        uint64_t generation;
+        CatState state;
+    };
+    std::vector<const void*> live;
+    std::vector<Sample> samples;
     bool     armed = false;
     uint32_t hits  = 0;     // cats that moved, ever, this session
     bool     said  = false;
@@ -2433,21 +2437,27 @@ struct StateFence {
 
 StateFence g_sf;
 
+bool read_fence_roster() {
+    const auto* list = static_cast<const uint8_t*>(g.snapped_list);
+    uint32_t count = 0;
+    const void* data = nullptr;
+    if (!list || !mem_read(list + kList_Count, &count, sizeof(count)) || count > 4096 ||
+        !mem_read(list + kList_Data, &data, sizeof(data)) || !data)
+        return false;
+    g_sf.live.resize(count);
+    return count == 0 || mem_read(data, g_sf.live.data(), count * sizeof(void*));
+}
+
 void lockstep_state_fence_begin() {
     g_sf.armed = false;
-    if (!g.active || !g.snapped || g.halted) return;
-    g_sf.count = g.cat_count > kMaxCats ? kMaxCats : g.cat_count;
-
-    uint32_t live = 0, appeared = 0;
-    bool still_in[kMaxCats] = {};
-    const bool have_mem = snapshot_membership(g.snapped_list, live, still_in, appeared);
-
-    for (uint32_t i = 0; i < g_sf.count; ++i) {
-        if (have_mem && !still_in[i]) {
-            g_sf.got[i] = false;
-            continue;
-        }
-        g_sf.got[i] = read_cat_state(g.cats[i], g_sf.snap[i], true);
+    if (!g.active || !g.snapped || g.halted || !read_fence_roster()) return;
+    g_sf.samples.clear();
+    g_sf.samples.reserve(g_sf.live.size());
+    for (const void* character : g_sf.live) {
+        StateFence::Sample sample{character, 0, {}};
+        if (character_generation(character, sample.generation) &&
+            read_cat_state(character, sample.state, true))
+            g_sf.samples.push_back(sample);
     }
     g_sf.armed = true;
 }
@@ -2456,18 +2466,18 @@ uint32_t lockstep_state_fence_end(const char* what) {
     if (!g_sf.armed) return 0;
     g_sf.armed = false;
 
-    uint32_t live = 0, appeared = 0;
-    bool still_in[kMaxCats] = {};
-    const bool have_mem = snapshot_membership(g.snapped_list, live, still_in, appeared);
+    if (!read_fence_roster()) return 0;
 
     uint32_t moved = 0;
-    for (uint32_t i = 0; i < g_sf.count; ++i) {
-        if (!g_sf.got[i]) continue;
-        if (have_mem && !still_in[i]) continue;
+    for (const auto& sample : g_sf.samples) {
+        const void* character = sample.character;
+        if (std::find(g_sf.live.begin(), g_sf.live.end(), character) == g_sf.live.end()) continue;
+        uint64_t generation = 0;
         CatState now{};
-        if (!read_cat_state(g.cats[i], now, true)) continue;
+        if (!character_generation(character, generation) || generation != sample.generation ||
+            !read_cat_state(character, now, true)) continue;
 
-        const CatState& was = g_sf.snap[i];
+        const CatState& was = sample.state;
         const bool face_moved = (now.fx != was.fx || now.fy != was.fy);
         // memcmp would fold facing in with the rest; compare the fields that
         // cannot be put back separately, so the log can say which kind it was.
@@ -2484,18 +2494,18 @@ uint32_t lockstep_state_fence_end(const char* what) {
             // Putting it back is correct here for the same reason it is correct
             // in the aim-preview freeze: the only facing either peer may read
             // is the one an action wrote.
-            mem_write((uint8_t*)g.cats[i] + kChar_Facing,     &was.fx, sizeof(was.fx));
-            mem_write((uint8_t*)g.cats[i] + kChar_Facing + 4, &was.fy, sizeof(was.fy));
+            mem_write((uint8_t*)character + kChar_Facing,     &was.fx, sizeof(was.fx));
+            mem_write((uint8_t*)character + kChar_Facing + 4, &was.fy, sizeof(was.fy));
         }
 
         if (!g_sf.said) {
             g_sf.said = true;
             log_line_lvl(rest_moved ? LogLevel::Error : LogLevel::Warn, "LOCKSTEP",
-                         "!! %s moved cat %u's state: face (%d,%d)->(%d,%d)%s "
+                         "!! %s moved character %p's state: face (%d,%d)->(%d,%d)%s "
                          "hp %d->%d tile (%d,%d)->(%d,%d) dead %u->%u. Facing is "
                          "put back; the rest is NOT, because a value invented "
                          "here would hide a divergence rather than fix one.",
-                     what, i, was.fx, was.fy, now.fx, now.fy,
+                     what, character, was.fx, was.fy, now.fx, now.fy,
                      face_moved ? " (restored)" : "",
                      was.hp, now.hp, was.tx, was.ty, now.tx, now.ty,
                      (unsigned)was.dead, (unsigned)now.dead);
@@ -2684,6 +2694,7 @@ void lockstep_pump() {
             case MSG_HOUSE_INTERSTITIALS:
             case MSG_HOUSE_POOP_POP:
             case MSG_HOUSE_FURNITURE:
+            case MSG_HOUSE_PIPE:
                 house_on_message(m.from, m);
                 break;
 
@@ -2837,12 +2848,24 @@ bool lockstep_on_brain_poll(void* brain, void* out) {
     if (!g.snapped) return false;
 
     const void* actor = nullptr;
-    if (!mem_read((const uint8_t*)brain + kBrain_Owner, &actor, sizeof(actor)) || !actor)
+    if (!mem_read((const uint8_t*)brain + kBrain_Character, &actor, sizeof(actor)) || !actor)
         return false;
 
-    uint8_t cat = cat_index_of(actor);
-    g.local_actor = (cat != kNoCat) && g.local_cat[cat];
+    g.local_actor = actor_control(actor).local;
     return false;
+}
+
+void lockstep_on_spawn_character(const void* spawner, const void* child) {
+    if (!g.active || !g.snapped) return;
+    uint64_t child_generation = 0, source_generation = 0;
+    if (!character_generation(child, child_generation)) return;
+
+    uint8_t owner = kNoCat;
+    if (character_generation(spawner, source_generation))
+        owner = spawn_owner_slot(spawner, source_generation);
+    // Keep provenance for eggs and other AI actors as well. They can spawn a
+    // human actor later, even after their original owner has left the board.
+    g.spawns.record(child, child_generation, owner);
 }
 
 bool lockstep_pre_player_choice(void* brain, void* out) {
@@ -2855,13 +2878,17 @@ bool lockstep_pre_player_choice(void* brain, void* out) {
     if (!g.snapped) return false;
 
     const void* actor = nullptr;
-    if (!mem_read((const uint8_t*)brain + kBrain_Owner, &actor, sizeof(actor)) || !actor)
+    if (!mem_read((const uint8_t*)brain + kBrain_Character, &actor, sizeof(actor)) || !actor)
         return false;
 
-    uint8_t cat = cat_index_of(actor);
-    g.local_actor = (cat != kNoCat) && g.local_cat[cat];
-    if (cat == kNoCat) return false;
-    if (!g.human_cat[cat]) return false;
+    const auto control = actor_control(actor, /*requesting_input=*/true);
+    g.local_actor = control.local;
+    if (control.id == kNoActor) {
+        halt("could not identify the character requesting player input");
+        write_ta_none(out);
+        return true;
+    }
+    const uint32_t cat = control.id;
 
     // The join barrier -- human input only. AI cats and passive/aura overrides
     // (Fear, Charm, etc.) run deterministically in Brain::GetChoice before
@@ -2878,7 +2905,7 @@ bool lockstep_pre_player_choice(void* brain, void* out) {
     Guard guard;
 
     // --- our cat: replay catch-up if queued, otherwise let PlayerBrain run --
-    if (g.local_cat[cat]) {
+    if (control.local) {
         ActionMsg replayed{};
         if (pend_take(cat, replayed)) {
             log_line("LOCKSTEP", "<= catch-up: replaying our own cat %u's turn-%u "
@@ -2904,11 +2931,12 @@ void lockstep_post_player_choice(void* brain, void* out) {
     if (!g.active || g.halted || !g.snapped || !brain || !out) return;
 
     const void* actor = nullptr;
-    if (!mem_read((const uint8_t*)brain + kBrain_Owner, &actor, sizeof(actor)) || !actor)
+    if (!mem_read((const uint8_t*)brain + kBrain_Character, &actor, sizeof(actor)) || !actor)
         return;
 
-    uint8_t cat = cat_index_of(actor);
-    if (cat == kNoCat || !g.human_cat[cat] || !g.local_cat[cat]) return;
+    const auto control = actor_control(actor);
+    if (control.id == kNoActor || !control.local) return;
+    const uint32_t cat = control.id;
 
     Guard guard;
     if (g.outstanding) return;
@@ -2975,7 +3003,7 @@ void lockstep_post_player_choice(void* brain, void* out) {
 // on a mismatch -- has to be identical for both, because a replayed decision is
 // exactly as authoritative as a live one.
 static void apply_remote(const ActionMsg& msg, const void* actor, void* out) {
-    const uint8_t cat = msg.actor;
+    const uint32_t cat = msg.actor;
 
     TurnAction a{};
     memset(&a, 0, sizeof(a));
@@ -3060,11 +3088,7 @@ void lockstep_on_applied(const void* action, const void* actor) {
     Guard guard;
     g.outstanding = false;
 
-    // A cat outside the snapshot is a summon, which both peers generate
-    // locally; nothing to account for. Inside it, this is where a per-action
-    // cross-check would go once the state hash covers Character fields.
-    uint8_t cat = cat_index_of(who);
-    if (cat != kNoCat && g.local_cat[cat]) ++g.stats.applied;
+    if (g.snapped && actor_control(who).local) ++g.stats.applied;
 }
 
 void lockstep_turn_boundary(void* turn_control) {
@@ -3236,10 +3260,8 @@ bool     lockstep_local_actor(){ return g.active && g.snapped && g.local_actor; 
 
 bool lockstep_peer_owns_character(const void* character) {
     if (!g.active || !g.snapped || !character) return false;
-    const uint8_t cat = cat_index_of(character);
-    if (cat == kNoCat)      return false;   // a summon: nobody's, both AIs drive it
-    if (!g.human_cat[cat])  return false;   // an AI cat: decided locally on both
-    return !g.local_cat[cat];
+    const auto control = actor_control(character);
+    return control.human && !control.local;
 }
 
 // Called by the map layer from BOTH peers as they enter a node -- the host from
@@ -3263,6 +3285,7 @@ void lockstep_leave_run() {
     g.state_hash_on = false;
     g.control_checked = false;
     g.cat_count = 0;
+    g.spawns.clear();
     g.pend_head = g.pend_count = 0;
     g.sent_log_n = 0;
     g.sent_log_full = false;

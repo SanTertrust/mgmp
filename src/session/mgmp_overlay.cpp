@@ -1809,4 +1809,20 @@ void overlay_on_ping(uint8_t from, const ScreenPingMsg& p) {
     add_mark(from, p.kind, p.in_house, p.nx, p.ny, p.wx, p.wy, GetTickCount64());
 }
 
+bool overlay_owner_pointer(float* out_nx, float* out_ny) {
+    if (!out_nx || !out_ny) return false;
+    if (!net_active()) return false;
+    const uint8_t self = net_self();
+    const uint64_t now = GetTickCount64();
+    for (uint8_t i = 0; i < kMaxPeers; ++i) {
+        if (i == self) continue;
+        const Peer& p = g.peers[i];
+        if (!p.have || !p.owns_turn || now - p.at > kStaleMs) continue;
+        *out_nx = p.placed ? p.cx : p.nx;
+        *out_ny = p.placed ? p.cy : p.ny;
+        return true;
+    }
+    return false;
+}
+
 } // namespace mgmp

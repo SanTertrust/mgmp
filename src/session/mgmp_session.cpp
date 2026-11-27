@@ -625,6 +625,16 @@ void session_update() {
                 break;
 
             case MSG_REFUSE:
+                if (net_role() == NetRole::Host) {
+                    // A mismatched client refusing our HELLO must not wedge the
+                    // host into Phase::Refused -- otherwise session_update stops
+                    // draining the queue and no reconnecting client can ever
+                    // complete a handshake until the host restarts.
+                    log_line("SESSION", "!! peer %u refused us: %s (dropping peer, host stays up)",
+                             (unsigned)m.from, m.refuse);
+                    net_disconnect_peer(m.from);
+                    break;
+                }
                 g.phase = Phase::Refused;
                 set_status("peer refused: %s", m.refuse);
                 log_line("SESSION", "!! peer refused us: %s", m.refuse);

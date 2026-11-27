@@ -105,4 +105,8 @@ void aim_on_peer_disconnected(uint8_t peer);
 uint32_t aim_sent();
 uint32_t aim_drawn();
 
+// If a remote peer is currently aiming an ability for `character` in the active
+// battle, writes its (slot_kind, slot_index) and returns true.
+bool aim_active_slot_for(const void* character, uint8_t* out_kind, uint8_t* out_index);
+
 } // namespace mgmp

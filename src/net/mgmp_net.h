@@ -84,6 +84,7 @@ struct NetMsg {
         HouseInterstitialsMsg house_interstitials;
         HousePoopPopMsg  house_poop_pop;
         HouseFurnitureMsg house_furniture;
+        HousePipeMsg     house_pipe;
         ScreenPingMsg    screen_ping;
         DraftPickMsg     draft_pick;
         DraftStateMsg    draft_state;
@@ -217,6 +218,8 @@ bool net_send_house_interstitials_to(uint8_t peer, const HouseInterstitialsMsg& 
 bool net_send_house_poop_pop(const HousePoopPopMsg& m);
 bool net_send_house_furniture(const HouseFurnitureMsg& m);
 bool net_send_house_furniture_to(uint8_t peer, const HouseFurnitureMsg& m);
+bool net_send_house_pipe(const HousePipeMsg& m);
+bool net_send_house_pipe_to(uint8_t peer, const HousePipeMsg& m);
 bool net_send_screen_ping(const ScreenPingMsg& m);
 bool net_send_draft_pick(const DraftPickMsg& m);
 bool net_send_draft_state(const DraftStateMsg& m);

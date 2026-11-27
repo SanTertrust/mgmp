@@ -1,6 +1,7 @@
 #include "mgmp_invsync.h"
 
 #include "mgmp_addresses.h"
+#include "mgmp_bytestream.h"
 #include "mgmp_resolve.h"
 #include "mgmp_hooks.h"     // hooks_is_live, for the two blob hooks this needs
 #include "mgmp_config.h"
@@ -18,20 +19,7 @@
 namespace mgmp {
 namespace {
 
-// --- ByteStream, the fields the two hooks touch -----------------------------
-//
-// Same struct mgmp_catsync documents at length; only the offsets used here are
-// repeated. The load-side write pattern is copied field for field off
-// sub_14022C620's own success path, which is the best possible specification of
-// what the game expects a freshly-retrieved stream to look like.
-constexpr uintptr_t kBS_Mode     = 0x00;  // u32: 0 = read, 1 = write, 2 = file
-constexpr uintptr_t kBS_WriteLen = 0x0C;  // u32
-constexpr uintptr_t kBS_WriteBuf = 0x10;  // void*  (game heap)
-constexpr uintptr_t kBS_ReadBuf  = 0x18;  // void*
-constexpr uintptr_t kBS_ReadOwns = 0x20;  // u8 -- leave 0 on a BORROWED buffer
-constexpr uintptr_t kBS_ReadLen  = 0x24;  // u32
-constexpr uintptr_t kBS_ReadPos  = 0x28;  // u32
-constexpr uintptr_t kBS_WritePos = 0x2C;  // u32
+// ByteStream layout (kBS_*) lives in mgmp_bytestream.h.
 
 // MSVC std::string. 32 bytes: a 16-byte union that is either the characters
 // themselves or a pointer to them, then the length, then the capacity. Capacity
